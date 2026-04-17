@@ -279,14 +279,14 @@ impl BrowserTestRunner {
     ///
     /// Returns an error if chromedriver cannot be started or terminated, if a session cannot be
     /// created, or if any test fails.
-    pub async fn run<C, E>(
+    pub async fn run<Context, TestError>(
         &self,
-        context: &C,
-        tests: BrowserTests<C, E>,
+        context: &Context,
+        tests: BrowserTests<Context, TestError>,
     ) -> Result<(), Report<BrowserTestError>>
     where
-        C: Sync + ?Sized,
-        E: ?Sized + 'static,
+        Context: Sync + ?Sized,
+        TestError: ?Sized + 'static,
     {
         if tests.is_empty() {
             tracing::info!("Skipping browser test run because no tests were provided.");
@@ -340,15 +340,15 @@ impl BrowserTestRunner {
     }
 
     /// Runs `tests` while respecting this runner's `parallelism` configuration.
-    async fn run_tests<C, E>(
+    async fn run_tests<Context, TestError>(
         &self,
         chromedriver: &Chromedriver,
-        context: &C,
-        tests: BrowserTests<C, E>,
+        context: &Context,
+        tests: BrowserTests<Context, TestError>,
     ) -> Result<(), Report<BrowserTestError>>
     where
-        C: Sync + ?Sized,
-        E: ?Sized + 'static,
+        Context: Sync + ?Sized,
+        TestError: ?Sized + 'static,
     {
         let max_parallel_tests = self.parallelism.max_parallel_tests();
         let executions = browser_test_executions(

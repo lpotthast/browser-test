@@ -8,10 +8,10 @@ use crate::{BrowserTimeouts, ElementQueryWaitConfig};
 
 /// A browser test that can run against one fresh `WebDriver` session.
 #[async_trait]
-pub trait BrowserTest<C = (), E = rootcause::markers::Dynamic>: Send + Sync
+pub trait BrowserTest<Context = (), TestError = rootcause::markers::Dynamic>: Send + Sync
 where
-    C: Sync + ?Sized,
-    E: ?Sized,
+    Context: Sync + ?Sized,
+    TestError: ?Sized,
 {
     /// A human-readable test name for logs and failure context.
     ///
@@ -34,7 +34,7 @@ where
     }
 
     /// Execute the test body.
-    async fn run(&self, driver: &WebDriver, context: &C) -> Result<(), Report<E>>;
+    async fn run(&self, driver: &WebDriver, context: &Context) -> Result<(), Report<TestError>>;
 }
 
 /// A collection of browser tests for [`crate::BrowserTestRunner`].
@@ -68,18 +68,18 @@ where
 ///     .with(OpensHomePage)
 ///     .with(SearchWorks);
 /// ```
-pub struct BrowserTests<C = (), E = rootcause::markers::Dynamic>
+pub struct BrowserTests<Context = (), TestError = rootcause::markers::Dynamic>
 where
-    C: Sync + ?Sized,
-    E: ?Sized,
+    Context: Sync + ?Sized,
+    TestError: ?Sized,
 {
-    tests: Vec<Box<dyn BrowserTest<C, E>>>,
+    tests: Vec<Box<dyn BrowserTest<Context, TestError>>>,
 }
 
-impl<C, E> BrowserTests<C, E>
+impl<Context, TestError> BrowserTests<Context, TestError>
 where
-    C: Sync + ?Sized,
-    E: ?Sized,
+    Context: Sync + ?Sized,
+    TestError: ?Sized,
 {
     /// Creates an empty browser test collection.
     #[must_use]
@@ -91,7 +91,7 @@ where
     #[must_use]
     pub fn with<T>(mut self, test: T) -> Self
     where
-        T: BrowserTest<C, E> + 'static,
+        T: BrowserTest<Context, TestError> + 'static,
     {
         self.push(test);
         self
@@ -100,7 +100,7 @@ where
     /// Adds a test to the collection.
     pub fn push<T>(&mut self, test: T) -> &mut Self
     where
-        T: BrowserTest<C, E> + 'static,
+        T: BrowserTest<Context, TestError> + 'static,
     {
         self.tests.push(Box::new(test));
         self
@@ -112,25 +112,25 @@ where
         self.tests.is_empty()
     }
 
-    pub(crate) fn into_vec(self) -> Vec<Box<dyn BrowserTest<C, E>>> {
+    pub(crate) fn into_vec(self) -> Vec<Box<dyn BrowserTest<Context, TestError>>> {
         self.tests
     }
 }
 
-impl<C, E> Default for BrowserTests<C, E>
+impl<Context, TestError> Default for BrowserTests<Context, TestError>
 where
-    C: Sync + ?Sized,
-    E: ?Sized,
+    Context: Sync + ?Sized,
+    TestError: ?Sized,
 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<C, E> fmt::Debug for BrowserTests<C, E>
+impl<Context, TestError> fmt::Debug for BrowserTests<Context, TestError>
 where
-    C: Sync + ?Sized,
-    E: ?Sized,
+    Context: Sync + ?Sized,
+    TestError: ?Sized,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BrowserTests")
@@ -139,15 +139,15 @@ where
     }
 }
 
-struct BrowserTestNames<'a, C, E>(&'a [Box<dyn BrowserTest<C, E>>])
+struct BrowserTestNames<'a, Context, TestError>(&'a [Box<dyn BrowserTest<Context, TestError>>])
 where
-    C: Sync + ?Sized,
-    E: ?Sized;
+    Context: Sync + ?Sized,
+    TestError: ?Sized;
 
-impl<C, E> fmt::Debug for BrowserTestNames<'_, C, E>
+impl<Context, TestError> fmt::Debug for BrowserTestNames<'_, Context, TestError>
 where
-    C: Sync + ?Sized,
-    E: ?Sized,
+    Context: Sync + ?Sized,
+    TestError: ?Sized,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_list()

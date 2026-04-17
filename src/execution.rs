@@ -12,18 +12,18 @@ use crate::{BrowserTest, BrowserTestError, BrowserTests, BrowserTimeouts, Elemen
 pub(crate) type ChromeCapabilitiesSetup =
     dyn Fn(&mut ChromeCapabilities) -> WebDriverResult<()> + Send + Sync + 'static;
 
-pub(crate) fn browser_test_executions<'a, C, E>(
+pub(crate) fn browser_test_executions<'a, Context, TestError>(
     chromedriver: &'a Chromedriver,
     visible: bool,
     webdriver_timeouts: Option<&'a BrowserTimeouts>,
     element_query_wait: Option<&'a ElementQueryWaitConfig>,
     chrome_capabilities_setups: &'a [Arc<ChromeCapabilitiesSetup>],
-    context: &'a C,
-    tests: BrowserTests<C, E>,
+    context: &'a Context,
+    tests: BrowserTests<Context, TestError>,
 ) -> impl Iterator<Item = BrowserTestExecutionFuture<'a>> + 'a
 where
-    C: Sync + ?Sized + 'a,
-    E: ?Sized + 'static,
+    Context: Sync + ?Sized + 'a,
+    TestError: ?Sized + 'static,
 {
     tests
         .into_vec()
@@ -44,19 +44,19 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn execute_browser_test<C, E>(
+async fn execute_browser_test<Context, TestError>(
     chromedriver: &Chromedriver,
     visible: bool,
     webdriver_timeouts: Option<&BrowserTimeouts>,
     element_query_wait: Option<&ElementQueryWaitConfig>,
     chrome_capabilities_setups: &[Arc<ChromeCapabilitiesSetup>],
-    context: &C,
+    context: &Context,
     test_index: usize,
-    test: Box<dyn BrowserTest<C, E>>,
+    test: Box<dyn BrowserTest<Context, TestError>>,
 ) -> BrowserTestExecution
 where
-    C: Sync + ?Sized,
-    E: ?Sized + 'static,
+    Context: Sync + ?Sized,
+    TestError: ?Sized + 'static,
 {
     // We use test_name in the panic report. We need a fallback for the case that `.name()` panics.
     let mut test_name = format!("unnamed test at index {test_index}");
@@ -115,24 +115,24 @@ where
     BrowserTestExecution { test_index, result }
 }
 
-fn resolve_webdriver_timeouts<C, E>(
-    test: &dyn BrowserTest<C, E>,
+fn resolve_webdriver_timeouts<Context, TestError>(
+    test: &dyn BrowserTest<Context, TestError>,
     runner_timeouts: Option<&BrowserTimeouts>,
 ) -> Option<BrowserTimeouts>
 where
-    C: Sync + ?Sized,
-    E: ?Sized,
+    Context: Sync + ?Sized,
+    TestError: ?Sized,
 {
     test.timeouts().or_else(|| runner_timeouts.copied())
 }
 
-fn resolve_element_query_wait<C, E>(
-    test: &dyn BrowserTest<C, E>,
+fn resolve_element_query_wait<Context, TestError>(
+    test: &dyn BrowserTest<Context, TestError>,
     runner_wait: Option<&ElementQueryWaitConfig>,
 ) -> Option<ElementQueryWaitConfig>
 where
-    C: Sync + ?Sized,
-    E: ?Sized,
+    Context: Sync + ?Sized,
+    TestError: ?Sized,
 {
     test.element_query_wait().or_else(|| runner_wait.copied())
 }
