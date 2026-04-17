@@ -18,7 +18,7 @@ side of the integration test.
 - Gives every test a fresh `WebDriver` session.
 - Runs sequentially and fails fast by default.
 - Supports bounded parallel runs, run-all failure reporting, visible Chrome, manual pauses,
-  WebDriver timeouts, element-query wait configuration, Chrome capability customization, and recent
+  `WebDriver` timeouts, element-query wait configuration, Chrome capability customization, and recent
   browser-driver output on failures.
 
 ## Installation
@@ -32,7 +32,7 @@ rootcause = "0.12"
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
 ```
 
-`browser-test` currently uses `thirtyfour` as its WebDriver backend. Prefer the re-exported `thirtyfour` types so your
+`browser-test` currently uses `thirtyfour` as its `WebDriver` backend. Prefer the re-exported `thirtyfour` types so your
 tests use the same version as the runner:
 
 ```rust
