@@ -11,9 +11,8 @@ install-tools:
   cargo +stable install --locked cargo-whatfeatures
   cargo +stable install --locked cargo-upgrades
   cargo +stable install --locked cargo-edit
-  cargo +stable install --locked cargo-msrv
 
-# Find the minimum supported rust version
+# Find the minimum supported rust version.
 msrv:
     cargo msrv find
 

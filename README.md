@@ -27,7 +27,7 @@ Add `browser-test` to the crate that owns your browser integration tests:
 
 ```toml
 [dev-dependencies]
-browser-test = "0.1"
+browser-test = "0.2"
 rootcause = "0.12"
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
 ```
@@ -85,7 +85,7 @@ impl BrowserTest<Context> for PageTitleTest {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Report<BrowserTestError>> {
-    tracing_subscriber::fmt::init();
+    //tracing_subscriber::fmt::init();
 
     let context = Context {
         base_url: "https://www.wikipedia.org".into(),
@@ -102,7 +102,7 @@ async fn main() -> Result<(), Report<BrowserTestError>> {
 `BrowserTestRunner::run(...)` returns `Report<BrowserTestError>`, so runner failures, test failures,
 and panics get useful context.
 
-Browser tests must run on a multi-threaded Tokio runtime because the Chrome for Testing manager requires it.
+Browser tests must run on a multithreaded Tokio runtime because the Chrome for Testing manager requires it.
 Use `#[tokio::test(flavor = "multi_thread")]` for integration tests.
 
 ## Local Debugging
