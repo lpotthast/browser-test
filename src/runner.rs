@@ -267,9 +267,8 @@ impl BrowserTestRunner {
     /// [`Self::with_failure_policy`] to execute every test and return all failures as child reports
     /// on one aggregate report.
     ///
-    /// Non-empty runs require a multi-threaded Tokio runtime because
-    /// [`Chromedriver::run`] requires one. Use `#[tokio::test(flavor = "multi_thread")]` for
-    /// browser tests.
+    /// Non-empty runs require a multithreaded Tokio runtime because [`Chromedriver::run`]
+    /// requires one. Use `#[tokio::test(flavor = "multi_thread")]` for browser tests.
     ///
     /// # Parameters
     ///
