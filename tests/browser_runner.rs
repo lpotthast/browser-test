@@ -10,7 +10,7 @@ use std::{
 };
 
 use assertr::prelude::*;
-use browser_test::thirtyfour::WebDriver;
+use browser_test::thirtyfour::{ChromiumLikeCapabilities, WebDriver};
 use browser_test::{
     BrowserTest, BrowserTestError, BrowserTestFailurePolicy, BrowserTestParallelism,
     BrowserTestRunner, BrowserTests, BrowserTimeouts, ElementQueryWaitConfig, async_trait,
@@ -190,10 +190,33 @@ impl BrowserTest<IntegrationContext, IntegrationTestError> for MetadataPanicTest
     }
 }
 
+/// Build a `BrowserTestRunner` pre-configured with the Chrome flags our CI environment needs. Both
+/// flags are harmless when set locally, so we apply them unconditionally instead of branching on
+/// `CI`.
+fn runner() -> BrowserTestRunner {
+    BrowserTestRunner::new()
+        .with_chrome_capabilities(|caps| {
+            // `--no-sandbox` disables Chrome's child-process sandboxing. User-mode tarball
+            // extraction can't set the setuid-root bit on `chrome_sandbox` (the privileged helper
+            // Chrome execs to install the sandbox), and CI kernels often also restrict
+            // unprivileged user namespaces. Without either layer, Chrome exits before chromedriver
+            // opens a session.
+            caps.add_arg("--no-sandbox")?;
+
+            // `--disable-dev-shm-usage` makes Chrome place its IPC shared-memory segments under
+            // `/tmp` instead of `/dev/shm`. CI runners typically expose `/dev/shm` tiny tmpfs,
+            // which Chrome can exhaust during session startup.
+            caps.add_arg("--disable-dev-shm-usage")?;
+            Ok(())
+        })
+        .with_test_parallelism(BrowserTestParallelism::Sequential)
+        .with_failure_policy(BrowserTestFailurePolicy::RunAll)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn default_sequential_fail_fast_runs_page_title_test() -> RunnerResult {
-    BrowserTestRunner::new()
+    runner()
         .run(
             &IntegrationContext::default(),
             BrowserTests::new().with(page_title_test("page title")),
@@ -204,7 +227,7 @@ async fn default_sequential_fail_fast_runs_page_title_test() -> RunnerResult {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn explicit_sequential_runs_page_title_test() -> RunnerResult {
-    BrowserTestRunner::new()
+    runner()
         .with_test_parallelism(BrowserTestParallelism::Sequential)
         .run(
             &IntegrationContext::default(),
@@ -216,7 +239,7 @@ async fn explicit_sequential_runs_page_title_test() -> RunnerResult {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn bounded_parallel_runs_page_title_tests() -> RunnerResult {
-    BrowserTestRunner::new()
+    runner()
         .with_test_parallelism(BrowserTestParallelism::Parallel(
             NonZeroUsize::new(2).expect("literal parallelism should be non-zero"),
         ))
@@ -232,7 +255,7 @@ async fn bounded_parallel_runs_page_title_tests() -> RunnerResult {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn run_all_runs_successful_page_title_tests() -> RunnerResult {
-    BrowserTestRunner::new()
+    runner()
         .with_failure_policy(BrowserTestFailurePolicy::RunAll)
         .run(
             &IntegrationContext::default(),
@@ -246,7 +269,7 @@ async fn run_all_runs_successful_page_title_tests() -> RunnerResult {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn run_all_reports_intentional_failure_and_runs_page_title_test() {
-    let err = BrowserTestRunner::new()
+    let err = runner()
         .with_failure_policy(BrowserTestFailurePolicy::RunAll)
         .run(
             &IntegrationContext::default(),
@@ -266,7 +289,7 @@ async fn run_all_reports_intentional_failure_and_runs_page_title_test() {
 #[serial]
 async fn run_all_reports_metadata_hook_panics_and_runs_remaining_page_title_test() {
     let started = Arc::new(AtomicUsize::new(0));
-    let err = BrowserTestRunner::new()
+    let err = runner()
         .with_failure_policy(BrowserTestFailurePolicy::RunAll)
         .run(
             &IntegrationContext::default(),
@@ -301,7 +324,7 @@ async fn run_all_reports_metadata_hook_panics_and_runs_remaining_page_title_test
 #[serial]
 async fn parallel_run_all_reports_panic_and_runs_remaining_page_title_tests() {
     let started = Arc::new(AtomicUsize::new(0));
-    let err = BrowserTestRunner::new()
+    let err = runner()
         .with_test_parallelism(BrowserTestParallelism::Parallel(
             NonZeroUsize::new(2).expect("literal parallelism should be non-zero"),
         ))
@@ -334,7 +357,7 @@ async fn parallel_run_all_reports_panic_and_runs_remaining_page_title_tests() {
 #[serial]
 async fn parallel_fail_fast_waits_for_running_page_title_test_without_starting_more() {
     let started = Arc::new(AtomicUsize::new(0));
-    let err = BrowserTestRunner::new()
+    let err = runner()
         .with_test_parallelism(BrowserTestParallelism::Parallel(
             NonZeroUsize::new(2).expect("literal parallelism should be non-zero"),
         ))
