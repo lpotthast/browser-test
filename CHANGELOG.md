@@ -22,6 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replaced `ElementQueryWaitConfig::into_thirtyfour_webdriver_config` with
   `ElementQueryWaitConfig::into_thirtyfour_poller`.
 
+### Added
+
+- Added a GitHub Actions CI workflow (`.github/workflows/ci.yml`) running `fmt`, `check`, `clippy`, unit tests,
+  integration tests, `build`, `doc`, and an MSRV check.
+- Added crates.io, docs.rs, CI status, MSRV, and license badges to the README.
+- Added the `## License` section to the README.
+
 ## [0.2.0] - 2026-05-09
 
 ### Changed

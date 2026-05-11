@@ -1,5 +1,11 @@
 # browser-test
 
+[![Crates.io](https://img.shields.io/crates/v/browser-test.svg)](https://crates.io/crates/browser-test)
+[![Docs.rs](https://docs.rs/browser-test/badge.svg)](https://docs.rs/browser-test)
+[![CI](https://github.com/lpotthast/browser-test/actions/workflows/ci.yml/badge.svg)](https://github.com/lpotthast/browser-test/actions/workflows/ci.yml)
+[![MSRV](https://img.shields.io/badge/MSRV-1.89.0-blue.svg)](https://github.com/lpotthast/browser-test/blob/main/Cargo.toml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/crates/l/browser-test.svg)](#license)
+
 `browser-test` is a small Rust crate for async browser-driven integration tests.
 
 It does not start or wait for your web app. Your test harness does that first, using `cargo run`,
@@ -198,3 +204,12 @@ Use `browser-test` directly when your test crate already owns app startup.
 Use `leptos-browser-test` when you want the Leptos test app lifecycle handled for you. It starts the
 test app, waits for the listening socket, keeps recent app stdout/stderr for startup failures, and
 then hands the base URL to `BrowserTestRunner`.
+
+## License
+
+Licensed under either of:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT License ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
