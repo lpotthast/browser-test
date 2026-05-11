@@ -1,6 +1,6 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
-use thirtyfour::{error::WebDriverResult, extensions::query::ElementPollerWithTimeout};
+use thirtyfour::extensions::query::{ElementPollerWithTimeout, IntoElementPoller};
 use typed_builder::TypedBuilder;
 
 /// Wait configuration used by thirtyfour element queries and element waits.
@@ -81,15 +81,8 @@ impl ElementQueryWaitConfig {
         self.interval
     }
 
-    pub(crate) fn into_thirtyfour_webdriver_config(
-        self,
-    ) -> WebDriverResult<thirtyfour::common::config::WebDriverConfig> {
-        thirtyfour::common::config::WebDriverConfig::builder()
-            .poller(Arc::new(ElementPollerWithTimeout::new(
-                self.timeout,
-                self.interval,
-            )))
-            .build()
+    pub(crate) fn into_thirtyfour_poller(self) -> impl IntoElementPoller + Send + Sync {
+        ElementPollerWithTimeout::new(self.timeout, self.interval)
     }
 }
 

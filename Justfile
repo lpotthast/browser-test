@@ -25,7 +25,7 @@ verify:
   cargo check
   cargo clippy -- -D warnings
   cargo clippy --all-targets --all-features -- -D warnings
-  cargo test
+  cargo test -- --no-capture
   cargo build
   cargo doc
 

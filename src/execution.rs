@@ -4,7 +4,7 @@ use chrome_for_testing_manager::{Chromedriver, Session};
 use futures_util::FutureExt as _;
 use rootcause::Report;
 use rootcause::prelude::ResultExt;
-use thirtyfour::{ChromeCapabilities, ChromiumLikeCapabilities, WebDriver, error::WebDriverResult};
+use thirtyfour::{ChromeCapabilities, ChromiumLikeCapabilities, error::WebDriverResult};
 
 use crate::scheduler::{BrowserTestExecution, BrowserTestExecutionFuture};
 use crate::{BrowserTest, BrowserTestError, BrowserTests, BrowserTimeouts, ElementQueryWaitConfig};
@@ -68,31 +68,25 @@ where
 
         tracing::info!("Executing browser test: {test_name}");
         chromedriver
-            .with_custom_session(
-                |caps: &mut ChromeCapabilities| {
-                    configure_chrome_capabilities(caps, visible, chrome_capabilities_setups)
-                },
-                async |session: &Session| {
-                    if let Some(timeout_configuration) = effective_timeouts
-                        .map(BrowserTimeouts::into_thirtyfour_timeout_configuration)
-                    {
-                        session.update_timeouts(timeout_configuration).await?;
-                    }
+            .session()
+            .with_caps(|caps: &mut ChromeCapabilities| {
+                configure_chrome_capabilities(caps, visible, chrome_capabilities_setups)
+            })
+            .with_config(|builder| match effective_element_query_wait {
+                Some(wait) => builder.poller(Arc::new(wait.into_thirtyfour_poller())),
+                None => builder,
+            })
+            .run(async |session: &Session| {
+                if let Some(timeout_configuration) =
+                    effective_timeouts.map(BrowserTimeouts::into_thirtyfour_timeout_configuration)
+                {
+                    session.update_timeouts(timeout_configuration).await?;
+                }
 
-                    let configured_driver: WebDriver;
-                    let driver: &WebDriver = if let Some(wait) = effective_element_query_wait {
-                        configured_driver =
-                            session.clone_with_config(wait.into_thirtyfour_webdriver_config()?);
-                        &configured_driver
-                    } else {
-                        session
-                    };
-
-                    test.run(driver, context)
-                        .await
-                        .map_err(Report::into_dynamic)
-                },
-            )
+                test.run(session, context)
+                    .await
+                    .map_err(Report::into_dynamic)
+            })
             .await
             .context_with(|| BrowserTestError::RunTest {
                 test_name: test_name.clone(),
@@ -169,7 +163,7 @@ mod tests {
 
     use assertr::prelude::*;
     use rootcause::Report;
-    use thirtyfour::BrowserCapabilitiesHelper;
+    use thirtyfour::{BrowserCapabilitiesHelper, WebDriver};
 
     use super::*;
 
