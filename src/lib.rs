@@ -19,9 +19,9 @@ mod wait;
 
 #[allow(deprecated)]
 pub use driver_output::BrowserDriverOutputConfig;
-pub use driver_output::DriverOutputConfig;
+pub use driver_output::{DriverOutputConfig, ResolvedDriverOutputConfig};
 pub use error::BrowserTestError;
-pub use pause::PauseConfig;
+pub use pause::{PauseConfig, ResolvedPauseConfig};
 pub use runner::{BrowserTestRunner, BrowserTestVisibility, ResolvedBrowserTestVisibility};
 pub use scheduler::{BrowserTestFailurePolicy, BrowserTestParallelism};
 pub use test_case::{BrowserTest, BrowserTests};

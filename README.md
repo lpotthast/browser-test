@@ -33,7 +33,7 @@ Add `browser-test` to the crate that owns your browser integration tests:
 
 ```toml
 [dev-dependencies]
-browser-test = "0.3"
+browser-test = "0.4"
 rootcause = "0.13"
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
 ```
@@ -120,11 +120,8 @@ use browser_test::{
     BrowserTestRunner, BrowserTestVisibility, DriverOutputConfig, PauseConfig,
 };
 
-let browser_visibility = BrowserTestVisibility::from_env().resolve();
-let run_headless = browser_visibility.is_headless();
-
 let runner = BrowserTestRunner::new()
-    .with_visibility(browser_visibility)
+    .with_visibility(BrowserTestVisibility::from_env())
     .with_pause(PauseConfig::from_env())
     .with_driver_output(DriverOutputConfig::from_env());
 ```
@@ -139,6 +136,7 @@ Use `0`/`1`, `false`/`true`, `no`/`yes`, `off`/`on` or `disabled`/`enabled` for 
 
 ## Common Configuration
 
+You can resolve `.from_env()` configs before passing them to the runner when adjacent setup needs the resolved value.
 Most runner options are builder methods:
 
 ```rust,no_run
@@ -150,10 +148,17 @@ use browser_test::{
     BrowserTimeouts, DriverOutputConfig, ElementQueryWaitConfig, PauseConfig,
 };
 
+let browser_visibility = BrowserTestVisibility::from_env().resolve();
+let run_headless = browser_visibility.is_headless();
+let pause = PauseConfig::from_env().resolve();
+let pause_enabled = pause.is_enabled();
+let driver_output = DriverOutputConfig::from_env().resolve();
+let driver_output_enabled = driver_output.is_enabled();
+
 let runner = BrowserTestRunner::new()
-    .with_visibility(BrowserTestVisibility::from_env())
-    .with_pause(PauseConfig::from_env())
-    .with_driver_output(DriverOutputConfig::from_env())
+    .with_visibility(browser_visibility)
+    .with_pause(pause)
+    .with_driver_output(driver_output)
     .with_failure_policy(BrowserTestFailurePolicy::RunAll)
     .with_test_parallelism(BrowserTestParallelism::Parallel(
         NonZeroUsize::new(2).expect("parallelism should be non-zero"),

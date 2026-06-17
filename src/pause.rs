@@ -13,15 +13,32 @@ pub(crate) const DEFAULT_PAUSE_ENV: &str = "BROWSER_TEST_PAUSE";
 /// Configuration for the manual pause before browser tests execute.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PauseConfig {
+    activation: PauseActivation,
+    message: Cow<'static, str>,
+    prompt: Cow<'static, str>,
+}
+
+/// Resolved configuration for the manual pause before browser tests execute.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPauseConfig {
     enabled: bool,
     message: Cow<'static, str>,
     prompt: Cow<'static, str>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+enum PauseActivation {
+    #[default]
+    Disabled,
+    Enabled,
+    FromEnvVar(String),
+    FromEnv,
+}
+
 impl Default for PauseConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            activation: PauseActivation::Disabled,
             message: "Browser test execution is paused.".into(),
             prompt: "Continue with tests? [y/N] ".into(),
         }
@@ -40,7 +57,10 @@ impl PauseConfig {
     /// The variable is considered enabled unless it is unset, empty, `0`, `false`, `no`, or `off`.
     #[must_use]
     pub fn from_env() -> Self {
-        Self::from_env_var(DEFAULT_PAUSE_ENV)
+        Self {
+            activation: PauseActivation::FromEnv,
+            ..Self::default()
+        }
     }
 
     /// Build a pause config from an environment variable.
@@ -49,7 +69,7 @@ impl PauseConfig {
     #[must_use]
     pub fn from_env_var(env_var: impl AsRef<str>) -> Self {
         Self {
-            enabled: env_flag_enabled(env_var),
+            activation: PauseActivation::FromEnvVar(env_var.as_ref().to_owned()),
             ..Self::default()
         }
     }
@@ -58,8 +78,60 @@ impl PauseConfig {
     #[must_use]
     pub fn enabled(enabled: bool) -> Self {
         Self {
-            enabled,
+            activation: PauseActivation::from_enabled(enabled),
             ..Self::default()
+        }
+    }
+
+    /// Set the message printed before the prompt.
+    #[must_use]
+    pub fn with_message(mut self, message: impl Into<Cow<'static, str>>) -> Self {
+        self.message = message.into();
+        self
+    }
+
+    /// Set the interactive prompt.
+    #[must_use]
+    pub fn with_prompt(mut self, prompt: impl Into<Cow<'static, str>>) -> Self {
+        self.prompt = prompt.into();
+        self
+    }
+
+    /// Resolve this config to an immediate pause config.
+    ///
+    /// Environment-backed configs read their environment variable when this method is called.
+    #[must_use]
+    pub fn resolve(&self) -> ResolvedPauseConfig {
+        ResolvedPauseConfig {
+            enabled: self.activation.resolve(),
+            message: self.message.clone(),
+            prompt: self.prompt.clone(),
+        }
+    }
+
+    /// Resolve this config and report whether the pause is enabled.
+    ///
+    /// Environment-backed configs read their environment variable when this method is called.
+    #[must_use]
+    pub fn is_enabled(&self) -> bool {
+        self.resolve().is_enabled()
+    }
+}
+
+impl ResolvedPauseConfig {
+    /// Build a disabled resolved pause config.
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self::enabled(false)
+    }
+
+    /// Build an enabled or disabled resolved pause config directly.
+    #[must_use]
+    pub fn enabled(enabled: bool) -> Self {
+        Self {
+            enabled,
+            message: "Browser test execution is paused.".into(),
+            prompt: "Continue with tests? [y/N] ".into(),
         }
     }
 
@@ -84,6 +156,35 @@ impl PauseConfig {
     }
 }
 
+impl PauseActivation {
+    const fn from_enabled(enabled: bool) -> Self {
+        if enabled {
+            Self::Enabled
+        } else {
+            Self::Disabled
+        }
+    }
+
+    fn resolve(&self) -> bool {
+        match self {
+            Self::Disabled => false,
+            Self::Enabled => true,
+            Self::FromEnvVar(env_var) => env_flag_enabled(env_var),
+            Self::FromEnv => env_flag_enabled(DEFAULT_PAUSE_ENV),
+        }
+    }
+}
+
+impl From<ResolvedPauseConfig> for PauseConfig {
+    fn from(config: ResolvedPauseConfig) -> Self {
+        Self {
+            activation: PauseActivation::from_enabled(config.enabled),
+            message: config.message,
+            prompt: config.prompt,
+        }
+    }
+}
+
 /// The user's choice after a pause.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PauseDecision {
@@ -95,7 +196,7 @@ pub(crate) enum PauseDecision {
 }
 
 pub(crate) async fn pause_if_requested(
-    config: PauseConfig,
+    config: ResolvedPauseConfig,
     hint: Option<&str>,
 ) -> Result<PauseDecision, Report<BrowserTestError>> {
     if !config.enabled {
@@ -105,7 +206,7 @@ pub(crate) async fn pause_if_requested(
 }
 
 async fn pause(
-    config: PauseConfig,
+    config: ResolvedPauseConfig,
     hint: Option<&str>,
 ) -> Result<PauseDecision, Report<BrowserTestError>> {
     let mut stdin = io::BufReader::new(io::stdin());
@@ -115,7 +216,7 @@ async fn pause(
 }
 
 async fn pause_with_io<R, W>(
-    config: PauseConfig,
+    config: ResolvedPauseConfig,
     hint: Option<&str>,
     stdin: &mut R,
     stdout: &mut W,
@@ -199,6 +300,13 @@ mod tests {
             assert_that!(PauseConfig::default().is_enabled()).is_false();
         }
 
+        #[test]
+        fn resolved_pause_reports_enabled_state() {
+            assert_that!(ResolvedPauseConfig::enabled(true).is_enabled()).is_true();
+            assert_that!(ResolvedPauseConfig::enabled(false).is_enabled()).is_false();
+            assert_that!(ResolvedPauseConfig::disabled().is_enabled()).is_false();
+        }
+
         mod from_env {
             use super::*;
 
@@ -208,7 +316,9 @@ mod tests {
                 env.remove();
 
                 assert_that!(
-                    PauseConfig::from_env_var("BROWSER_TEST_PAUSE_CONFIG_TEST").is_enabled()
+                    PauseConfig::from_env_var("BROWSER_TEST_PAUSE_CONFIG_TEST")
+                        .resolve()
+                        .is_enabled()
                 )
                 .is_false();
             }
@@ -217,9 +327,16 @@ mod tests {
             fn from_env_reads_default_pause_var() {
                 let env = EnvVarGuard::new(DEFAULT_PAUSE_ENV);
                 env.set("yes");
-                assert_that!(PauseConfig::from_env().is_enabled()).is_true();
+                assert_that!(PauseConfig::from_env().resolve().is_enabled()).is_true();
                 env.set("no");
-                assert_that!(PauseConfig::from_env().is_enabled()).is_false();
+                assert_that!(PauseConfig::from_env().resolve().is_enabled()).is_false();
+            }
+
+            #[test]
+            fn is_enabled_resolves_env_backed_config() {
+                let env = EnvVarGuard::new(DEFAULT_PAUSE_ENV);
+                env.set("yes");
+                assert_that!(PauseConfig::from_env().is_enabled()).is_true();
             }
         }
     }
@@ -232,9 +349,14 @@ mod tests {
             let mut stdin = BufReader::new(&b""[..]);
             let mut stdout = Vec::new();
 
-            let err = pause_with_io(PauseConfig::enabled(true), None, &mut stdin, &mut stdout)
-                .await
-                .expect_err("stdin EOF should fail instead of aborting");
+            let err = pause_with_io(
+                ResolvedPauseConfig::enabled(true),
+                None,
+                &mut stdin,
+                &mut stdout,
+            )
+            .await
+            .expect_err("stdin EOF should fail instead of aborting");
 
             assert_that!(err.to_string()).contains(BrowserTestError::ReadPauseResponse.to_string());
             assert_that!(format!("{err:?}"))
@@ -246,9 +368,14 @@ mod tests {
             let mut stdin = BufReader::new(&b"\n"[..]);
             let mut stdout = Vec::new();
 
-            let decision = pause_with_io(PauseConfig::enabled(true), None, &mut stdin, &mut stdout)
-                .await
-                .expect("empty line should remain an explicit abort response");
+            let decision = pause_with_io(
+                ResolvedPauseConfig::enabled(true),
+                None,
+                &mut stdin,
+                &mut stdout,
+            )
+            .await
+            .expect("empty line should remain an explicit abort response");
 
             assert_that!(decision).is_equal_to(PauseDecision::Abort);
         }
@@ -258,9 +385,14 @@ mod tests {
             let mut stdin = BufReader::new(&b"y\n"[..]);
             let mut stdout = Vec::new();
 
-            let decision = pause_with_io(PauseConfig::enabled(true), None, &mut stdin, &mut stdout)
-                .await
-                .expect("positive response should continue");
+            let decision = pause_with_io(
+                ResolvedPauseConfig::enabled(true),
+                None,
+                &mut stdin,
+                &mut stdout,
+            )
+            .await
+            .expect("positive response should continue");
 
             assert_that!(decision).is_equal_to(PauseDecision::Continue);
         }

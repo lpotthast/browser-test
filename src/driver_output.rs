@@ -40,6 +40,17 @@ pub enum DriverOutputConfig {
     FromEnv,
 }
 
+/// Resolved browser-driver output capture mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum ResolvedDriverOutputConfig {
+    /// Do not capture browser-driver output.
+    #[default]
+    Disabled,
+
+    /// Capture recent browser-driver output lines for failure diagnostics.
+    TailLines(NonZeroUsize),
+}
+
 /// Deprecated name for [`DriverOutputConfig`].
 ///
 /// Use [`DriverOutputConfig`] in new code.
@@ -73,6 +84,73 @@ impl DriverOutputConfig {
     #[must_use]
     pub const fn from_env() -> Self {
         Self::FromEnv
+    }
+
+    /// Resolve this config to an immediate browser-driver output capture mode.
+    ///
+    /// Environment-backed configs read their environment variables when this method is called.
+    #[must_use]
+    pub fn resolve(&self) -> ResolvedDriverOutputConfig {
+        match self {
+            Self::Disabled => ResolvedDriverOutputConfig::Disabled,
+            Self::TailLines(tail_lines) => ResolvedDriverOutputConfig::from_tail_lines(*tail_lines),
+            Self::FromEnv => resolved_browser_driver_output_config_from_env(),
+        }
+    }
+}
+
+impl ResolvedDriverOutputConfig {
+    /// Disable browser-driver output capture.
+    #[must_use]
+    pub const fn disabled() -> Self {
+        Self::Disabled
+    }
+
+    /// Capture the last `tail_lines` browser-driver output lines for failure diagnostics.
+    #[must_use]
+    pub const fn tail_lines(tail_lines: NonZeroUsize) -> Self {
+        Self::TailLines(tail_lines)
+    }
+
+    /// Capture the last `tail_lines` browser-driver output lines for failure diagnostics.
+    #[must_use]
+    pub const fn new(tail_lines: NonZeroUsize) -> Self {
+        Self::tail_lines(tail_lines)
+    }
+
+    /// Build a resolved capture mode from a raw tail-line count.
+    ///
+    /// `0` disables capture.
+    #[must_use]
+    pub const fn from_tail_lines(tail_lines: usize) -> Self {
+        match NonZeroUsize::new(tail_lines) {
+            Some(tail_lines) => Self::TailLines(tail_lines),
+            None => Self::Disabled,
+        }
+    }
+
+    /// Whether browser-driver output should be captured.
+    #[must_use]
+    pub const fn is_enabled(self) -> bool {
+        matches!(self, Self::TailLines(_))
+    }
+
+    /// Number of recent output lines retained when capture is enabled.
+    #[must_use]
+    pub const fn tail_line_count(self) -> Option<NonZeroUsize> {
+        match self {
+            Self::Disabled => None,
+            Self::TailLines(tail_lines) => Some(tail_lines),
+        }
+    }
+}
+
+impl From<ResolvedDriverOutputConfig> for DriverOutputConfig {
+    fn from(config: ResolvedDriverOutputConfig) -> Self {
+        match config {
+            ResolvedDriverOutputConfig::Disabled => Self::Disabled,
+            ResolvedDriverOutputConfig::TailLines(tail_lines) => Self::TailLines(tail_lines.get()),
+        }
     }
 }
 
@@ -247,9 +325,9 @@ pub(crate) fn attach_browser_driver_output_to_result(
     })
 }
 
-pub(crate) fn browser_driver_output_config_from_env() -> DriverOutputConfig {
+fn resolved_browser_driver_output_config_from_env() -> ResolvedDriverOutputConfig {
     if !env_flag_enabled(DEFAULT_BROWSER_DRIVER_OUTPUT_ENV) {
-        return DriverOutputConfig::Disabled;
+        return ResolvedDriverOutputConfig::Disabled;
     }
 
     let tail_lines = env::var_os(DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES_ENV).map_or(
@@ -272,11 +350,7 @@ pub(crate) fn browser_driver_output_config_from_env() -> DriverOutputConfig {
         },
     );
 
-    if tail_lines == 0 {
-        DriverOutputConfig::Disabled
-    } else {
-        DriverOutputConfig::TailLines(tail_lines)
-    }
+    ResolvedDriverOutputConfig::from_tail_lines(tail_lines)
 }
 
 fn source_label(source: DriverOutputSource) -> &'static str {
@@ -289,6 +363,7 @@ fn source_label(source: DriverOutputSource) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::EnvVarGuard;
     use assertr::prelude::*;
 
     #[allow(deprecated)]
@@ -297,6 +372,61 @@ mod tests {
         let config: BrowserDriverOutputConfig = DriverOutputConfig::tail_lines(3);
 
         assert_that!(config).is_equal_to(DriverOutputConfig::TailLines(3));
+    }
+
+    #[test]
+    fn driver_output_config_resolves_direct_modes() {
+        assert_that!(DriverOutputConfig::disabled().resolve())
+            .is_equal_to(ResolvedDriverOutputConfig::Disabled);
+        assert_that!(DriverOutputConfig::tail_lines(0).resolve())
+            .is_equal_to(ResolvedDriverOutputConfig::Disabled);
+
+        let ResolvedDriverOutputConfig::TailLines(tail_lines) =
+            DriverOutputConfig::tail_lines(3).resolve()
+        else {
+            panic!("non-zero tail-line capture should be enabled");
+        };
+        assert_that!(tail_lines.get()).is_equal_to(3);
+    }
+
+    #[test]
+    fn resolved_driver_output_config_reports_capture_state() {
+        let tail_lines = NonZeroUsize::new(3).expect("literal tail-line count should be non-zero");
+        assert_that!(ResolvedDriverOutputConfig::disabled().is_enabled()).is_false();
+        assert_that!(ResolvedDriverOutputConfig::tail_lines(tail_lines).is_enabled()).is_true();
+        assert_that!(ResolvedDriverOutputConfig::tail_lines(tail_lines).tail_line_count())
+            .is_equal_to(Some(tail_lines));
+        assert_that!(ResolvedDriverOutputConfig::disabled().tail_line_count()).is_equal_to(None);
+    }
+
+    #[test]
+    fn driver_output_config_resolves_env() {
+        let env = EnvVarGuard::new(DEFAULT_BROWSER_DRIVER_OUTPUT_ENV);
+        let original_tail = env::var_os(DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES_ENV);
+        env.set("1");
+        // SAFETY: `env` holds the crate's environment lock for this test.
+        unsafe {
+            env::set_var(DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES_ENV, "12");
+        }
+
+        let resolved = DriverOutputConfig::from_env().resolve();
+
+        let ResolvedDriverOutputConfig::TailLines(tail_lines) = resolved else {
+            panic!("env browser-driver output capture should be enabled");
+        };
+        assert_that!(tail_lines.get()).is_equal_to(12);
+
+        env.set("0");
+        assert_that!(DriverOutputConfig::from_env().resolve())
+            .is_equal_to(ResolvedDriverOutputConfig::Disabled);
+
+        // SAFETY: `env` holds the crate's environment lock for this test.
+        unsafe {
+            match original_tail {
+                Some(value) => env::set_var(DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES_ENV, value),
+                None => env::remove_var(DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES_ENV),
+            }
+        }
     }
 
     #[test]

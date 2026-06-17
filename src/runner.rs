@@ -1,6 +1,5 @@
 use std::{
     fmt::{self, Display},
-    num::NonZeroUsize,
     path::PathBuf,
     sync::Arc,
 };
@@ -14,12 +13,12 @@ use rootcause::prelude::ResultExt;
 use thirtyfour::{ChromeCapabilities, error::WebDriverResult};
 
 use crate::driver_output::{
-    DriverOutputCapture, DriverOutputConfig, attach_browser_driver_output,
-    attach_browser_driver_output_to_result, browser_driver_output_config_from_env,
+    DriverOutputCapture, DriverOutputConfig, ResolvedDriverOutputConfig,
+    attach_browser_driver_output, attach_browser_driver_output_to_result,
 };
 use crate::env::env_flag_enabled;
 use crate::execution::{ChromeCapabilitiesSetup, browser_test_executions};
-use crate::pause::{self, PauseConfig, PauseDecision};
+use crate::pause::{self, PauseConfig, PauseDecision, ResolvedPauseConfig};
 use crate::scheduler::{
     BrowserTestFailurePolicy, BrowserTestParallelism, run_test_executions_parallel,
     run_test_executions_sequential,
@@ -154,22 +153,16 @@ impl From<ResolvedBrowserTestVisibility> for BrowserTestVisibility {
 pub struct BrowserTestRunner {
     channel: Channel,
     visibility: ResolvedBrowserTestVisibility,
-    pause: Option<PauseConfig>,
+    pause: Option<ResolvedPauseConfig>,
     hint: Option<String>,
     parallelism: BrowserTestParallelism,
     failure_policy: BrowserTestFailurePolicy,
     webdriver_timeouts: Option<BrowserTimeouts>,
     element_query_wait: Option<ElementQueryWaitConfig>,
     chrome_capabilities_setups: Vec<Arc<ChromeCapabilitiesSetup>>,
-    browser_driver_output: BrowserDriverOutputSetting,
+    browser_driver_output: ResolvedDriverOutputConfig,
     chrome_for_testing_cache_dir: Option<PathBuf>,
     headless_chrome_binary: ChromeBinary,
-}
-
-#[derive(Debug, Clone)]
-enum BrowserDriverOutputSetting {
-    Disabled,
-    TailLines(NonZeroUsize),
 }
 
 impl Default for BrowserTestRunner {
@@ -184,7 +177,7 @@ impl Default for BrowserTestRunner {
             webdriver_timeouts: None,
             element_query_wait: None,
             chrome_capabilities_setups: Vec::new(),
-            browser_driver_output: BrowserDriverOutputSetting::Disabled,
+            browser_driver_output: ResolvedDriverOutputConfig::Disabled,
             chrome_for_testing_cache_dir: None,
             headless_chrome_binary: ChromeBinary::Chrome,
         }
@@ -244,7 +237,7 @@ impl BrowserTestRunner {
     /// returns an error instead.
     #[must_use]
     pub fn with_pause(mut self, pause: impl Into<PauseConfig>) -> Self {
-        self.pause = Some(pause.into());
+        self.pause = Some(pause.into().resolve());
         self
     }
 
@@ -321,7 +314,7 @@ impl BrowserTestRunner {
     /// [`Self::run`] call.
     #[must_use]
     pub fn with_driver_output(mut self, config: impl Into<DriverOutputConfig>) -> Self {
-        self.browser_driver_output = browser_driver_output_setting(config.into());
+        self.browser_driver_output = config.into().resolve();
         self
     }
 
@@ -480,23 +473,10 @@ impl BrowserTestRunner {
 
     fn browser_driver_output_capture_for_run(&self) -> Option<DriverOutputCapture> {
         match &self.browser_driver_output {
-            BrowserDriverOutputSetting::Disabled => None,
-            BrowserDriverOutputSetting::TailLines(tail_lines) => {
+            ResolvedDriverOutputConfig::Disabled => None,
+            ResolvedDriverOutputConfig::TailLines(tail_lines) => {
                 Some(DriverOutputCapture::new(*tail_lines))
             }
-        }
-    }
-}
-
-fn browser_driver_output_setting(config: DriverOutputConfig) -> BrowserDriverOutputSetting {
-    match config {
-        DriverOutputConfig::Disabled => BrowserDriverOutputSetting::Disabled,
-        DriverOutputConfig::TailLines(tail_lines) => NonZeroUsize::new(tail_lines).map_or(
-            BrowserDriverOutputSetting::Disabled,
-            BrowserDriverOutputSetting::TailLines,
-        ),
-        DriverOutputConfig::FromEnv => {
-            browser_driver_output_setting(browser_driver_output_config_from_env())
         }
     }
 }
@@ -529,6 +509,7 @@ mod tests {
     use assertr::prelude::*;
     use chrome_for_testing_manager::{DriverOutputLine, DriverOutputSource};
     use std::env;
+    use std::num::NonZeroUsize;
     use std::time::Duration;
     use thirtyfour::ChromiumLikeCapabilities;
 
@@ -624,11 +605,35 @@ mod tests {
     }
 
     #[test]
+    fn runner_pause_builder_accepts_resolved_pause_config() {
+        let runner = BrowserTestRunner::new().with_pause(ResolvedPauseConfig::enabled(true));
+
+        assert_that!(
+            runner
+                .pause
+                .expect("pause should be configured")
+                .is_enabled()
+        )
+        .is_true();
+    }
+
+    #[test]
     fn runner_browser_driver_output_builder_sets_capture() {
         let runner =
             BrowserTestRunner::new().with_driver_output(DriverOutputConfig::tail_lines(12));
 
-        let BrowserDriverOutputSetting::TailLines(tail_lines) = runner.browser_driver_output else {
+        let ResolvedDriverOutputConfig::TailLines(tail_lines) = runner.browser_driver_output else {
+            panic!("browser driver output tail-line capture should be configured");
+        };
+        assert_that!(tail_lines.get()).is_equal_to(12);
+    }
+
+    #[test]
+    fn runner_browser_driver_output_builder_accepts_resolved_config() {
+        let runner = BrowserTestRunner::new()
+            .with_driver_output(ResolvedDriverOutputConfig::from_tail_lines(12));
+
+        let ResolvedDriverOutputConfig::TailLines(tail_lines) = runner.browser_driver_output else {
             panic!("browser driver output tail-line capture should be configured");
         };
         assert_that!(tail_lines.get()).is_equal_to(12);
@@ -640,7 +645,7 @@ mod tests {
         let runner = BrowserTestRunner::new()
             .with_browser_driver_output(crate::BrowserDriverOutputConfig::new(12));
 
-        let BrowserDriverOutputSetting::TailLines(tail_lines) = runner.browser_driver_output else {
+        let ResolvedDriverOutputConfig::TailLines(tail_lines) = runner.browser_driver_output else {
             panic!("browser driver output tail-line capture should be configured");
         };
         assert_that!(tail_lines.get()).is_equal_to(12);
@@ -652,7 +657,7 @@ mod tests {
 
         assert_that!(matches!(
             runner.browser_driver_output,
-            BrowserDriverOutputSetting::Disabled
+            ResolvedDriverOutputConfig::Disabled
         ))
         .is_true();
     }
@@ -669,7 +674,7 @@ mod tests {
 
         let runner = BrowserTestRunner::new().with_driver_output(DriverOutputConfig::from_env());
 
-        let BrowserDriverOutputSetting::TailLines(tail_lines) = runner.browser_driver_output else {
+        let ResolvedDriverOutputConfig::TailLines(tail_lines) = runner.browser_driver_output else {
             panic!("env browser driver output tail-line capture should be configured");
         };
         assert_that!(tail_lines.get()).is_equal_to(DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES);

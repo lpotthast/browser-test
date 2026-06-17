@@ -5,12 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.1] - 2026-06-17
+## [0.4.0] - 2026-06-17
 
 ### Added
 
 - Added `ResolvedBrowserTestVisibility` and `BrowserTestVisibility::resolve`. BrowserTestVisibility stays spec oriented.
   Environment-backed visibility can now be resolved by users of this crate.
+- Added `ResolvedPauseConfig` and `PauseConfig::resolve`. PauseConfig stays spec oriented. Environment-backed pause
+  settings can now be resolved by users of this crate.
+- Added `ResolvedDriverOutputConfig` and `DriverOutputConfig::resolve`. DriverOutputConfig stays spec oriented.
+  Environment-backed browser-driver output settings can now be resolved by users of this crate.
+
+### Changed
+
+- **Breaking:** `PauseConfig::from_env` and `PauseConfig::from_env_var` now store an environment-backed spec and read the
+  environment when the config is resolved. Previously they read the environment immediately.
+- **Breaking:** `PauseConfig::is_enabled` now resolves the config before returning the enabled state and is no longer a
+  `const fn`.
 
 ## [0.3.0] - 2026-06-17
 
@@ -72,9 +83,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added environment-variable controls for visibility, pauses, and browser-driver output diagnostics.
 - Added re-exports for `async_trait::async_trait`, `chrome_for_testing_manager::Channel` and the `thirtyfour` crate.
 
-[Unreleased]: https://github.com/lpotthast/browser-test/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/lpotthast/browser-test/compare/v0.4.0...HEAD
 
-[0.3.1]: https://github.com/lpotthast/browser-test/compare/v0.3.0...v0.3.1
+[0.4.0]: https://github.com/lpotthast/browser-test/compare/v0.3.0...v0.4.0
 
 [0.3.0]: https://github.com/lpotthast/browser-test/compare/v0.2.1...v0.3.0
 
