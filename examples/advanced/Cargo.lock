@@ -184,6 +184,8 @@ dependencies = [
 [[package]]
 name = "chrome-for-testing-manager"
 version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d756c8a6fd0e3277c122cd1bc23c70347f2acf1741cd7a343063ffd175cb58b"
 dependencies = [
  "chrome-for-testing",
  "directories",
