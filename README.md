@@ -120,8 +120,11 @@ use browser_test::{
     BrowserTestRunner, BrowserTestVisibility, DriverOutputConfig, PauseConfig,
 };
 
+let browser_visibility = BrowserTestVisibility::from_env().resolve();
+let run_headless = browser_visibility.is_headless();
+
 let runner = BrowserTestRunner::new()
-    .with_visibility(BrowserTestVisibility::from_env())
+    .with_visibility(browser_visibility)
     .with_pause(PauseConfig::from_env())
     .with_driver_output(DriverOutputConfig::from_env());
 ```

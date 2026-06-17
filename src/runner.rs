@@ -28,14 +28,14 @@ use crate::{BrowserTestError, BrowserTests, BrowserTimeouts, ElementQueryWaitCon
 
 pub(crate) const DEFAULT_VISIBLE_ENV: &str = "BROWSER_TEST_VISIBLE";
 
-/// Chrome visibility mode for [`BrowserTestRunner`].
+/// Browser visibility mode for [`BrowserTestRunner`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub enum BrowserTestVisibility {
-    /// Run Chrome headlessly.
+    /// Run the browser headlessly.
     #[default]
     Headless,
 
-    /// Run Chrome visibly.
+    /// Run the browser visibly.
     Visible,
 
     /// Read visibility from the given environment variable.
@@ -47,14 +47,25 @@ pub enum BrowserTestVisibility {
     FromEnv,
 }
 
+/// Resolved browser visibility mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum ResolvedBrowserTestVisibility {
+    /// Run the browser headlessly.
+    #[default]
+    Headless,
+
+    /// Run the browser visibly.
+    Visible,
+}
+
 impl BrowserTestVisibility {
-    /// Build a headless visibility config.
+    /// Build a headless browser visibility config.
     #[must_use]
     pub const fn headless() -> Self {
         Self::Headless
     }
 
-    /// Build a visible visibility config.
+    /// Build a visible browser visibility config.
     #[must_use]
     pub const fn visible() -> Self {
         Self::Visible
@@ -72,12 +83,68 @@ impl BrowserTestVisibility {
         Self::FromEnvVar(env_var.into())
     }
 
-    fn is_visible(&self) -> bool {
+    /// Resolve this config to an immediate visibility value.
+    ///
+    /// Environment-backed configs read their environment variable when this method is called.
+    #[must_use]
+    pub fn resolve(&self) -> ResolvedBrowserTestVisibility {
+        match self {
+            Self::Headless => ResolvedBrowserTestVisibility::Headless,
+            Self::Visible => ResolvedBrowserTestVisibility::Visible,
+            Self::FromEnvVar(env_var) => {
+                ResolvedBrowserTestVisibility::from_visible(env_flag_enabled(env_var))
+            }
+            Self::FromEnv => {
+                ResolvedBrowserTestVisibility::from_visible(env_flag_enabled(DEFAULT_VISIBLE_ENV))
+            }
+        }
+    }
+}
+
+impl ResolvedBrowserTestVisibility {
+    /// Build a resolved headless visibility value.
+    #[must_use]
+    pub const fn headless() -> Self {
+        Self::Headless
+    }
+
+    /// Build a resolved visible visibility value.
+    #[must_use]
+    pub const fn visible() -> Self {
+        Self::Visible
+    }
+
+    /// Build a resolved visibility value from a boolean.
+    #[must_use]
+    pub const fn from_visible(visible: bool) -> Self {
+        if visible {
+            Self::Visible
+        } else {
+            Self::Headless
+        }
+    }
+
+    /// Whether the browser should run visibly.
+    #[must_use]
+    pub const fn is_visible(self) -> bool {
         match self {
             Self::Headless => false,
             Self::Visible => true,
-            Self::FromEnvVar(env_var) => env_flag_enabled(env_var),
-            Self::FromEnv => env_flag_enabled(DEFAULT_VISIBLE_ENV),
+        }
+    }
+
+    /// Whether the browser should run headlessly.
+    #[must_use]
+    pub const fn is_headless(self) -> bool {
+        !self.is_visible()
+    }
+}
+
+impl From<ResolvedBrowserTestVisibility> for BrowserTestVisibility {
+    fn from(visibility: ResolvedBrowserTestVisibility) -> Self {
+        match visibility {
+            ResolvedBrowserTestVisibility::Headless => Self::Headless,
+            ResolvedBrowserTestVisibility::Visible => Self::Visible,
         }
     }
 }
@@ -86,7 +153,7 @@ impl BrowserTestVisibility {
 #[derive(Clone)]
 pub struct BrowserTestRunner {
     channel: Channel,
-    visible: bool,
+    visibility: ResolvedBrowserTestVisibility,
     pause: Option<PauseConfig>,
     hint: Option<String>,
     parallelism: BrowserTestParallelism,
@@ -109,7 +176,7 @@ impl Default for BrowserTestRunner {
     fn default() -> Self {
         Self {
             channel: Channel::Stable,
-            visible: false,
+            visibility: ResolvedBrowserTestVisibility::Headless,
             pause: None,
             hint: None,
             parallelism: BrowserTestParallelism::Sequential,
@@ -128,7 +195,7 @@ impl fmt::Debug for BrowserTestRunner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BrowserTestRunner")
             .field("channel", &self.channel)
-            .field("visible", &self.visible)
+            .field("visibility", &self.visibility)
             .field("pause", &self.pause)
             .field("hint", &self.hint)
             .field("parallelism", &self.parallelism)
@@ -163,10 +230,10 @@ impl BrowserTestRunner {
         self
     }
 
-    /// Configure Chrome visibility.
+    /// Configure browser visibility.
     #[must_use]
     pub fn with_visibility(mut self, visibility: impl Into<BrowserTestVisibility>) -> Self {
-        self.visible = visibility.into().is_visible();
+        self.visibility = visibility.into().resolve();
         self
     }
 
@@ -375,7 +442,7 @@ impl BrowserTestRunner {
     }
 
     fn chrome_binary_for_run(&self) -> ChromeBinary {
-        if self.visible {
+        if self.visibility.is_visible() {
             ChromeBinary::Chrome
         } else {
             self.headless_chrome_binary
@@ -396,7 +463,7 @@ impl BrowserTestRunner {
         let max_parallel_tests = self.parallelism.max_parallel_tests();
         let executions = browser_test_executions(
             chromedriver,
-            self.visible,
+            self.visibility.is_visible(),
             self.webdriver_timeouts.as_ref(),
             self.element_query_wait.as_ref(),
             &self.chrome_capabilities_setups,
@@ -499,10 +566,20 @@ mod tests {
     #[test]
     fn runner_visibility_builder_sets_visible_mode() {
         let runner = BrowserTestRunner::new().with_visibility(BrowserTestVisibility::Visible);
-        assert_that!(runner.visible).is_true();
+        assert_that!(runner.visibility).is_equal_to(ResolvedBrowserTestVisibility::Visible);
 
         let runner = runner.with_visibility(BrowserTestVisibility::Headless);
-        assert_that!(runner.visible).is_false();
+        assert_that!(runner.visibility).is_equal_to(ResolvedBrowserTestVisibility::Headless);
+    }
+
+    #[test]
+    fn runner_visibility_builder_accepts_resolved_visibility() {
+        let runner =
+            BrowserTestRunner::new().with_visibility(ResolvedBrowserTestVisibility::Visible);
+        assert_that!(runner.visibility).is_equal_to(ResolvedBrowserTestVisibility::Visible);
+
+        let runner = runner.with_visibility(ResolvedBrowserTestVisibility::Headless);
+        assert_that!(runner.visibility).is_equal_to(ResolvedBrowserTestVisibility::Headless);
     }
 
     #[test]
@@ -512,7 +589,38 @@ mod tests {
 
         let runner = BrowserTestRunner::new().with_visibility(BrowserTestVisibility::from_env());
 
-        assert_that!(runner.visible).is_true();
+        assert_that!(runner.visibility).is_equal_to(ResolvedBrowserTestVisibility::Visible);
+    }
+
+    #[test]
+    fn visibility_resolves_default_env() {
+        let env = EnvVarGuard::new(DEFAULT_VISIBLE_ENV);
+        env.set("yes");
+
+        assert_that!(BrowserTestVisibility::from_env().resolve())
+            .is_equal_to(ResolvedBrowserTestVisibility::Visible);
+
+        env.set("no");
+
+        assert_that!(BrowserTestVisibility::from_env().resolve())
+            .is_equal_to(ResolvedBrowserTestVisibility::Headless);
+    }
+
+    #[test]
+    fn visibility_resolves_custom_env() {
+        let env = EnvVarGuard::new("BROWSER_TEST_CUSTOM_VISIBLE");
+        env.set("on");
+
+        assert_that!(BrowserTestVisibility::from_env_var("BROWSER_TEST_CUSTOM_VISIBLE").resolve())
+            .is_equal_to(ResolvedBrowserTestVisibility::Visible);
+    }
+
+    #[test]
+    fn resolved_visibility_reports_mode() {
+        assert_that!(ResolvedBrowserTestVisibility::Visible.is_visible()).is_true();
+        assert_that!(ResolvedBrowserTestVisibility::Visible.is_headless()).is_false();
+        assert_that!(ResolvedBrowserTestVisibility::Headless.is_visible()).is_false();
+        assert_that!(ResolvedBrowserTestVisibility::Headless.is_headless()).is_true();
     }
 
     #[test]

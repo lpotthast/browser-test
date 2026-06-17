@@ -22,7 +22,7 @@ pub use driver_output::BrowserDriverOutputConfig;
 pub use driver_output::DriverOutputConfig;
 pub use error::BrowserTestError;
 pub use pause::PauseConfig;
-pub use runner::{BrowserTestRunner, BrowserTestVisibility};
+pub use runner::{BrowserTestRunner, BrowserTestVisibility, ResolvedBrowserTestVisibility};
 pub use scheduler::{BrowserTestFailurePolicy, BrowserTestParallelism};
 pub use test_case::{BrowserTest, BrowserTests};
 pub use timeout::{BrowserTimeouts, BrowserTimeoutsBuilder};

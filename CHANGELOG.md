@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-06-17
+
+### Added
+
+- Added `ResolvedBrowserTestVisibility` and `BrowserTestVisibility::resolve`. BrowserTestVisibility stays spec oriented.
+  Environment-backed visibility can now be resolved by users of this crate.
+
 ## [0.3.0] - 2026-06-17
 
 ### Added
@@ -65,7 +72,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added environment-variable controls for visibility, pauses, and browser-driver output diagnostics.
 - Added re-exports for `async_trait::async_trait`, `chrome_for_testing_manager::Channel` and the `thirtyfour` crate.
 
-[Unreleased]: https://github.com/lpotthast/browser-test/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/lpotthast/browser-test/compare/v0.3.1...HEAD
+
+[0.3.1]: https://github.com/lpotthast/browser-test/compare/v0.3.0...v0.3.1
 
 [0.3.0]: https://github.com/lpotthast/browser-test/compare/v0.2.1...v0.3.0
 
