@@ -64,3 +64,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `BrowserTestError` contexts and panic reporting.
 - Added environment-variable controls for visibility, pauses, and browser-driver output diagnostics.
 - Added re-exports for `async_trait::async_trait`, `chrome_for_testing_manager::Channel` and the `thirtyfour` crate.
+
+[Unreleased]: https://github.com/lpotthast/browser-test/compare/v0.3.0...HEAD
+
+[0.3.0]: https://github.com/lpotthast/browser-test/compare/v0.2.1...v0.3.0
+
+[0.2.1]: https://github.com/lpotthast/browser-test/compare/v0.2.0...v0.2.1
+
+[0.2.0]: https://github.com/lpotthast/browser-test/compare/v0.1.0...v0.2.0
+
+[0.1.0]: https://github.com/lpotthast/browser-test/releases/tag/v0.1.0
