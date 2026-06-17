@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-17
+
+### Added
+
+- Added `BrowserTestRunner::with_chrome_for_testing_cache_dir` to override the Chrome-for-Testing download cache
+  directory.
+- Added `BrowserTestRunner::with_headless_chrome_binary` and re-exported `ChromeBinary` so headless runs can use Chrome
+  Headless Shell while visible runs continue to force regular Chrome.
+
+### Changed
+
+- **Breaking:** Updated `chrome-for-testing-manager` to version `0.12`.
+- **Breaking:** Updated `rootcause` to version `0.13`.
+
 ## [0.2.1] - 2026-05-11
 
 ### Fixed

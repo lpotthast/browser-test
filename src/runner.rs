@@ -1,11 +1,13 @@
 use std::{
     fmt::{self, Display},
     num::NonZeroUsize,
+    path::PathBuf,
     sync::Arc,
 };
 
 use chrome_for_testing_manager::{
-    Channel, Chromedriver, ChromedriverRunConfig, DriverOutputListener, PortRequest, VersionRequest,
+    Channel, ChromeBinary, Chromedriver, ChromedriverRunConfig, DriverOutputListener, PortRequest,
+    VersionRequest,
 };
 use rootcause::Report;
 use rootcause::prelude::ResultExt;
@@ -93,6 +95,8 @@ pub struct BrowserTestRunner {
     element_query_wait: Option<ElementQueryWaitConfig>,
     chrome_capabilities_setups: Vec<Arc<ChromeCapabilitiesSetup>>,
     browser_driver_output: BrowserDriverOutputSetting,
+    chrome_for_testing_cache_dir: Option<PathBuf>,
+    headless_chrome_binary: ChromeBinary,
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +118,8 @@ impl Default for BrowserTestRunner {
             element_query_wait: None,
             chrome_capabilities_setups: Vec::new(),
             browser_driver_output: BrowserDriverOutputSetting::Disabled,
+            chrome_for_testing_cache_dir: None,
+            headless_chrome_binary: ChromeBinary::Chrome,
         }
     }
 }
@@ -134,6 +140,11 @@ impl fmt::Debug for BrowserTestRunner {
                 &self.chrome_capabilities_setups.len(),
             )
             .field("browser_driver_output", &self.browser_driver_output)
+            .field(
+                "chrome_for_testing_cache_dir",
+                &self.chrome_for_testing_cache_dir,
+            )
+            .field("headless_chrome_binary", &self.headless_chrome_binary)
             .finish()
     }
 }
@@ -256,6 +267,28 @@ impl BrowserTestRunner {
         self.with_driver_output(config)
     }
 
+    /// Set the cache directory used for Chrome-for-Testing downloads.
+    ///
+    /// By default, `chrome-for-testing-manager` uses the platform's per-user cache directory.
+    /// Pinning this to a project-local directory is useful in sandboxed or CI environments where
+    /// the user cache is not writable or where executing browser bundles from outside the project
+    /// is restricted.
+    #[must_use]
+    pub fn with_chrome_for_testing_cache_dir(mut self, cache_dir: impl Into<PathBuf>) -> Self {
+        self.chrome_for_testing_cache_dir = Some(cache_dir.into());
+        self
+    }
+
+    /// Select the browser binary used for headless runs.
+    ///
+    /// Visible runs always use regular Chrome because Chrome Headless Shell cannot show an
+    /// interactive debugging window.
+    #[must_use]
+    pub fn with_headless_chrome_binary(mut self, chrome_binary: ChromeBinary) -> Self {
+        self.headless_chrome_binary = chrome_binary;
+        self
+    }
+
     /// Run every test with a fresh `WebDriver` session.
     ///
     /// The shared chromedriver process is always terminated, even when a test returns an error or
@@ -304,11 +337,14 @@ impl BrowserTestRunner {
         let output_listener: Option<DriverOutputListener> = browser_driver_output
             .as_ref()
             .map(DriverOutputCapture::listener);
+
         let chromedriver = match Chromedriver::run(
             ChromedriverRunConfig::builder()
                 .version(VersionRequest::LatestIn(self.channel.clone()))
+                .chrome_binary(self.chrome_binary_for_run())
                 .port(PortRequest::Any)
                 .output_listener_opt(output_listener)
+                .cache_dir_opt(self.chrome_for_testing_cache_dir.clone())
                 .build(),
         )
         .await
@@ -336,6 +372,14 @@ impl BrowserTestRunner {
         }
 
         attach_browser_driver_output_to_result(test_result, browser_driver_output.as_ref())
+    }
+
+    fn chrome_binary_for_run(&self) -> ChromeBinary {
+        if self.visible {
+            ChromeBinary::Chrome
+        } else {
+            self.headless_chrome_binary
+        }
     }
 
     /// Runs `tests` while respecting this runner's `parallelism` configuration.
@@ -565,6 +609,32 @@ mod tests {
             BrowserTestRunner::new().with_chrome_capabilities(|caps| caps.add_arg("--no-sandbox"));
 
         assert_that!(runner.chrome_capabilities_setups.len()).is_equal_to(1);
+    }
+
+    #[test]
+    fn runner_chrome_for_testing_cache_dir_builder_sets_cache_dir() {
+        let cache_dir = PathBuf::from("/tmp/browser-test-cft-cache");
+
+        let runner = BrowserTestRunner::new().with_chrome_for_testing_cache_dir(&cache_dir);
+
+        assert_that!(runner.chrome_for_testing_cache_dir).is_equal_to(Some(cache_dir));
+    }
+
+    #[test]
+    fn runner_headless_chrome_binary_builder_sets_headless_binary() {
+        let runner =
+            BrowserTestRunner::new().with_headless_chrome_binary(ChromeBinary::ChromeHeadlessShell);
+
+        assert_that!(runner.chrome_binary_for_run()).is_equal_to(ChromeBinary::ChromeHeadlessShell);
+    }
+
+    #[test]
+    fn runner_visible_mode_forces_regular_chrome() {
+        let runner = BrowserTestRunner::new()
+            .with_headless_chrome_binary(ChromeBinary::ChromeHeadlessShell)
+            .with_visibility(BrowserTestVisibility::Visible);
+
+        assert_that!(runner.chrome_binary_for_run()).is_equal_to(ChromeBinary::Chrome);
     }
 
     #[test]

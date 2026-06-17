@@ -1,7 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 pub use async_trait::async_trait;
-pub use chrome_for_testing_manager::Channel;
+pub use chrome_for_testing_manager::{Channel, ChromeBinary};
 pub use thirtyfour;
 
 mod driver_output;

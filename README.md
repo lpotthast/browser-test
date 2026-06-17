@@ -33,8 +33,8 @@ Add `browser-test` to the crate that owns your browser integration tests:
 
 ```toml
 [dev-dependencies]
-browser-test = "0.2"
-rootcause = "0.12"
+browser-test = "0.3"
+rootcause = "0.13"
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
 ```
 

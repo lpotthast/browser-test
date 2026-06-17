@@ -1,6 +1,6 @@
 [package]
 name = "browser-test"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.89.0"
 authors = ["Lukas Potthast <privat@lukas-potthast.de>"]
@@ -14,9 +14,9 @@ exclude = [".idea", ".claude", ".vscode", "AGENTS.md", "CLAUDE.md", "Justfile"]
 
 [dependencies]
 async-trait = "0.1.83"
-chrome-for-testing-manager = { version = "0.11.0", default-features = false, features = ["thirtyfour"] }
+chrome-for-testing-manager = { version = "0.12.0", path = "../chrome-for-testing-manager", default-features = false, features = ["thirtyfour"] }
 futures-util = { version = "0.3.32", default-features = false, features = ["std"] }
-rootcause = { version = "0.12.1", default-features = false }
+rootcause = { version = "0.13.0", default-features = false }
 thirtyfour = { version = "0.37.0", default-features = false, features = ["component", "reqwest", "rustls"] }
 thiserror = "2.0.17"
 tokio = { version = "1.48.0", default-features = false, features = ["rt", "io-std", "io-util"] }

@@ -7,9 +7,9 @@ publish = false
 
 [dependencies]
 browser-test = { path = "../.." }
-rootcause = "0.12.1"
-rootcause-backtrace = "0.12.1"
-rootcause-tracing = "0.12.1"
+rootcause = "0.13.0"
+rootcause-backtrace = "0.13.0"
+rootcause-tracing = "0.13.0"
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", default-features = false, features = ["macros", "rt-multi-thread"] }
 tracing = "0.1.44"

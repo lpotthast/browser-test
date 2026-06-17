@@ -325,7 +325,7 @@ mod tests {
             NonZeroUsize::new(5).expect("literal tail capacity should be non-zero"),
         );
         capture.push(line(DriverOutputSource::Stdout, 0, "Starting ChromeDriver"));
-        let mut report = Report::new(BrowserTestError::RunTest {
+        let mut report: Report<BrowserTestError> = Report::new(BrowserTestError::RunTest {
             test_name: "login".to_owned(),
         });
         let initial_attachment_count = report.attachments().len();
