@@ -11,6 +11,8 @@ use crate::{BrowserTimeouts, ElementQueryWaitConfig, SessionRequirement};
 /// By default, tests share sessions: the runner hands a session that a passing test used on to the
 /// next test, after resetting it. Return [`SessionRequirement::Fresh`] from [`Self::session`] for
 /// tests that need a session of their own.
+// `async_trait` marks the boxed futures `#[must_use]`, which they are already.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait BrowserTest<Context = (), TestError = rootcause::markers::Dynamic>: Send + Sync
 where

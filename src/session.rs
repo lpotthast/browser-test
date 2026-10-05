@@ -126,6 +126,8 @@ impl From<bool> for SessionReuse {
 ///     }
 /// }
 /// ```
+// `async_trait` marks the boxed futures `#[must_use]`, which they are already.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait SessionReset: Send + Sync {
     /// Reset app-specific state of the session.
