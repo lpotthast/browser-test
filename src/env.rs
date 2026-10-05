@@ -1,44 +1,60 @@
 use std::env;
 
-/// Read a conventional boolean flag from the environment.
-///
-/// The variable is considered **disabled** if it is:\
-/// ->  unset, empty, `0`, `false`, `no`, `off` or `disabled`.
-///
-/// The variable is considered **enabled** if it is:\
-/// ->  set, non-empty, `1`, `true`, `yes`, `on` or `enabled`.
-///
-/// The input is converted `to_ascii_lowercase` so the checks are case-insensitive.
-#[must_use]
-pub(crate) fn env_flag_enabled(env_var: impl AsRef<str>) -> bool {
-    let Some(value) = env::var_os(env_var.as_ref()) else {
-        return false;
-    };
-    let value = value.to_string_lossy();
-    let normalized = value.trim().to_ascii_lowercase();
-    if matches!(
-        normalized.as_str(),
-        "" | "0" | "false" | "no" | "off" | "disabled"
-    ) {
-        return false;
-    }
-    if matches!(normalized.as_str(), "1" | "true" | "yes" | "on" | "enabled") {
-        return true;
-    }
-    false
+/// An environment variable whose value cannot be interpreted, returned by the `from_env` and
+/// `from_env_var` constructors.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("environment variable {name} is set to {value:?}, expected {expected}")]
+#[non_exhaustive]
+pub struct InvalidEnvVar {
+    /// The variable's name.
+    pub name: String,
+
+    /// The variable's value, lossily converted to UTF-8.
+    pub value: String,
+
+    /// What the value should have been.
+    pub expected: &'static str,
 }
 
-/// Read an optional boolean flag from the environment.
+/// Read `name`'s value, trimmed. `None` if the variable is unset or empty.
+fn env_value(name: &str) -> Option<String> {
+    let value = env::var_os(name)?;
+    let value = value.to_string_lossy().trim().to_owned();
+    (!value.is_empty()).then_some(value)
+}
+
+/// Read a boolean flag. `None` if the variable is unset or empty.
 ///
-/// Returns `None` if the variable is unset or empty (after trimming), so that callers can fall back
-/// to their default. Otherwise, interprets the value like [`env_flag_enabled`].
-#[must_use]
-pub(crate) fn env_flag_value(env_var: impl AsRef<str>) -> Option<bool> {
-    let value = env::var_os(env_var.as_ref())?;
-    if value.to_string_lossy().trim().is_empty() {
-        return None;
+/// `1`, `true`, `yes`, `on`, and `enabled` enable the flag; `0`, `false`, `no`, `off`, and
+/// `disabled` disable it (ignoring case).
+pub(crate) fn env_flag(name: &str) -> Result<Option<bool>, InvalidEnvVar> {
+    let Some(value) = env_value(name) else {
+        return Ok(None);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" | "enabled" => Ok(Some(true)),
+        "0" | "false" | "no" | "off" | "disabled" => Ok(Some(false)),
+        _ => Err(InvalidEnvVar {
+            name: name.to_owned(),
+            value,
+            expected: "one of 1, true, yes, on, enabled, 0, false, no, off, or disabled",
+        }),
     }
-    Some(env_flag_enabled(env_var))
+}
+
+/// Read a non-negative number. `None` if the variable is unset or empty.
+pub(crate) fn env_number(name: &str) -> Result<Option<usize>, InvalidEnvVar> {
+    let Some(value) = env_value(name) else {
+        return Ok(None);
+    };
+    match value.parse::<usize>() {
+        Ok(number) => Ok(Some(number)),
+        Err(_) => Err(InvalidEnvVar {
+            name: name.to_owned(),
+            value,
+            expected: "a non-negative number",
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -47,79 +63,47 @@ mod tests {
     use crate::test_support::EnvVarGuard;
     use assertr::prelude::*;
 
-    const ENV_FLAG_TEST_VAR: &str = "BROWSER_TEST_ENV_FLAG_ENABLED_TEST";
+    const TEST_VAR: &str = "BROWSER_TEST_ENV_TEST";
 
-    mod env_flag_enabled {
-        use super::*;
+    #[test]
+    fn unset_and_empty_variables_have_no_value() {
+        let env = EnvVarGuard::new(TEST_VAR);
+        env.remove();
+        assert_that!(env_flag(TEST_VAR)).is_equal_to(Ok(None));
+        assert_that!(env_number(TEST_VAR)).is_equal_to(Ok(None));
 
-        #[test]
-        fn treats_unset_as_disabled() {
-            let env = EnvVarGuard::new(ENV_FLAG_TEST_VAR);
-            env.remove();
+        env.set(" ");
+        assert_that!(env_flag(TEST_VAR)).is_equal_to(Ok(None));
+        assert_that!(env_number(TEST_VAR)).is_equal_to(Ok(None));
+    }
 
-            assert_that!(env_flag_enabled(ENV_FLAG_TEST_VAR)).is_false();
+    #[test]
+    fn flags_accept_conventional_values_ignoring_case() {
+        let env = EnvVarGuard::new(TEST_VAR);
+        for value in ["1", "true", "YES", " on ", "Enabled"] {
+            env.set(value);
+            assert_that!(env_flag(TEST_VAR))
+                .with_detail_message(format!("Testing: '{value}'"))
+                .is_equal_to(Ok(Some(true)));
         }
-
-        #[test]
-        fn treats_disabled_values_as_disabled() {
-            let env = EnvVarGuard::new(ENV_FLAG_TEST_VAR);
-
-            for value in [
-                "", " ", "0", "false", "FALSE", " no ", "off", "Off", "disabled",
-            ] {
-                env.set(value);
-                assert_that!(env_flag_enabled(ENV_FLAG_TEST_VAR))
-                    .with_detail_message(format!("Testing: '{value}'"))
-                    .is_false();
-            }
-        }
-
-        #[test]
-        fn treats_truthy_values_as_enabled() {
-            let env = EnvVarGuard::new(ENV_FLAG_TEST_VAR);
-
-            for value in ["1", "true", "yes", "YES", "on", "ON", "enabled"] {
-                env.set(value);
-                assert_that!(env_flag_enabled(ENV_FLAG_TEST_VAR))
-                    .with_detail_message(format!("Testing: '{value}'"))
-                    .is_true();
-            }
-        }
-
-        #[test]
-        fn treats_other_values_as_disabled() {
-            let env = EnvVarGuard::new(ENV_FLAG_TEST_VAR);
-
-            for value in ["2", "foo"] {
-                env.set(value);
-                assert_that!(env_flag_enabled(ENV_FLAG_TEST_VAR))
-                    .with_detail_message(format!("Testing: '{value}'"))
-                    .is_false();
-            }
+        for value in ["0", "FALSE", "no", "off", "disabled"] {
+            env.set(value);
+            assert_that!(env_flag(TEST_VAR))
+                .with_detail_message(format!("Testing: '{value}'"))
+                .is_equal_to(Ok(Some(false)));
         }
     }
 
-    mod env_flag_value {
-        use super::*;
+    #[test]
+    fn invalid_values_are_errors() {
+        let env = EnvVarGuard::new(TEST_VAR);
+        env.set("ture");
+        let error = env_flag(TEST_VAR).expect_err("an unknown flag value is invalid");
+        assert_that!(error.to_string()).contains("BROWSER_TEST_ENV_TEST is set to \"ture\"");
 
-        #[test]
-        fn is_none_when_unset_or_empty() {
-            let env = EnvVarGuard::new(ENV_FLAG_TEST_VAR);
-            env.remove();
-            assert_that!(env_flag_value(ENV_FLAG_TEST_VAR)).is_none();
-
-            env.set(" ");
-            assert_that!(env_flag_value(ENV_FLAG_TEST_VAR)).is_none();
-        }
-
-        #[test]
-        fn interprets_set_values() {
-            let env = EnvVarGuard::new(ENV_FLAG_TEST_VAR);
-            env.set("off");
-            assert_that!(env_flag_value(ENV_FLAG_TEST_VAR)).is_equal_to(Some(false));
-
-            env.set("yes");
-            assert_that!(env_flag_value(ENV_FLAG_TEST_VAR)).is_equal_to(Some(true));
-        }
+        env.set("four");
+        assert_that!(env_number(TEST_VAR).is_err()).is_true();
+        env.set(" 4 ");
+        assert_that!(env_number(TEST_VAR)).is_equal_to(Ok(Some(4)));
     }
 }

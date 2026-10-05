@@ -4,37 +4,10 @@ use std::collections::BTreeMap;
 use std::fmt::{self, Display, Write as _};
 use std::time::Duration;
 
-use rootcause::Report;
-
-use crate::BrowserTestError;
-
-/// What [`crate::BrowserTestRunner::run_with_report`] returns: the run's result and its timing
-/// report.
-#[derive(Debug)]
-pub struct BrowserTestRunOutcome {
-    /// The run's result, as [`crate::BrowserTestRunner::run`] returns it.
-    pub result: Result<(), Report<BrowserTestError>>,
-
-    /// Where the run spent its time.
-    pub report: BrowserTestRunReport,
-}
-
-impl BrowserTestRunOutcome {
-    /// The run's result, dropping the report.
-    ///
-    /// # Errors
-    ///
-    /// Returns the run's error, see [`crate::BrowserTestRunner::run`].
-    pub fn into_result(self) -> Result<(), Report<BrowserTestError>> {
-        self.result
-    }
-}
-
 /// Where a browser test run spent its time.
 ///
-/// Printed as a summary at the end of every run (see
-/// [`crate::BrowserTestRunner::with_run_summary`]); its `Display` implementation renders that
-/// summary.
+/// Handed to the [`crate::RunReportConsumer`]s of the runner at the end of every run. Its `Display`
+/// implementation renders a human-readable summary, as printed by [`crate::StderrSummary`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct BrowserTestRunReport {
@@ -49,9 +22,24 @@ pub struct BrowserTestRunReport {
     pub webdriver_shutdown: Duration,
 
     /// Every test that was started (or failed before it could start), in the order the tests were
-    /// given to the runner. Tests not started because of [`crate::BrowserTestFailurePolicy::FailFast`]
+    /// given to the runner. Tests not started because of [`crate::FailurePolicy::FailFast`]
     /// are missing.
     pub tests: Vec<BrowserTestRecord>,
+
+    /// Every named group (see [`crate::BrowserTests::named`]) that ran, in the order the groups
+    /// were defined.
+    pub groups: Vec<GroupRecord>,
+}
+
+/// Timing of one named group of tests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct GroupRecord {
+    /// The group's name, prefixed with the names of enclosing named groups (`outer / inner`).
+    pub name: String,
+
+    /// Wall time from the group's start until its last test finished.
+    pub duration: Duration,
 }
 
 /// Timing and outcome of one browser test.
@@ -67,28 +55,33 @@ pub struct BrowserTestRecord {
     /// Whether the test passed.
     pub outcome: TestOutcome,
 
-    /// The parallel slot that ran the test (always `0` for sequential runs).
-    pub slot: usize,
+    /// The name of the innermost named group containing the test (see [`GroupRecord::name`]).
+    pub group: Option<String>,
 
-    /// How the test got its session, and how long that took.
-    pub session: SessionAcquisition,
+    /// How long creating the test's session took, and how long the test waited for it. `None` if
+    /// no session was requested (e.g. one of the test's metadata methods panicked).
+    pub session: Option<SessionTiming>,
 
     /// Time spent in [`crate::BrowserTest::run`]. `None` if the body never ran (e.g. the session
     /// could not be created).
     pub body: Option<Duration>,
 
-    /// Time spent quitting the session after this test, if this test was the last one to use it.
+    /// Time spent quitting the session after the test. Quitting runs in the background, while the
+    /// next test already runs. `None` if the session could not be created or set up.
     pub teardown: Option<Duration>,
 
-    /// Time spent in [`crate::step`]s of this test, per step kind.
+    /// Time spent in [`crate::Step`]s of this test, per step kind.
     pub steps: BTreeMap<String, StepStats>,
 }
 
 impl BrowserTestRecord {
-    /// Total time attributed to this test: session acquisition, body, and teardown.
+    /// Time this test ran for: waiting for its session, then running its body.
+    ///
+    /// Session creation (ahead of the test) and teardown (after it) run in the background and
+    /// are not included.
     #[must_use]
     pub fn total(&self) -> Duration {
-        self.session.duration() + self.body.unwrap_or_default() + self.teardown.unwrap_or_default()
+        self.session.map(|session| session.wait).unwrap_or_default() + self.body.unwrap_or_default()
     }
 }
 
@@ -105,38 +98,23 @@ pub enum TestOutcome {
     Panicked,
 }
 
-/// How a test got its `WebDriver` session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SessionAcquisition {
-    /// A new session was created for this test.
-    Created {
-        /// Time to create the session and apply its settings (successful or not).
-        duration: Duration,
-    },
+/// Timing of the `WebDriver` session of one test.
+///
+/// The runner creates sessions ahead of the tests that use them (see
+/// [`crate::BrowserTestRunner::with_spare_sessions`]), so creation usually overlaps earlier tests
+/// and only [`Self::wait`] delays the test itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct SessionTiming {
+    /// Time to create the session and apply its timeouts (successful or not).
+    pub creation: Duration,
 
-    /// The test reused the session of an earlier test.
-    Reused {
-        /// Time spent resetting the session before this test.
-        reset: Duration,
-    },
-
-    /// The test failed before a session was requested (e.g. one of its metadata methods panicked).
-    None,
+    /// Time the test waited for its session once it was its turn to run. Zero if the session was
+    /// ready in time.
+    pub wait: Duration,
 }
 
-impl SessionAcquisition {
-    /// Time spent acquiring the session.
-    #[must_use]
-    pub const fn duration(self) -> Duration {
-        match self {
-            Self::Created { duration } => duration,
-            Self::Reused { reset } => reset,
-            Self::None => Duration::ZERO,
-        }
-    }
-}
-
-/// Aggregated timing of one kind of [`crate::step`].
+/// Aggregated timing of one kind of [`crate::Step`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct StepStats {
@@ -168,45 +146,33 @@ impl StepStats {
 const SUMMARY_LIST_LEN: usize = 10;
 
 impl BrowserTestRunReport {
-    /// Number of sessions created.
+    /// Number of sessions created for the tests of this report.
     #[must_use]
     pub fn sessions_created(&self) -> usize {
         self.tests
             .iter()
-            .filter(|test| matches!(test.session, SessionAcquisition::Created { .. }))
+            .filter(|test| test.session.is_some())
             .count()
     }
 
-    /// Number of tests that reused a session.
-    #[must_use]
-    pub fn sessions_reused(&self) -> usize {
-        self.tests
-            .iter()
-            .filter(|test| matches!(test.session, SessionAcquisition::Reused { .. }))
-            .count()
-    }
-
-    /// Total time spent creating sessions.
+    /// Total time spent creating sessions. Mostly overlaps earlier tests.
     #[must_use]
     pub fn session_creation_time(&self) -> Duration {
         self.tests
             .iter()
-            .filter_map(|test| match test.session {
-                SessionAcquisition::Created { duration } => Some(duration),
-                _ => None,
-            })
+            .filter_map(|test| test.session)
+            .map(|session| session.creation)
             .sum()
     }
 
-    /// Total time spent resetting sessions for reuse.
+    /// Total time tests waited for their sessions, i.e. the part of session creation that did not
+    /// overlap earlier tests.
     #[must_use]
-    pub fn session_reset_time(&self) -> Duration {
+    pub fn session_wait_time(&self) -> Duration {
         self.tests
             .iter()
-            .filter_map(|test| match test.session {
-                SessionAcquisition::Reused { reset } => Some(reset),
-                _ => None,
-            })
+            .filter_map(|test| test.session)
+            .map(|session| session.wait)
             .sum()
     }
 
@@ -230,7 +196,7 @@ impl BrowserTestRunReport {
         tests
     }
 
-    /// The [`crate::step`] kinds of all tests, aggregated and sorted by total time, slowest first.
+    /// The [`crate::Step`] kinds of all tests, aggregated and sorted by total time, slowest first.
     #[must_use]
     pub fn slowest_steps(&self) -> Vec<(String, StepStats)> {
         let mut steps = BTreeMap::<String, StepStats>::new();
@@ -269,17 +235,26 @@ impl Display for BrowserTestRunReport {
             FormatDuration(self.webdriver_shutdown),
         )?;
         let created = self.sessions_created();
-        let reused = self.sessions_reused();
         writeln!(
             f,
-            "  sessions:       {created} created in {}{}, {reused} reused after resets taking {}{}, quit in {}",
+            "  sessions:       {created} created in {}{}, tests waited {} for them, quit in {}",
             FormatDuration(self.session_creation_time()),
             Average(self.session_creation_time(), created),
-            FormatDuration(self.session_reset_time()),
-            Average(self.session_reset_time(), reused),
+            FormatDuration(self.session_wait_time()),
             FormatDuration(self.session_teardown_time()),
         )?;
         writeln!(f, "  test bodies:    {}", FormatDuration(self.body_time()))?;
+        if !self.groups.is_empty() {
+            writeln!(f, "  groups:")?;
+            for group in &self.groups {
+                writeln!(
+                    f,
+                    "    {:>9}  {}",
+                    FormatDuration(group.duration),
+                    group.name
+                )?;
+            }
+        }
 
         let slowest = self.slowest_tests();
         if !slowest.is_empty() {
@@ -329,17 +304,17 @@ impl Display for Describe<'_> {
     }
 }
 
-/// How a test's time splits up, e.g. `new session 812ms, body 3.20s, quit 40ms`.
+/// How a test's time splits up, e.g. `session 812ms, waited 120ms, body 3.20s, quit 40ms`.
 pub(crate) fn timing_breakdown(test: &BrowserTestRecord) -> String {
     let mut out = String::new();
     match test.session {
-        SessionAcquisition::Created { duration } => {
-            let _ = write!(out, "new session {}", FormatDuration(duration));
+        Some(session) => {
+            let _ = write!(out, "session {}", FormatDuration(session.creation));
+            if !session.wait.is_zero() {
+                let _ = write!(out, ", waited {}", FormatDuration(session.wait));
+            }
         }
-        SessionAcquisition::Reused { reset } => {
-            let _ = write!(out, "reused session, reset {}", FormatDuration(reset));
-        }
-        SessionAcquisition::None => out.push_str("no session"),
+        None => out.push_str("no session"),
     }
     if let Some(body) = test.body {
         let _ = write!(out, ", body {}", FormatDuration(body));
@@ -386,33 +361,23 @@ mod tests {
     use super::*;
     use assertr::prelude::*;
 
-    fn record(
-        index: usize,
-        name: &str,
-        session: SessionAcquisition,
-        body_ms: u64,
-    ) -> BrowserTestRecord {
+    fn record(index: usize, name: &str, session: SessionTiming, body_ms: u64) -> BrowserTestRecord {
         BrowserTestRecord {
             index,
             name: name.to_owned(),
             outcome: TestOutcome::Passed,
-            slot: 0,
-            session,
+            group: None,
+            session: Some(session),
             body: Some(Duration::from_millis(body_ms)),
             teardown: None,
             steps: BTreeMap::new(),
         }
     }
 
-    fn created(ms: u64) -> SessionAcquisition {
-        SessionAcquisition::Created {
-            duration: Duration::from_millis(ms),
-        }
-    }
-
-    fn reused(ms: u64) -> SessionAcquisition {
-        SessionAcquisition::Reused {
-            reset: Duration::from_millis(ms),
+    fn session(creation_ms: u64, wait_ms: u64) -> SessionTiming {
+        SessionTiming {
+            creation: Duration::from_millis(creation_ms),
+            wait: Duration::from_millis(wait_ms),
         }
     }
 
@@ -426,21 +391,24 @@ mod tests {
 
     #[test]
     fn report_aggregates_sessions_and_bodies() {
-        let mut slow = record(1, "slow", reused(20), 5000);
+        let mut slow = record(1, "slow", session(300, 0), 5000);
         slow.teardown = Some(Duration::from_millis(30));
+        let mut broken = record(3, "broken", session(0, 0), 0);
+        broken.session = None;
+        broken.body = None;
         let report = BrowserTestRunReport {
             tests: vec![
-                record(0, "fast", created(800), 100),
+                record(0, "fast", session(800, 700), 100),
                 slow,
-                record(2, "isolated", created(700), 300),
+                record(2, "waiting", session(700, 600), 300),
+                broken,
             ],
             ..BrowserTestRunReport::default()
         };
 
-        assert_that!(report.sessions_created()).is_equal_to(2);
-        assert_that!(report.sessions_reused()).is_equal_to(1);
-        assert_that!(report.session_creation_time()).is_equal_to(Duration::from_millis(1500));
-        assert_that!(report.session_reset_time()).is_equal_to(Duration::from_millis(20));
+        assert_that!(report.sessions_created()).is_equal_to(3);
+        assert_that!(report.session_creation_time()).is_equal_to(Duration::from_millis(1800));
+        assert_that!(report.session_wait_time()).is_equal_to(Duration::from_millis(1300));
         assert_that!(report.session_teardown_time()).is_equal_to(Duration::from_millis(30));
         assert_that!(report.body_time()).is_equal_to(Duration::from_millis(5400));
         let slowest: Vec<_> = report
@@ -448,12 +416,12 @@ mod tests {
             .into_iter()
             .map(|test| test.name.as_str())
             .collect();
-        assert_that!(slowest).is_equal_to(vec!["slow", "isolated", "fast"]);
+        assert_that!(slowest).is_equal_to(vec!["slow", "waiting", "fast", "broken"]);
     }
 
     #[test]
     fn report_aggregates_steps_across_tests() {
-        let mut first = record(0, "first", created(1), 1);
+        let mut first = record(0, "first", session(1, 0), 1);
         first.steps.insert(
             "goto".to_owned(),
             StepStats {
@@ -462,7 +430,7 @@ mod tests {
                 max: Duration::from_millis(200),
             },
         );
-        let mut second = record(1, "second", reused(1), 1);
+        let mut second = record(1, "second", session(1, 0), 1);
         second.steps.insert(
             "goto".to_owned(),
             StepStats {
@@ -498,25 +466,30 @@ mod tests {
 
     #[test]
     fn summary_lists_sessions_and_slowest_tests() {
-        let mut failed = record(1, "broken", reused(15), 2500);
+        let mut failed = record(1, "broken", session(400, 15), 2500);
         failed.outcome = TestOutcome::Failed;
         failed.teardown = Some(Duration::from_millis(40));
         let report = BrowserTestRunReport {
             total: Duration::from_secs(5),
             webdriver_startup: Duration::from_millis(300),
             webdriver_shutdown: Duration::from_millis(50),
-            tests: vec![record(0, "works", created(800), 1000), failed],
+            tests: vec![record(0, "works", session(800, 0), 1000), failed],
+            groups: vec![GroupRecord {
+                name: "after all".to_owned(),
+                duration: Duration::from_millis(1200),
+            }],
         };
 
         let summary = report.to_string();
 
         assert_that!(summary.as_str())
             .contains("Browser test run: 2 test(s), 1 passed, 1 failed, in 5.00s");
-        assert_that!(summary.as_str()).contains(
-            "1 created in 800ms (avg 800ms), 1 reused after resets taking 15ms (avg 15ms), quit in 40ms",
-        );
         assert_that!(summary.as_str())
-            .contains("broken [failed] (reused session, reset 15ms, body 2.50s, quit 40ms)");
+            .contains("2 created in 1.20s (avg 600ms), tests waited 15ms for them, quit in 40ms");
+        assert_that!(summary.as_str())
+            .contains("broken [failed] (session 400ms, waited 15ms, body 2.50s, quit 40ms)");
+        assert_that!(summary.as_str()).contains("works (session 800ms, body 1.00s)");
+        assert_that!(summary.as_str()).contains("  groups:\n        1.20s  after all");
         let broken = summary.find("broken").expect("summary lists the slow test");
         let works = summary.find("works").expect("summary lists the fast test");
         assert_that!(broken < works).is_true();

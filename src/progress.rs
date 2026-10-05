@@ -1,6 +1,6 @@
 //! Warnings about browser tests that make no progress.
 
-use std::fmt::{self, Display};
+use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -40,15 +40,14 @@ pub struct ProgressWarnings {
     )]
     test_running: Option<Duration>,
 
-    /// Warn when creating, resetting, or quitting a session takes longer than this. Defaults to 5
-    /// seconds.
+    /// Warn when creating or quitting a session takes longer than this. Defaults to 5 seconds.
     #[builder(
         default = Some(Duration::from_secs(5)),
         setter(strip_option(fallback_suffix = "_opt"))
     )]
     session: Option<Duration>,
 
-    /// Warn when a [`crate::step`] takes longer than this. Defaults to 2 seconds.
+    /// Warn when a [`crate::Step`] takes longer than this. Defaults to 2 seconds.
     #[builder(
         default = Some(DEFAULT_SLOW_STEP),
         setter(strip_option(fallback_suffix = "_opt"))
@@ -79,13 +78,13 @@ impl ProgressWarnings {
         self.test_running
     }
 
-    /// Threshold for creating, resetting, and quitting sessions.
+    /// Threshold for creating and quitting sessions.
     #[must_use]
     pub const fn session(self) -> Option<Duration> {
         self.session
     }
 
-    /// Threshold for [`crate::step`]s.
+    /// Threshold for [`crate::Step`]s.
     #[must_use]
     pub const fn slow_step(self) -> Option<Duration> {
         self.slow_step
@@ -94,9 +93,7 @@ impl ProgressWarnings {
     const fn threshold(self, phase: Phase) -> Option<Duration> {
         match phase {
             Phase::RunningTest => self.test_running,
-            Phase::CreatingSession | Phase::ResettingSession | Phase::QuittingSession => {
-                self.session
-            }
+            Phase::CreatingSession | Phase::QuittingSession => self.session,
         }
     }
 
@@ -110,76 +107,86 @@ impl ProgressWarnings {
     }
 }
 
-/// What a parallel slot is doing.
+/// What the runner is doing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {
     CreatingSession,
-    ResettingSession,
     RunningTest,
     QuittingSession,
 }
 
-impl Display for Phase {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::CreatingSession => "creating a session for",
-            Self::ResettingSession => "resetting the session for",
-            Self::RunningTest => "running",
-            Self::QuittingSession => "quitting the session of",
-        })
-    }
+/// Something the runner does that the watchdog follows: a test, or a session of the session pool
+/// that is not yet assigned to a test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Activity {
+    /// The test with the given index.
+    Test(usize),
+    /// The pool session with the given number.
+    Session(usize),
 }
 
 #[derive(Debug)]
-struct SlotStatus {
-    test: String,
+struct ActivityStatus {
+    /// What the warning is about, e.g. `browser test 'login'`.
+    subject: String,
     phase: Phase,
     since: Instant,
     warnings: u32,
 }
 
-/// What every parallel slot is currently doing, for the watchdog.
-#[derive(Debug)]
+/// What the runner is currently doing, for the watchdog.
+#[derive(Debug, Default)]
 pub(crate) struct ProgressBoard {
-    slots: Mutex<Vec<Option<SlotStatus>>>,
+    activities: Mutex<BTreeMap<Activity, ActivityStatus>>,
 }
 
 impl ProgressBoard {
-    pub(crate) fn new(slots: usize) -> Self {
-        Self {
-            slots: Mutex::new((0..slots).map(|_| None).collect()),
-        }
+    /// Record that `activity` entered `phase`. `subject` names it in warnings.
+    pub(crate) fn enter(&self, activity: Activity, subject: impl Into<String>, phase: Phase) {
+        self.activities
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                activity,
+                ActivityStatus {
+                    subject: subject.into(),
+                    phase,
+                    since: Instant::now(),
+                    warnings: 0,
+                },
+            );
     }
 
-    pub(crate) fn enter(&self, slot: usize, test: &str, phase: Phase) {
-        self.slots.lock().unwrap_or_else(PoisonError::into_inner)[slot] = Some(SlotStatus {
-            test: test.to_owned(),
-            phase,
-            since: Instant::now(),
-            warnings: 0,
-        });
+    pub(crate) fn clear(&self, activity: Activity) {
+        self.activities
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&activity);
     }
 
-    pub(crate) fn clear(&self, slot: usize) {
-        self.slots.lock().unwrap_or_else(PoisonError::into_inner)[slot] = None;
-    }
-
-    /// Log a warning for every slot whose current phase exceeded its threshold once more.
+    /// Log a warning for every activity whose current phase exceeded its threshold once more.
     fn warn_overdue(&self, warnings: ProgressWarnings, now: Instant) {
-        let mut slots = self.slots.lock().unwrap_or_else(PoisonError::into_inner);
-        for status in slots.iter_mut().flatten() {
+        let mut activities = self
+            .activities
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for status in activities.values_mut() {
             let Some(threshold) = warnings.threshold(status.phase) else {
                 continue;
             };
             let elapsed = now.saturating_duration_since(status.since);
             if is_overdue(elapsed, threshold, status.warnings) {
                 status.warnings += 1;
+                let doing = match status.phase {
+                    Phase::CreatingSession => "creating",
+                    Phase::RunningTest => "running",
+                    Phase::QuittingSession => "quitting the session of",
+                };
                 tracing::warn!(
-                    test = %status.test,
+                    subject = %status.subject,
                     elapsed_ms = elapsed.as_millis(),
-                    "Still {} browser test '{}' after {}.",
-                    status.phase,
-                    status.test,
+                    "Still {doing} {} after {}.",
+                    status.subject,
                     FormatDuration(elapsed),
                 );
             }
@@ -247,22 +254,20 @@ mod tests {
 
     #[test]
     fn board_counts_warnings_per_phase() {
-        let board = ProgressBoard::new(2);
+        let board = ProgressBoard::default();
         let warnings = ProgressWarnings::default();
-        board.enter(1, "slow test", Phase::RunningTest);
-        let since = board.slots.lock().unwrap()[1]
-            .as_ref()
-            .map(|status| status.since)
-            .unwrap();
+        let test = Activity::Test(1);
+        board.enter(test, "browser test 'slow test'", Phase::RunningTest);
+        let since = board.activities.lock().unwrap()[&test].since;
 
         board.warn_overdue(warnings, since + Duration::from_secs(31));
         board.warn_overdue(warnings, since + Duration::from_secs(32));
 
-        assert_that!(board.slots.lock().unwrap()[1].as_ref().unwrap().warnings).is_equal_to(1);
+        assert_that!(board.activities.lock().unwrap()[&test].warnings).is_equal_to(1);
 
-        board.enter(1, "slow test", Phase::QuittingSession);
-        assert_that!(board.slots.lock().unwrap()[1].as_ref().unwrap().warnings).is_equal_to(0);
-        board.clear(1);
-        assert_that!(board.slots.lock().unwrap()[1].is_none()).is_true();
+        board.enter(test, "browser test 'slow test'", Phase::QuittingSession);
+        assert_that!(board.activities.lock().unwrap()[&test].warnings).is_equal_to(0);
+        board.clear(test);
+        assert_that!(board.activities.lock().unwrap().contains_key(&test)).is_false();
     }
 }

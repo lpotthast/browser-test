@@ -4,13 +4,9 @@ use async_trait::async_trait;
 use rootcause::Report;
 use thirtyfour::WebDriver;
 
-use crate::{BrowserTimeouts, ElementQueryWaitConfig, SessionRequirement};
+use crate::{ElementQueryWait, Parallelism, Timeouts};
 
-/// A browser test that runs against a `WebDriver` session.
-///
-/// By default, tests share sessions: the runner hands a session that a passing test used on to the
-/// next test, after resetting it. Return [`SessionRequirement::Fresh`] from [`Self::session`] for
-/// tests that need a session of their own.
+/// A browser test that can run against one fresh `WebDriver` session.
 // `async_trait` marks the boxed futures `#[must_use]`, which they are already.
 #[allow(clippy::double_must_use)]
 #[async_trait]
@@ -28,66 +24,87 @@ where
     /// Optional timeouts for this test.
     ///
     /// Returning `None` uses the runner's default timeout configuration, if one is set.
-    fn timeouts(&self) -> Option<BrowserTimeouts> {
+    fn timeouts(&self) -> Option<Timeouts> {
         None
     }
 
     /// Optional element query wait configuration for this test.
     ///
     /// Returning `None` uses the runner's default element query wait configuration, if one is set.
-    fn element_query_wait(&self) -> Option<ElementQueryWaitConfig> {
+    fn element_query_wait(&self) -> Option<ElementQueryWait> {
         None
-    }
-
-    /// Whether this test may share its `WebDriver` session with other tests.
-    ///
-    /// Defaults to [`SessionRequirement::Shared`]. See the crate documentation ("Session Reuse")
-    /// for what a shared session's reset clears before a test runs.
-    fn session(&self) -> SessionRequirement {
-        SessionRequirement::Shared
     }
 
     /// Execute the test body.
     async fn run(&self, driver: &WebDriver, context: &Context) -> Result<(), Report<TestError>>;
 }
 
-/// A collection of browser tests for [`crate::BrowserTestRunner`].
+/// A group of browser tests and nested groups, and how they run.
 ///
-/// This type erases each concrete test into the boxed trait object used by the runner while
-/// keeping call sites concise.
+/// A group runs its entries either one after another ([`Self::sequential`]) or up to a number of
+/// entries at the same time ([`Self::parallel`]). Entries are tests ([`Self::with`]) and nested
+/// groups ([`Self::with_group`]), so any mix of sequential and parallel execution can be expressed:
+/// a sequential group of groups runs stages one after another, and a sequential group inside a
+/// parallel group keeps its tests from running at the same time while other tests run alongside.
+///
+/// Entries start in the order they were added. Every test runs in a fresh browser session. How
+/// failures affect the run is decided by [`crate::BrowserTestRunner::with_failure_policy`]: with
+/// [`crate::FailurePolicy::RunAll`] every test runs; with [`crate::FailurePolicy::FailFast`] no
+/// further test starts after a failure, except in groups marked [`Self::run_always`].
 ///
 /// # Examples
 ///
 /// ```rust,no_run
 /// # use std::borrow::Cow;
 /// # use browser_test::thirtyfour::WebDriver;
-/// # use browser_test::{async_trait, BrowserTest, BrowserTests};
+/// # use browser_test::{async_trait, BrowserTest, BrowserTests, Parallelism};
 /// # use rootcause::Report;
-/// # struct OpensHomePage;
-///
-/// #[async_trait]
-/// impl BrowserTest for OpensHomePage {
-///     fn name(&self) -> Cow<'_, str> { "opens home page".into() }
-///     async fn run(&self, _driver: &WebDriver, _context: &()) -> Result<(), Report> { Ok(()) }
-/// }
-///
-/// struct SearchWorks;
-/// #[async_trait]
-/// impl BrowserTest for SearchWorks {
-///     fn name(&self) -> Cow<'_, str> { "search works".into() }
-///     async fn run(&self, _driver: &WebDriver, _context: &()) -> Result<(), Report> { Ok(()) }
-/// }
-///
-/// let tests = BrowserTests::new()
-///     .with(OpensHomePage)
-///     .with(SearchWorks);
+/// # macro_rules! test {
+/// #     ($name:ident) => {
+/// #         struct $name;
+/// #         #[async_trait]
+/// #         impl BrowserTest for $name {
+/// #             fn name(&self) -> Cow<'_, str> { stringify!($name).into() }
+/// #             async fn run(&self, _driver: &WebDriver, _context: &()) -> Result<(), Report> { Ok(()) }
+/// #         }
+/// #     };
+/// # }
+/// # test!(Buttons); test!(Tables); test!(CreateUser); test!(DeleteUser); test!(ServerDidNotPanic);
+/// let tests = BrowserTests::sequential()
+///     .with_group(
+///         BrowserTests::parallel(Parallelism::from_env()?.unwrap_or(Parallelism::parallel(4)))
+///             .with(Buttons)
+///             .with(Tables)
+///             // These two share server state, so they must not run at the same time.
+///             .with_group(BrowserTests::sequential().with(CreateUser).with(DeleteUser)),
+///     )
+///     .with_group(
+///         BrowserTests::sequential()
+///             .named("after all")
+///             .run_always()
+///             .with(ServerDidNotPanic),
+///     );
+/// # Ok::<(), browser_test::InvalidEnvVar>(())
 /// ```
 pub struct BrowserTests<Context = (), TestError = rootcause::markers::Dynamic>
 where
     Context: Sync + ?Sized,
     TestError: ?Sized,
 {
-    tests: Vec<Box<dyn BrowserTest<Context, TestError>>>,
+    parallelism: Parallelism,
+    name: Option<String>,
+    run_always: bool,
+    entries: Vec<BrowserTestEntry<Context, TestError>>,
+}
+
+/// An entry of a [`BrowserTests`] group.
+pub(crate) enum BrowserTestEntry<Context, TestError>
+where
+    Context: Sync + ?Sized,
+    TestError: ?Sized,
+{
+    Test(Box<dyn BrowserTest<Context, TestError>>),
+    Group(BrowserTests<Context, TestError>),
 }
 
 impl<Context, TestError> BrowserTests<Context, TestError>
@@ -95,49 +112,74 @@ where
     Context: Sync + ?Sized,
     TestError: ?Sized,
 {
-    /// Creates an empty browser test collection.
+    /// A group running its entries one after another.
     #[must_use]
-    pub const fn new() -> Self {
-        Self { tests: Vec::new() }
+    pub const fn sequential() -> Self {
+        Self::parallel(Parallelism::sequential())
     }
 
-    /// Adds a test and returns the collection for chaining.
+    /// A group running up to `parallelism` of its entries at the same time.
+    #[must_use]
+    pub const fn parallel(parallelism: Parallelism) -> Self {
+        Self {
+            parallelism,
+            name: None,
+            run_always: false,
+            entries: Vec::new(),
+        }
+    }
+
+    /// Name this group. The run report lists the wall time of named groups, and the records of
+    /// their tests carry the name.
+    #[must_use]
+    pub fn named(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Run this group's tests even after a failure stopped the run under
+    /// [`crate::FailurePolicy::FailFast`], e.g. for checks that must see the whole run.
+    #[must_use]
+    pub const fn run_always(mut self) -> Self {
+        self.run_always = true;
+        self
+    }
+
+    /// Add a test.
     #[must_use]
     pub fn with<T>(mut self, test: T) -> Self
     where
         T: BrowserTest<Context, TestError> + 'static,
     {
-        self.push(test);
+        self.entries.push(BrowserTestEntry::Test(Box::new(test)));
         self
     }
 
-    /// Adds a test to the collection.
-    pub fn push<T>(&mut self, test: T) -> &mut Self
-    where
-        T: BrowserTest<Context, TestError> + 'static,
-    {
-        self.tests.push(Box::new(test));
+    /// Add a nested group.
+    #[must_use]
+    pub fn with_group(mut self, group: Self) -> Self {
+        self.entries.push(BrowserTestEntry::Group(group));
         self
     }
 
-    /// Returns `true` if the collection contains no tests.
+    /// Whether this group contains no test, directly or in nested groups.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.tests.is_empty()
+        self.entries.iter().all(|entry| match entry {
+            BrowserTestEntry::Test(_) => false,
+            BrowserTestEntry::Group(group) => group.is_empty(),
+        })
     }
 
-    pub(crate) fn into_vec(self) -> Vec<Box<dyn BrowserTest<Context, TestError>>> {
-        self.tests
-    }
-}
-
-impl<Context, TestError> Default for BrowserTests<Context, TestError>
-where
-    Context: Sync + ?Sized,
-    TestError: ?Sized,
-{
-    fn default() -> Self {
-        Self::new()
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Parallelism,
+        Option<String>,
+        bool,
+        Vec<BrowserTestEntry<Context, TestError>>,
+    ) {
+        (self.parallelism, self.name, self.run_always, self.entries)
     }
 }
 
@@ -148,25 +190,24 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BrowserTests")
-            .field("tests", &BrowserTestNames(&self.tests))
+            .field("parallelism", &self.parallelism)
+            .field("name", &self.name)
+            .field("run_always", &self.run_always)
+            .field("entries", &self.entries)
             .finish()
     }
 }
 
-struct BrowserTestNames<'a, Context, TestError>(&'a [Box<dyn BrowserTest<Context, TestError>>])
-where
-    Context: Sync + ?Sized,
-    TestError: ?Sized;
-
-impl<Context, TestError> fmt::Debug for BrowserTestNames<'_, Context, TestError>
+impl<Context, TestError> fmt::Debug for BrowserTestEntry<Context, TestError>
 where
     Context: Sync + ?Sized,
     TestError: ?Sized,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_list()
-            .entries(self.0.iter().map(|test| test.name()))
-            .finish()
+        match self {
+            Self::Test(test) => write!(f, "{:?}", test.name()),
+            Self::Group(group) => group.fmt(f),
+        }
     }
 }
 
@@ -188,14 +229,30 @@ mod tests {
     }
 
     #[test]
-    fn browser_tests_debug_prints_test_names() {
-        let tests = BrowserTests::new()
+    fn browser_tests_debug_prints_the_tree_with_test_names() {
+        let tests = BrowserTests::sequential()
             .with(NamedTest("opens home page"))
-            .with(NamedTest("search works"));
+            .with_group(
+                BrowserTests::sequential()
+                    .named("nested")
+                    .with(NamedTest("search works")),
+            );
 
         assert_eq!(
             format!("{tests:?}"),
-            r#"BrowserTests { tests: ["opens home page", "search works"] }"#
+            concat!(
+                r#"BrowserTests { parallelism: Parallelism { max_parallel_tests: None }, name: None, "#,
+                r#"run_always: false, entries: ["opens home page", BrowserTests { parallelism: "#,
+                r#"Parallelism { max_parallel_tests: None }, name: Some("nested"), run_always: false, "#,
+                r#"entries: ["search works"] }] }"#,
+            )
         );
+    }
+
+    #[test]
+    fn groups_without_tests_are_empty() {
+        let empty = BrowserTests::<()>::sequential().with_group(BrowserTests::sequential());
+        assert!(empty.is_empty());
+        assert!(!empty.with(NamedTest("test")).is_empty());
     }
 }

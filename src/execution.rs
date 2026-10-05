@@ -1,8 +1,17 @@
+//! Executes a tree of browser tests.
+//!
+//! Groups run recursively: a group starts its entries in order, at most its parallelism at once.
+//! Every test runs in a fresh browser session taken from the [`SessionPool`], which keeps spare
+//! sessions ready so that a starting test rarely waits for a browser to start. A session's
+//! lifetime is bound to `chrome-for-testing-manager`'s scoped session API, so each session is
+//! owned by a worker future that creates it, offers it to the pool, runs the test it is assigned,
+//! and quits it. Worker futures are driven by [`drive_workers`]; everything crossing between them
+//! and the executor is plain data (test indices, channels), never a borrow of the run's state.
+
 use std::{
     any::Any,
     collections::{BTreeMap, VecDeque},
     future::Future,
-    num::NonZeroUsize,
     panic::AssertUnwindSafe,
     pin::{Pin, pin},
     sync::{
@@ -12,22 +21,24 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrome_for_testing_manager::{Chromedriver, Session};
-use futures_util::FutureExt as _;
+use chrome_for_testing_manager::{ChromeForTesting, Session};
+use futures_util::{FutureExt as _, StreamExt as _, stream::FuturesUnordered};
 use rootcause::Report;
 use thirtyfour::{ChromeCapabilities, ChromiumLikeCapabilities, error::WebDriverResult};
+use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::Instrument as _;
 
-use crate::progress::{Phase, ProgressBoard};
+use crate::progress::{Activity, Phase, ProgressBoard};
 use crate::report::{
-    BrowserTestRecord, FormatDuration, SessionAcquisition, StepStats, TestOutcome, timing_breakdown,
+    BrowserTestRecord, FormatDuration, GroupRecord, SessionTiming, StepStats, TestOutcome,
+    timing_breakdown,
 };
 use crate::scheduler::BrowserTestFailures;
-use crate::session::{SessionBaseline, SessionSettings};
 use crate::step::StepRecorder;
+use crate::test_case::BrowserTestEntry;
 use crate::{
-    BrowserTest, BrowserTestError, BrowserTestFailurePolicy, BrowserTests, BrowserTimeouts,
-    ElementQueryWaitConfig, ProgressWarnings, SessionRequirement, SessionReset,
+    BrowserTest, BrowserTestError, BrowserTests, ElementQueryWait, FailurePolicy, Parallelism,
+    ProgressWarnings, Timeouts,
 };
 
 pub(crate) type ChromeCapabilitiesSetup =
@@ -35,68 +46,96 @@ pub(crate) type ChromeCapabilitiesSetup =
 
 /// Everything the runner configured for executing tests.
 pub(crate) struct ExecutionConfig<'a> {
-    pub(crate) chromedriver: &'a Chromedriver,
+    pub(crate) chrome: &'a ChromeForTesting,
     pub(crate) visible: bool,
-    pub(crate) webdriver_timeouts: Option<&'a BrowserTimeouts>,
-    pub(crate) element_query_wait: Option<&'a ElementQueryWaitConfig>,
+    pub(crate) timeouts: Option<&'a Timeouts>,
+    pub(crate) element_query_wait: Option<&'a ElementQueryWait>,
     pub(crate) chrome_capabilities_setups: &'a [Arc<ChromeCapabilitiesSetup>],
-    pub(crate) session_reuse: bool,
-    pub(crate) session_resets: &'a [Arc<dyn SessionReset>],
-    pub(crate) failure_policy: BrowserTestFailurePolicy,
+    pub(crate) failure_policy: FailurePolicy,
     pub(crate) progress_warnings: ProgressWarnings,
-    pub(crate) max_parallel_tests: NonZeroUsize,
+    /// Spare sessions kept ready. `None`: one per test that can run at the same time.
+    pub(crate) spare_sessions: Option<usize>,
 }
 
-/// Run `tests`, each parallel slot reusing its session for consecutive compatible tests.
-///
-/// Returns a record per started test (in test order) and the run's result.
+/// What executing a test tree produced.
+pub(crate) struct Execution {
+    /// A record per started test, in test order.
+    pub(crate) records: Vec<BrowserTestRecord>,
+    /// The timing of every named group, in definition order.
+    pub(crate) groups: Vec<GroupRecord>,
+    pub(crate) result: Result<(), Report<BrowserTestError>>,
+}
+
+/// Run every test of `tests`.
 pub(crate) async fn execute_tests<Context, TestError>(
     config: &ExecutionConfig<'_>,
     context: &Context,
     tests: BrowserTests<Context, TestError>,
-) -> (Vec<BrowserTestRecord>, Result<(), Report<BrowserTestError>>)
+) -> Execution
 where
     Context: Sync + ?Sized,
     TestError: ?Sized + 'static,
 {
-    let queue = tests
-        .into_vec()
-        .into_iter()
-        .enumerate()
-        .map(|(index, test)| prepare_test(index, test, config))
-        .collect();
-    let slots = config.max_parallel_tests.get();
-    let shared = Shared {
-        queue: Mutex::new(queue),
+    let mut prepared = Vec::new();
+    let mut next_group = 0;
+    let root = prepare_group(tests, None, &mut prepared, &mut next_group, config);
+    let max_concurrency = root.max_concurrency();
+    let default_wait = config.element_query_wait.copied();
+    let pooled_tests = prepared
+        .iter()
+        .filter(|test| matches!(test, QueuedTest::Ready(test) if test.element_query_wait == default_wait))
+        .count();
+    let (requests_tx, requests_rx) = mpsc::unbounded_channel();
+    let env = Env {
+        config,
+        context,
+        tests: prepared,
         keep_starting: AtomicBool::new(true),
-        failure_policy: config.failure_policy,
-        failures: Mutex::new(BrowserTestFailures::default()),
-        records: Mutex::new(Vec::new()),
-        board: ProgressBoard::new(slots),
+        failures: Mutex::default(),
+        records: Mutex::default(),
+        groups: Mutex::default(),
+        board: ProgressBoard::default(),
+        pool: SessionPool::new(
+            config.spare_sessions.unwrap_or(max_concurrency),
+            pooled_tests,
+            default_wait,
+            requests_tx,
+        ),
     };
 
-    let workers = futures_util::future::join_all((0..slots).map(|slot| {
-        Box::pin(run_slot(slot, &shared, config, context))
-            as Pin<Box<dyn Future<Output = ()> + Send + '_>>
-    }));
-    // The watchdog never finishes on its own; it is dropped once all workers are done.
-    let watchdog = shared.board.watch(config.progress_warnings);
-    futures_util::future::select(pin!(workers), pin!(watchdog)).await;
+    env.pool.replenish(true);
+    let execution = async {
+        run_group(&env, &root, false).await;
+        env.pool.close();
+    };
+    let run = futures_util::future::join(execution, drive_workers(&env, requests_rx));
+    // The watchdog never finishes on its own; it is dropped once the run is done.
+    let watchdog = env.board.watch(config.progress_warnings);
+    futures_util::future::select(pin!(run), pin!(watchdog)).await;
 
-    let Shared {
-        failures, records, ..
-    } = shared;
+    let Env {
+        failures,
+        records,
+        groups,
+        ..
+    } = env;
     let mut records = records.into_inner().unwrap_or_else(PoisonError::into_inner);
     records.sort_by_key(|record| record.index);
+    let mut groups = groups.into_inner().unwrap_or_else(PoisonError::into_inner);
+    groups.sort_by_key(|(id, _)| *id);
     let failures = failures
         .into_inner()
         .unwrap_or_else(PoisonError::into_inner);
-    let result = if slots == 1 && config.failure_policy == BrowserTestFailurePolicy::FailFast {
+    let result = if max_concurrency == 1 && config.failure_policy == FailurePolicy::FailFast {
         failures.into_first_result()
     } else {
         failures.into_result()
     };
-    (records, result)
+    Execution {
+        records,
+        groups: groups.into_iter().map(|(_, group)| group).collect(),
+        result,
+    }
 }
 
 /// A test whose metadata (name, session settings) was read successfully.
@@ -107,8 +146,9 @@ where
 {
     index: usize,
     name: String,
-    settings: SessionSettings,
-    requirement: SessionRequirement,
+    group: Option<String>,
+    timeouts: Option<Timeouts>,
+    element_query_wait: Option<ElementQueryWait>,
     test: Box<dyn BrowserTest<Context, TestError>>,
 }
 
@@ -122,13 +162,98 @@ where
     Broken {
         index: usize,
         name: String,
-        report: Report<BrowserTestError>,
+        group: Option<String>,
+        panic_message: String,
     },
+}
+
+/// A group of the test tree, with its tests referenced by index.
+struct Group {
+    /// Definition order, for sorting group records.
+    id: usize,
+    /// The group's name path, if the group is named.
+    name: Option<String>,
+    run_always: bool,
+    parallelism: Parallelism,
+    children: Vec<Node>,
+}
+
+enum Node {
+    Test(usize),
+    Group(Group),
+}
+
+impl Group {
+    /// How many tests of this group can run at the same time.
+    fn max_concurrency(&self) -> usize {
+        let mut children: Vec<usize> = self
+            .children
+            .iter()
+            .map(|child| match child {
+                Node::Test(_) => 1,
+                Node::Group(group) => group.max_concurrency(),
+            })
+            .collect();
+        children.sort_unstable_by(|a, b| b.cmp(a));
+        children
+            .into_iter()
+            .take(self.parallelism.max_parallel_tests().get())
+            .sum::<usize>()
+            .max(1)
+    }
+}
+
+/// Number the tests of `tests` in definition order into `prepared` and build the tree.
+fn prepare_group<Context, TestError>(
+    tests: BrowserTests<Context, TestError>,
+    parent_path: Option<&str>,
+    prepared: &mut Vec<QueuedTest<Context, TestError>>,
+    next_group: &mut usize,
+    config: &ExecutionConfig<'_>,
+) -> Group
+where
+    Context: Sync + ?Sized,
+    TestError: ?Sized + 'static,
+{
+    let (parallelism, name, run_always, entries) = tests.into_parts();
+    let named = name.is_some();
+    let path = match (parent_path, name) {
+        (Some(parent), Some(name)) => Some(format!("{parent} / {name}")),
+        (None, Some(name)) => Some(name),
+        (parent, None) => parent.map(str::to_owned),
+    };
+    let id = *next_group;
+    *next_group += 1;
+    let children = entries
+        .into_iter()
+        .map(|entry| match entry {
+            BrowserTestEntry::Test(test) => {
+                let index = prepared.len();
+                prepared.push(prepare_test(index, test, path.clone(), config));
+                Node::Test(index)
+            }
+            BrowserTestEntry::Group(group) => Node::Group(prepare_group(
+                group,
+                path.as_deref(),
+                prepared,
+                next_group,
+                config,
+            )),
+        })
+        .collect();
+    Group {
+        id,
+        name: if named { path } else { None },
+        run_always,
+        parallelism,
+        children,
+    }
 }
 
 fn prepare_test<Context, TestError>(
     index: usize,
     test: Box<dyn BrowserTest<Context, TestError>>,
+    group: Option<String>,
     config: &ExecutionConfig<'_>,
 ) -> QueuedTest<Context, TestError>
 where
@@ -139,126 +264,62 @@ where
     let mut name = format!("unnamed test at index {index}");
     let metadata = std::panic::catch_unwind(AssertUnwindSafe(|| {
         name = test.name().into_owned();
-        let settings = SessionSettings {
-            timeouts: resolve_webdriver_timeouts(test.as_ref(), config.webdriver_timeouts),
-            element_query_wait: resolve_element_query_wait(
-                test.as_ref(),
-                config.element_query_wait,
-            ),
-        };
-        (settings, test.session())
+        (
+            resolve_webdriver_timeouts(test.as_ref(), config.timeouts),
+            resolve_element_query_wait(test.as_ref(), config.element_query_wait),
+        )
     }));
     match metadata {
-        Ok((settings, requirement)) => QueuedTest::Ready(PreparedTest {
+        Ok((timeouts, element_query_wait)) => QueuedTest::Ready(PreparedTest {
             index,
             name,
-            settings,
-            requirement,
+            group,
+            timeouts,
+            element_query_wait,
             test,
         }),
         Err(payload) => {
-            let message = panic_payload_message(payload.as_ref());
-            tracing::error!("Browser test '{name}' panicked: {message}");
+            let panic_message = panic_payload_message(payload.as_ref());
+            tracing::error!("Browser test '{name}' panicked: {panic_message}");
             QueuedTest::Broken {
                 index,
-                report: Report::new(BrowserTestError::Panic {
-                    test_name: name.clone(),
-                    message,
-                }),
                 name,
+                group,
+                panic_message,
             }
         }
     }
 }
 
-/// State shared by all parallel slots.
-struct Shared<Context, TestError>
+/// State of one run, shared by the executor and the session workers.
+struct Env<'c, Context, TestError>
 where
     Context: Sync + ?Sized,
     TestError: ?Sized,
 {
-    queue: Mutex<VecDeque<QueuedTest<Context, TestError>>>,
+    config: &'c ExecutionConfig<'c>,
+    context: &'c Context,
+    tests: Vec<QueuedTest<Context, TestError>>,
     keep_starting: AtomicBool,
-    failure_policy: BrowserTestFailurePolicy,
     failures: Mutex<BrowserTestFailures>,
     records: Mutex<Vec<BrowserTestRecord>>,
+    groups: Mutex<Vec<(usize, GroupRecord)>>,
     board: ProgressBoard,
+    pool: SessionPool,
 }
 
-impl<Context, TestError> Shared<Context, TestError>
+impl<Context, TestError> Env<'_, Context, TestError>
 where
     Context: Sync + ?Sized,
     TestError: ?Sized,
 {
-    /// The next test to start, in a session of its own.
-    fn next_test(&self) -> Option<PreparedTest<Context, TestError>> {
-        self.pop_front_if(|_| true)
+    fn keep_starting(&self) -> bool {
+        self.keep_starting.load(Ordering::SeqCst)
     }
 
-    /// The next test, if it may reuse a session created with `settings`.
-    fn next_test_for_session(
-        &self,
-        settings: SessionSettings,
-    ) -> Option<PreparedTest<Context, TestError>> {
-        self.pop_front_if(|test| {
-            test.requirement == SessionRequirement::Shared && test.settings == settings
-        })
-    }
-
-    /// Pop the front test if it matches `accept`. Broken tests at the front fail on the way.
-    fn pop_front_if(
-        &self,
-        accept: impl Fn(&PreparedTest<Context, TestError>) -> bool,
-    ) -> Option<PreparedTest<Context, TestError>> {
-        let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
-        loop {
-            if !self.keep_starting.load(Ordering::SeqCst) {
-                return None;
-            }
-            match queue.front()? {
-                QueuedTest::Broken { .. } => {
-                    let Some(QueuedTest::Broken {
-                        index,
-                        name,
-                        report,
-                    }) = queue.pop_front()
-                    else {
-                        unreachable!("the front of the queue was just checked");
-                    };
-                    let record = BrowserTestRecord {
-                        index,
-                        name,
-                        outcome: TestOutcome::Panicked,
-                        slot: 0,
-                        session: SessionAcquisition::None,
-                        body: None,
-                        teardown: None,
-                        steps: BTreeMap::new(),
-                    };
-                    self.finish(record, Err(report));
-                }
-                QueuedTest::Ready(test) if accept(test) => {
-                    let Some(QueuedTest::Ready(test)) = queue.pop_front() else {
-                        unreachable!("the front of the queue was just checked");
-                    };
-                    return Some(test);
-                }
-                QueuedTest::Ready(_) => return None,
-            }
-        }
-    }
-
-    /// Put a test back to the front of the queue (its session could not be reset).
-    fn requeue(&self, test: PreparedTest<Context, TestError>) {
-        self.queue
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push_front(QueuedTest::Ready(test));
-    }
-
-    /// With [`BrowserTestFailurePolicy::FailFast`], start no further tests (after a failure).
+    /// With [`FailurePolicy::FailFast`], start no further tests (after a failure).
     fn stop_starting_on_fail_fast(&self) {
-        if self.failure_policy == BrowserTestFailurePolicy::FailFast {
+        if self.config.failure_policy == FailurePolicy::FailFast {
             self.keep_starting.store(false, Ordering::SeqCst);
         }
     }
@@ -293,284 +354,584 @@ where
             .unwrap_or_else(PoisonError::into_inner)
             .push(record);
     }
+
+    fn warn_if_slow_session(&self, what: &str, duration: Duration) {
+        if let Some(threshold) = self.config.progress_warnings.session()
+            && duration > threshold
+        {
+            tracing::warn!(
+                duration_ms = duration.as_millis(),
+                "{what} took {}.",
+                FormatDuration(duration),
+            );
+        }
+    }
 }
 
-/// One parallel slot: runs tests until the queue is empty, starting a new session whenever the
-/// next test cannot reuse the current one.
-async fn run_slot<Context, TestError>(
-    slot: usize,
-    shared: &Shared<Context, TestError>,
-    config: &ExecutionConfig<'_>,
-    context: &Context,
+/// Run `group`, recording its wall time if it is named.
+fn run_group<'r, Context, TestError>(
+    env: &'r Env<'_, Context, TestError>,
+    group: &'r Group,
+    inherited_run_always: bool,
+) -> Pin<Box<dyn Future<Output = ()> + Send + 'r>>
+where
+    Context: Sync + ?Sized,
+    TestError: ?Sized + 'static,
+{
+    Box::pin(async move {
+        let run_always = inherited_run_always || group.run_always;
+        let start = Instant::now();
+        // The futures only start running when the stream polls them, in order.
+        let children: Vec<_> = group
+            .children
+            .iter()
+            .map(|child| run_node(env, child, run_always))
+            .collect();
+        futures_util::stream::iter(children)
+            .buffer_unordered(group.parallelism.max_parallel_tests().get())
+            .collect::<()>()
+            .await;
+        if let Some(name) = &group.name {
+            env.groups
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((
+                    group.id,
+                    GroupRecord {
+                        name: name.clone(),
+                        duration: start.elapsed(),
+                    },
+                ));
+        }
+    })
+}
+
+async fn run_node<Context, TestError>(
+    env: &Env<'_, Context, TestError>,
+    node: &Node,
+    run_always: bool,
 ) where
     Context: Sync + ?Sized,
     TestError: ?Sized + 'static,
 {
-    while let Some(test) = shared.next_test() {
-        run_session(slot, test, shared, config, context).await;
+    match node {
+        // Tests not started because of fail-fast are not recorded.
+        Node::Test(index) if run_always || env.keep_starting() => run_test(env, *index).await,
+        Node::Test(_) => {}
+        Node::Group(group) => run_group(env, group, run_always).await,
     }
-    shared.board.clear(slot);
 }
 
-/// The test currently using a session, and its timings so far.
-struct CurrentTest<Context, TestError>
+/// Run the test at `index` in a fresh session and return once its body finished. Its session
+/// quits, and its record is completed, in the background.
+async fn run_test<Context, TestError>(env: &Env<'_, Context, TestError>, index: usize)
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized,
+    TestError: ?Sized + 'static,
 {
-    test: PreparedTest<Context, TestError>,
-    session: SessionAcquisition,
+    let test = match &env.tests[index] {
+        QueuedTest::Ready(test) => test,
+        QueuedTest::Broken {
+            index,
+            name,
+            group,
+            panic_message,
+        } => {
+            let report = Report::new(BrowserTestError::Panic {
+                test_name: name.clone(),
+                message: panic_message.clone(),
+            });
+            let record = BrowserTestRecord {
+                index: *index,
+                name: name.clone(),
+                outcome: TestOutcome::Panicked,
+                group: group.clone(),
+                session: None,
+                body: None,
+                teardown: None,
+                steps: BTreeMap::new(),
+            };
+            env.finish(record, Err(report));
+            return;
+        }
+    };
+
+    let requested = Instant::now();
+    let ticket = if test.element_query_wait == env.pool.default_wait {
+        env.pool.take(env.keep_starting()).await
+    } else {
+        env.pool.dedicated(test.element_query_wait).await
+    };
+    let wait = requested.elapsed();
+    let failure = match ticket {
+        Ok(ticket) => {
+            let (body_done_tx, body_done_rx) = oneshot::channel();
+            let job = Job {
+                test: index,
+                wait,
+                body_done: body_done_tx,
+            };
+            match ticket.job.send(job) {
+                Ok(()) => {
+                    // An error means the worker ended without running the body; it recorded
+                    // the test itself.
+                    let _ = body_done_rx.await;
+                    return;
+                }
+                Err(_) => CreationFailure {
+                    report: rootcause::report!("the browser session ended before the test started"),
+                    creation: ticket.creation,
+                },
+            }
+        }
+        Err(failure) => failure,
+    };
+
+    let record = BrowserTestRecord {
+        index,
+        name: test.name.clone(),
+        outcome: TestOutcome::Failed,
+        group: test.group.clone(),
+        session: Some(SessionTiming {
+            creation: failure.creation,
+            wait,
+        }),
+        body: None,
+        teardown: None,
+        steps: BTreeMap::new(),
+    };
+    let report = failure.report.context(BrowserTestError::RunTest {
+        test_name: test.name.clone(),
+    });
+    env.finish(record, Err(report));
+}
+
+/// A test assigned to a session.
+struct Job {
+    test: usize,
+    /// How long the test waited for its session.
+    wait: Duration,
+    /// Completed once the test body finished, before the session quits.
+    body_done: oneshot::Sender<()>,
+}
+
+/// A session ready to run a test.
+struct Ticket {
+    job: oneshot::Sender<Job>,
+    /// How long creating the session took.
+    creation: Duration,
+}
+
+/// A session that could not be created.
+struct CreationFailure {
+    report: Report,
+    creation: Duration,
+}
+
+type TicketResult = Result<Ticket, CreationFailure>;
+
+/// Where a new session is offered.
+enum Delivery {
+    Pool,
+    Dedicated(oneshot::Sender<TicketResult>),
+}
+
+/// A request to create a session.
+struct WorkerRequest {
+    session: usize,
+    element_query_wait: Option<ElementQueryWait>,
+    delivery: Delivery,
+}
+
+/// Keeps fresh sessions with the runner's default settings ready for starting tests.
+struct SessionPool {
+    state: Mutex<PoolState>,
+    available: Notify,
+    /// Sessions to keep ready beyond those requested.
+    spare: usize,
+    default_wait: Option<ElementQueryWait>,
+    requests: mpsc::UnboundedSender<Option<WorkerRequest>>,
+}
+
+struct PoolState {
+    /// Created sessions not yet taken by a test.
+    idle: VecDeque<TicketResult>,
+    /// Sessions being created for the pool.
+    creating: usize,
+    /// Tests waiting for a pool session.
+    waiting: usize,
+    /// Pool tests that have not requested a session yet.
+    upcoming: usize,
+    next_session: usize,
+    closed: bool,
+}
+
+impl SessionPool {
+    fn new(
+        spare: usize,
+        upcoming: usize,
+        default_wait: Option<ElementQueryWait>,
+        requests: mpsc::UnboundedSender<Option<WorkerRequest>>,
+    ) -> Self {
+        Self {
+            state: Mutex::new(PoolState {
+                idle: VecDeque::new(),
+                creating: 0,
+                waiting: 0,
+                upcoming,
+                next_session: 0,
+                closed: false,
+            }),
+            available: Notify::new(),
+            spare,
+            default_wait,
+            requests,
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, PoolState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Create sessions for waiting tests and, unless tests stopped starting, spares for upcoming
+    /// ones.
+    fn replenish(&self, keep_starting: bool) {
+        self.replenish_locked(&mut self.lock(), keep_starting);
+    }
+
+    fn replenish_locked(&self, state: &mut PoolState, keep_starting: bool) {
+        let spares = if keep_starting {
+            self.spare.min(state.upcoming)
+        } else {
+            0
+        };
+        while !state.closed && state.idle.len() + state.creating < state.waiting + spares {
+            state.creating += 1;
+            let session = state.next_session;
+            state.next_session += 1;
+            let _ = self.requests.send(Some(WorkerRequest {
+                session,
+                element_query_wait: self.default_wait,
+                delivery: Delivery::Pool,
+            }));
+        }
+    }
+
+    /// Take a session for a starting test, waiting until one is ready.
+    async fn take(&self, keep_starting: bool) -> TicketResult {
+        {
+            let mut state = self.lock();
+            state.upcoming = state.upcoming.saturating_sub(1);
+            state.waiting += 1;
+            self.replenish_locked(&mut state, keep_starting);
+        }
+        loop {
+            let mut available = pin!(self.available.notified());
+            available.as_mut().enable();
+            {
+                let mut state = self.lock();
+                if let Some(ticket) = state.idle.pop_front() {
+                    state.waiting -= 1;
+                    self.replenish_locked(&mut state, keep_starting);
+                    return ticket;
+                }
+            }
+            available.await;
+        }
+    }
+
+    /// Create a session with non-default settings for one test.
+    async fn dedicated(&self, element_query_wait: Option<ElementQueryWait>) -> TicketResult {
+        let creation_start = Instant::now();
+        let (ticket_tx, ticket_rx) = oneshot::channel();
+        let session = {
+            let mut state = self.lock();
+            let session = state.next_session;
+            state.next_session += 1;
+            session
+        };
+        let _ = self.requests.send(Some(WorkerRequest {
+            session,
+            element_query_wait,
+            delivery: Delivery::Dedicated(ticket_tx),
+        }));
+        ticket_rx.await.unwrap_or_else(|_| {
+            Err(CreationFailure {
+                report: rootcause::report!("the browser session could not be created"),
+                creation: creation_start.elapsed(),
+            })
+        })
+    }
+
+    fn deliver(&self, delivery: Delivery, ticket: TicketResult) {
+        match delivery {
+            Delivery::Pool => {
+                {
+                    let mut state = self.lock();
+                    state.creating -= 1;
+                    if !state.closed {
+                        state.idle.push_back(ticket);
+                    }
+                }
+                self.available.notify_waiters();
+            }
+            Delivery::Dedicated(ticket_tx) => {
+                let _ = ticket_tx.send(ticket);
+            }
+        }
+    }
+
+    /// Create no further sessions and let idle ones quit.
+    fn close(&self) {
+        {
+            let mut state = self.lock();
+            state.closed = true;
+            state.idle.clear();
+        }
+        let _ = self.requests.send(None);
+    }
+}
+
+/// Drive the session workers until the pool closed and every worker finished.
+async fn drive_workers<Context, TestError>(
+    env: &Env<'_, Context, TestError>,
+    mut requests: mpsc::UnboundedReceiver<Option<WorkerRequest>>,
+) where
+    Context: Sync + ?Sized,
+    TestError: ?Sized + 'static,
+{
+    let mut workers = FuturesUnordered::new();
+    let mut closing = false;
+    loop {
+        if closing && workers.is_empty() {
+            return;
+        }
+        tokio::select! {
+            request = requests.recv(), if !closing => match request {
+                Some(Some(request)) => workers.push(session_worker(env, request)),
+                Some(None) | None => closing = true,
+            },
+            Some(()) = workers.next(), if !workers.is_empty() => {}
+        }
+    }
+}
+
+/// What happened while a session ran its test.
+struct JobRun {
+    index: usize,
+    creation: Duration,
+    wait: Duration,
     body: Option<Duration>,
     steps: BTreeMap<String, StepStats>,
     /// Set if the test body panicked.
     panic_message: Option<String>,
+    quit_start: Option<Instant>,
 }
 
-impl<Context, TestError> CurrentTest<Context, TestError>
-where
-    Context: Sync + ?Sized,
-    TestError: ?Sized,
-{
-    fn new(test: PreparedTest<Context, TestError>, session: SessionAcquisition) -> Self {
-        Self {
-            test,
-            session,
-            body: None,
-            steps: BTreeMap::new(),
-            panic_message: None,
-        }
-    }
-
-    fn into_record(
-        self,
-        slot: usize,
-        outcome: TestOutcome,
-        teardown: Option<Duration>,
-    ) -> BrowserTestRecord {
-        BrowserTestRecord {
-            index: self.test.index,
-            name: self.test.name,
-            outcome,
-            slot,
-            session: self.session,
-            body: self.body,
-            teardown,
-            steps: self.steps,
-        }
-    }
-}
-
-/// Create a session for `first` and keep running compatible tests in it.
-///
-/// The session ends after a test that failed, panicked, or must not share its session, when the
-/// next test needs other session settings, or when the session could not be reset.
-async fn run_session<Context, TestError>(
-    slot: usize,
-    first: PreparedTest<Context, TestError>,
-    shared: &Shared<Context, TestError>,
-    config: &ExecutionConfig<'_>,
-    context: &Context,
+/// Create a session, offer it, run the test it is assigned, and quit it.
+async fn session_worker<Context, TestError>(
+    env: &Env<'_, Context, TestError>,
+    request: WorkerRequest,
 ) where
     Context: Sync + ?Sized,
     TestError: ?Sized + 'static,
 {
-    let settings = first.settings;
-    let reusable = config.session_reuse && first.requirement == SessionRequirement::Shared;
-    shared
-        .board
-        .enter(slot, &first.name, Phase::CreatingSession);
+    let config = env.config;
+    let activity = Activity::Session(request.session);
+    env.board
+        .enter(activity, "a browser session", Phase::CreatingSession);
     let creation_start = Instant::now();
-    let mut current = CurrentTest::new(
-        first,
-        SessionAcquisition::Created {
-            duration: Duration::ZERO,
-        },
-    );
-    let mut quit_start = None;
-
+    let mut delivery = Some(request.delivery);
+    let mut job_run = None;
     let session_result = config
-        .chromedriver
+        .chrome
         .session()
         .with_caps(|caps: &mut ChromeCapabilities| {
             configure_chrome_capabilities(caps, config.visible, config.chrome_capabilities_setups)
         })
-        .with_config(|builder| match settings.element_query_wait {
+        .with_config(|builder| match request.element_query_wait {
             Some(wait) => builder.poller(Arc::new(wait.into_thirtyfour_poller())),
             None => builder,
         })
         .run(async |session: &Session| {
-            let result = drive_session(
-                slot,
-                session,
-                &mut current,
-                creation_start,
-                reusable,
-                shared,
-                config,
-                context,
-            )
-            .await;
-            shared
-                .board
-                .enter(slot, &current.test.name, Phase::QuittingSession);
-            quit_start = Some(Instant::now());
-            result
+            let creation = creation_start.elapsed();
+            env.board.clear(activity);
+            env.warn_if_slow_session("Creating a browser session", creation);
+            let (job_tx, job_rx) = oneshot::channel();
+            if let Some(delivery) = delivery.take() {
+                env.pool.deliver(
+                    delivery,
+                    Ok(Ticket {
+                        job: job_tx,
+                        creation,
+                    }),
+                );
+            }
+            // An error means no test needs this session anymore.
+            let Ok(job) = job_rx.await else {
+                return Ok(());
+            };
+            run_job(env, session, job, creation, &mut job_run).await
         })
         .await;
+    env.board.clear(activity);
 
-    let teardown = quit_start.map(|quit_start| quit_start.elapsed());
-    if quit_start.is_none() {
-        // The session could not be created.
-        current.session = SessionAcquisition::Created {
-            duration: creation_start.elapsed(),
+    if let Some(delivery) = delivery {
+        // The session could not be created, so it was never offered.
+        let report = match session_result {
+            Err(error) => error.into_dynamic(),
+            Ok(()) => rootcause::report!("the browser session ended before it could be used"),
         };
+        env.pool.deliver(
+            delivery,
+            Err(CreationFailure {
+                report,
+                creation: creation_start.elapsed(),
+            }),
+        );
+        return;
     }
-    warn_if_slow_session(
-        config,
-        "Quitting the session of",
-        &current.test.name,
-        teardown,
-    );
+    let Some(job_run) = job_run else {
+        return;
+    };
 
-    let (outcome, result) = match current.panic_message.take() {
-        Some(message) => (
-            TestOutcome::Panicked,
-            Err(Report::new(BrowserTestError::Panic {
-                test_name: current.test.name.clone(),
-                message,
+    let QueuedTest::Ready(test) = &env.tests[job_run.index] else {
+        unreachable!("only ready tests are assigned to sessions");
+    };
+    let teardown = job_run.quit_start.map(|quit_start| quit_start.elapsed());
+    env.board.clear(Activity::Test(job_run.index));
+    if let Some(teardown) = teardown {
+        env.warn_if_slow_session(
+            &format!("Quitting the session of browser test '{}'", test.name),
+            teardown,
+        );
+    }
+    let (outcome, result) = test_outcome(&test.name, job_run.panic_message, session_result);
+    let record = BrowserTestRecord {
+        index: job_run.index,
+        name: test.name.clone(),
+        outcome,
+        group: test.group.clone(),
+        session: Some(SessionTiming {
+            creation: job_run.creation,
+            wait: job_run.wait,
+        }),
+        body: job_run.body,
+        teardown,
+        steps: job_run.steps,
+    };
+    env.finish(record, result);
+}
+
+/// Run the assigned test in `session`, then report that its body finished.
+async fn run_job<Context, TestError>(
+    env: &Env<'_, Context, TestError>,
+    session: &Session,
+    job: Job,
+    creation: Duration,
+    job_run: &mut Option<JobRun>,
+) -> Result<(), Report>
+where
+    Context: Sync + ?Sized,
+    TestError: ?Sized + 'static,
+{
+    let QueuedTest::Ready(test) = &env.tests[job.test] else {
+        unreachable!("only ready tests are assigned to sessions");
+    };
+    let run = job_run.insert(JobRun {
+        index: job.test,
+        creation,
+        wait: job.wait,
+        body: None,
+        steps: BTreeMap::new(),
+        panic_message: None,
+        quit_start: None,
+    });
+    let result = match test.timeouts {
+        Some(timeouts) => session
+            .update_timeouts(timeouts.into_thirtyfour_timeout_configuration())
+            .await
+            .map_err(Report::<rootcause::markers::Dynamic>::from),
+        None => Ok(()),
+    };
+    let result = match result {
+        Ok(()) => run_body(env, session, test, run).await,
+        Err(error) => {
+            env.stop_starting_on_fail_fast();
+            Err(error)
+        }
+    };
+    // Let the next test start while this session quits.
+    let _ = job.body_done.send(());
+    env.board.enter(
+        Activity::Test(test.index),
+        format!("browser test '{}'", test.name),
+        Phase::QuittingSession,
+    );
+    run.quit_start = Some(Instant::now());
+    result
+}
+
+/// The outcome of a test whose session ended with `session_result`.
+fn test_outcome(
+    name: &str,
+    panic_message: Option<String>,
+    session_result: Result<(), Report<chrome_for_testing_manager::ChromeForTestingError>>,
+) -> (TestOutcome, Result<(), Report<BrowserTestError>>) {
+    if let Some(message) = panic_message {
+        let report = Report::new(BrowserTestError::Panic {
+            test_name: name.to_owned(),
+            message,
+        });
+        return (TestOutcome::Panicked, Err(report));
+    }
+    match session_result {
+        Ok(()) => (TestOutcome::Passed, Ok(())),
+        Err(err) => (
+            TestOutcome::Failed,
+            Err(err.context(BrowserTestError::RunTest {
+                test_name: name.to_owned(),
             })),
         ),
-        None => match session_result {
-            Ok(()) => (TestOutcome::Passed, Ok(())),
-            Err(err) => (
-                TestOutcome::Failed,
-                Err(err.context(BrowserTestError::RunTest {
-                    test_name: current.test.name.clone(),
-                })),
-            ),
-        },
-    };
-    shared.finish(current.into_record(slot, outcome, teardown), result);
-}
-
-/// Run `current` and then every compatible next test in `session`.
-///
-/// Returns the result of the last test run. Earlier tests passed and are recorded already.
-#[allow(clippy::too_many_arguments)]
-async fn drive_session<Context, TestError>(
-    slot: usize,
-    session: &Session,
-    current: &mut CurrentTest<Context, TestError>,
-    creation_start: Instant,
-    reusable: bool,
-    shared: &Shared<Context, TestError>,
-    config: &ExecutionConfig<'_>,
-    context: &Context,
-) -> Result<(), Report>
-where
-    Context: Sync + ?Sized,
-    TestError: ?Sized + 'static,
-{
-    let settings = current.test.settings;
-    let setup = async {
-        if let Some(timeouts) = settings.timeouts {
-            session
-                .update_timeouts(timeouts.into_thirtyfour_timeout_configuration())
-                .await?;
-        }
-        if !reusable {
-            return Ok::<_, Report>(None);
-        }
-        match SessionBaseline::capture(session).await {
-            Ok(baseline) => Ok(Some(baseline)),
-            Err(err) => {
-                tracing::warn!(
-                    "Not reusing the session of browser test '{}': failed to capture its initial state: {err}",
-                    current.test.name,
-                );
-                Ok(None)
-            }
-        }
-    }
-    .await;
-    let creation = creation_start.elapsed();
-    current.session = SessionAcquisition::Created { duration: creation };
-    warn_if_slow_session(
-        config,
-        "Creating a session for",
-        &current.test.name,
-        Some(creation),
-    );
-    let mut baseline = setup?;
-
-    loop {
-        run_body(slot, session, current, shared, config, context).await?;
-
-        let Some(baseline) = baseline.as_mut() else {
-            return Ok(());
-        };
-        let Some(next) = shared.next_test_for_session(settings) else {
-            return Ok(());
-        };
-
-        shared
-            .board
-            .enter(slot, &next.name, Phase::ResettingSession);
-        let reset_start = Instant::now();
-        let reset_result = baseline.reset(session, config.session_resets).await;
-        let reset = reset_start.elapsed();
-        warn_if_slow_session(config, "Resetting the session for", &next.name, Some(reset));
-        if let Err(err) = reset_result {
-            tracing::warn!(
-                "Discarding the session of browser test '{}': failed to reset it for '{}': {err}",
-                current.test.name,
-                next.name,
-            );
-            shared.requeue(next);
-            return Ok(());
-        }
-
-        let finished = std::mem::replace(
-            current,
-            CurrentTest::new(next, SessionAcquisition::Reused { reset }),
-        );
-        shared.finish(
-            finished.into_record(slot, TestOutcome::Passed, None),
-            Ok(()),
-        );
     }
 }
 
-/// Run the body of `current`, recording its duration and steps.
+/// Run the body of `test`, recording its duration and steps into `run`.
 ///
-/// Returns an error if the test failed or panicked (then `current.panic_message` is set).
+/// Returns an error if the test failed or panicked (then `run.panic_message` is set).
 async fn run_body<Context, TestError>(
-    slot: usize,
+    env: &Env<'_, Context, TestError>,
     session: &Session,
-    current: &mut CurrentTest<Context, TestError>,
-    shared: &Shared<Context, TestError>,
-    config: &ExecutionConfig<'_>,
-    context: &Context,
+    test: &PreparedTest<Context, TestError>,
+    run: &mut JobRun,
 ) -> Result<(), Report>
 where
     Context: Sync + ?Sized,
     TestError: ?Sized + 'static,
 {
-    let name = current.test.name.as_str();
+    let name = test.name.as_str();
     tracing::info!("Executing browser test: {name}");
-    shared.board.enter(slot, name, Phase::RunningTest);
-    let recorder = StepRecorder::new(config.progress_warnings.slow_step());
-    let span = tracing::info_span!("browser_test", test = %name, slot);
+    env.board.enter(
+        Activity::Test(test.index),
+        format!("browser test '{name}'"),
+        Phase::RunningTest,
+    );
+    let recorder = StepRecorder::new(env.config.progress_warnings.slow_step());
+    let span = tracing::info_span!(
+        "browser_test",
+        test = %name,
+        group = test.group.as_deref().unwrap_or_default(),
+    );
     let start = Instant::now();
     let result = recorder
-        .scope(AssertUnwindSafe(current.test.test.run(session, context)).catch_unwind())
+        .scope(AssertUnwindSafe(test.test.run(session, env.context)).catch_unwind())
         .instrument(span)
         .await;
-    current.body = Some(start.elapsed());
-    current.steps = recorder.take();
+    run.body = Some(start.elapsed());
+    run.steps = recorder.take();
     if !matches!(result, Ok(Ok(()))) {
-        // Don't let other slots start tests while this session quits.
-        shared.stop_starting_on_fail_fast();
+        // Don't let further tests start while this session quits.
+        env.stop_starting_on_fail_fast();
     }
 
     match result {
@@ -578,35 +939,17 @@ where
         Err(payload) => {
             let message = panic_payload_message(payload.as_ref());
             tracing::error!("Browser test '{name}' panicked: {message}");
-            current.panic_message = Some(message);
+            run.panic_message = Some(message);
             // Only ends the session; the runner reports the panic itself.
             Err(rootcause::report!("browser test '{name}' panicked"))
         }
     }
 }
 
-fn warn_if_slow_session(
-    config: &ExecutionConfig<'_>,
-    what: &str,
-    test_name: &str,
-    duration: Option<Duration>,
-) {
-    if let (Some(duration), Some(threshold)) = (duration, config.progress_warnings.session())
-        && duration > threshold
-    {
-        tracing::warn!(
-            test = %test_name,
-            duration_ms = duration.as_millis(),
-            "{what} browser test '{test_name}' took {}.",
-            FormatDuration(duration),
-        );
-    }
-}
-
 fn resolve_webdriver_timeouts<Context, TestError>(
     test: &dyn BrowserTest<Context, TestError>,
-    runner_timeouts: Option<&BrowserTimeouts>,
-) -> Option<BrowserTimeouts>
+    runner_timeouts: Option<&Timeouts>,
+) -> Option<Timeouts>
 where
     Context: Sync + ?Sized,
     TestError: ?Sized,
@@ -616,8 +959,8 @@ where
 
 fn resolve_element_query_wait<Context, TestError>(
     test: &dyn BrowserTest<Context, TestError>,
-    runner_wait: Option<&ElementQueryWaitConfig>,
-) -> Option<ElementQueryWaitConfig>
+    runner_wait: Option<&ElementQueryWait>,
+) -> Option<ElementQueryWait>
 where
     Context: Sync + ?Sized,
     TestError: ?Sized,
@@ -665,7 +1008,7 @@ mod tests {
         use super::*;
 
         struct TimeoutOverrideTest {
-            timeouts: Option<BrowserTimeouts>,
+            timeouts: Option<Timeouts>,
         }
 
         #[async_trait::async_trait]
@@ -674,7 +1017,7 @@ mod tests {
                 Cow::Borrowed("timeout override")
             }
 
-            fn timeouts(&self) -> Option<BrowserTimeouts> {
+            fn timeouts(&self) -> Option<Timeouts> {
                 self.timeouts
             }
 
@@ -685,12 +1028,12 @@ mod tests {
 
         #[test]
         fn uses_test_override_before_runner_default() {
-            let runner_timeouts = BrowserTimeouts::builder()
+            let runner_timeouts = Timeouts::builder()
                 .script_timeout(Duration::from_secs(10))
                 .page_load_timeout(Duration::from_secs(10))
                 .implicit_wait_timeout(Duration::from_secs(10))
                 .build();
-            let test_timeouts = BrowserTimeouts::builder()
+            let test_timeouts = Timeouts::builder()
                 .script_timeout(Duration::from_secs(5))
                 .page_load_timeout(Duration::from_secs(5))
                 .implicit_wait_timeout(Duration::from_secs(5))
@@ -706,7 +1049,7 @@ mod tests {
 
         #[test]
         fn falls_back_to_runner_default() {
-            let runner_timeouts = BrowserTimeouts::builder()
+            let runner_timeouts = Timeouts::builder()
                 .script_timeout(Duration::from_secs(10))
                 .page_load_timeout(Duration::from_secs(10))
                 .implicit_wait_timeout(Duration::from_secs(10))
@@ -732,7 +1075,7 @@ mod tests {
         use super::*;
 
         struct ElementQueryWaitOverrideTest {
-            wait: Option<ElementQueryWaitConfig>,
+            wait: Option<ElementQueryWait>,
         }
 
         #[async_trait::async_trait]
@@ -741,7 +1084,7 @@ mod tests {
                 Cow::Borrowed("element query wait override")
             }
 
-            fn element_query_wait(&self) -> Option<ElementQueryWaitConfig> {
+            fn element_query_wait(&self) -> Option<ElementQueryWait> {
                 self.wait
             }
 
@@ -752,14 +1095,12 @@ mod tests {
 
         #[test]
         fn uses_test_override_before_runner_default() {
-            let runner_wait = ElementQueryWaitConfig::builder()
-                .timeout(Duration::from_secs(10))
-                .interval(Duration::from_secs(1))
-                .build();
-            let test_wait = ElementQueryWaitConfig::builder()
-                .timeout(Duration::from_secs(5))
-                .interval(Duration::from_millis(500))
-                .build();
+            let runner_wait =
+                ElementQueryWait::new(Duration::from_secs(10), Duration::from_secs(1))
+                    .expect("non-zero interval is valid");
+            let test_wait =
+                ElementQueryWait::new(Duration::from_secs(5), Duration::from_millis(500))
+                    .expect("non-zero interval is valid");
             let test = ElementQueryWaitOverrideTest {
                 wait: Some(test_wait),
             };
@@ -771,10 +1112,9 @@ mod tests {
 
         #[test]
         fn falls_back_to_runner_default() {
-            let runner_wait = ElementQueryWaitConfig::builder()
-                .timeout(Duration::from_secs(10))
-                .interval(Duration::from_millis(500))
-                .build();
+            let runner_wait =
+                ElementQueryWait::new(Duration::from_secs(10), Duration::from_millis(500))
+                    .expect("non-zero interval is valid");
             let test = ElementQueryWaitOverrideTest { wait: None };
 
             let resolved = resolve_element_query_wait(&test, Some(&runner_wait));

@@ -11,9 +11,9 @@ mod execution;
 mod pause;
 mod progress;
 mod report;
+mod report_consumer;
 mod runner;
 mod scheduler;
-mod session;
 mod step;
 mod test_case;
 #[cfg(test)]
@@ -21,24 +21,18 @@ mod test_support;
 mod timeout;
 mod wait;
 
-#[allow(deprecated)]
-pub use driver_output::BrowserDriverOutputConfig;
-pub use driver_output::{DriverOutputConfig, ResolvedDriverOutputConfig};
+pub use driver_output::DriverOutput;
+pub use env::InvalidEnvVar;
 pub use error::BrowserTestError;
-pub use pause::{PauseConfig, ResolvedPauseConfig};
+pub use pause::Pause;
 pub use progress::{ProgressWarnings, ProgressWarningsBuilder};
 pub use report::{
-    BrowserTestRecord, BrowserTestRunOutcome, BrowserTestRunReport, SessionAcquisition, StepStats,
-    TestOutcome,
+    BrowserTestRecord, BrowserTestRunReport, GroupRecord, SessionTiming, StepStats, TestOutcome,
 };
-pub use runner::{
-    BrowserTestRunner, BrowserTestVisibility, ResolvedBrowserTestVisibility, RunSummary,
-};
-pub use scheduler::{BrowserTestFailurePolicy, BrowserTestParallelism};
-pub use session::{SessionRequirement, SessionReset, SessionReuse};
-pub use step::step;
+pub use report_consumer::{RunReportConsumer, StderrSummary, StdoutSummary, TracingSummary};
+pub use runner::{BrowserTestRunner, Visibility};
+pub use scheduler::{FailurePolicy, Parallelism};
+pub use step::{Step, StepExt};
 pub use test_case::{BrowserTest, BrowserTests};
-pub use timeout::{BrowserTimeouts, BrowserTimeoutsBuilder};
-pub use wait::{
-    ElementQueryWaitConfig, ElementQueryWaitConfigBuilder, ElementQueryWaitConfigError,
-};
+pub use timeout::{Timeouts, TimeoutsBuilder};
+pub use wait::{ElementQueryWait, ElementQueryWaitError};

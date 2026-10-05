@@ -1,214 +1,107 @@
-use std::{
-    fmt::{self, Display},
-    path::PathBuf,
-    sync::Arc,
-    time::Instant,
-};
+use std::{fmt, path::PathBuf, sync::Arc, time::Instant};
 
 use chrome_for_testing_manager::{
-    Channel, ChromeBinary, Chromedriver, ChromedriverRunConfig, DriverOutputListener, PortRequest,
-    VersionRequest,
+    Channel, ChromeBinary, ChromeForTesting, ChromeForTestingConfig, VersionRequest,
 };
 use rootcause::Report;
 use rootcause::prelude::ResultExt;
 use thirtyfour::{ChromeCapabilities, error::WebDriverResult};
 
-use crate::driver_output::{
-    DriverOutputCapture, DriverOutputConfig, ResolvedDriverOutputConfig,
-    attach_browser_driver_output, attach_browser_driver_output_to_result,
-};
-use crate::env::env_flag_enabled;
-use crate::execution::{ChromeCapabilitiesSetup, ExecutionConfig, execute_tests};
-use crate::pause::{self, PauseConfig, PauseDecision, ResolvedPauseConfig};
-use crate::report::{BrowserTestRecord, BrowserTestRunOutcome, BrowserTestRunReport};
-use crate::scheduler::{BrowserTestFailurePolicy, BrowserTestParallelism};
+use crate::driver_output::{DriverOutputCapture, attach_browser_driver_output_to_result};
+use crate::env::{InvalidEnvVar, env_flag};
+use crate::execution::{ChromeCapabilitiesSetup, Execution, ExecutionConfig, execute_tests};
+use crate::pause::{self, PauseDecision};
+use crate::report::BrowserTestRunReport;
+use crate::report_consumer::RunReportConsumer;
 use crate::{
-    BrowserTestError, BrowserTests, BrowserTimeouts, ElementQueryWaitConfig, ProgressWarnings,
-    SessionReset, SessionReuse,
+    BrowserTestError, BrowserTests, DriverOutput, ElementQueryWait, FailurePolicy, Pause,
+    ProgressWarnings, Timeouts,
 };
 
 pub(crate) const DEFAULT_VISIBLE_ENV: &str = "BROWSER_TEST_VISIBLE";
 
-/// Browser visibility mode for [`BrowserTestRunner`].
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub enum BrowserTestVisibility {
-    /// Run the browser headlessly.
+/// Whether the browser runs headless or visibly.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Visibility {
+    /// Run the browser headless.
     #[default]
     Headless,
 
-    /// Run the browser visibly.
-    Visible,
-
-    /// Read visibility from the given environment variable.
-    ///
-    /// The variable is considered enabled unless it is unset, empty, `0`, `false`, `no`, or `off`.
-    FromEnvVar(String),
-
-    /// Read visibility from `BROWSER_TEST_VISIBLE`.
-    FromEnv,
-}
-
-/// Resolved browser visibility mode.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub enum ResolvedBrowserTestVisibility {
-    /// Run the browser headlessly.
-    #[default]
-    Headless,
-
-    /// Run the browser visibly.
+    /// Run the browser visibly, e.g. to watch or debug tests.
     Visible,
 }
 
-impl BrowserTestVisibility {
-    /// Build a headless browser visibility config.
-    #[must_use]
-    pub const fn headless() -> Self {
-        Self::Headless
-    }
-
-    /// Build a visible browser visibility config.
-    #[must_use]
-    pub const fn visible() -> Self {
-        Self::Visible
-    }
-
-    /// Build a visibility config from `BROWSER_TEST_VISIBLE`.
-    #[must_use]
-    pub const fn from_env() -> Self {
-        Self::FromEnv
-    }
-
-    /// Build a visibility config from an environment variable.
-    #[must_use]
-    pub fn from_env_var(env_var: impl Into<String>) -> Self {
-        Self::FromEnvVar(env_var.into())
-    }
-
-    /// Resolve this config to an immediate visibility value.
+impl Visibility {
+    /// Read the visibility from `BROWSER_TEST_VISIBLE`.
     ///
-    /// Environment-backed configs read their environment variable when this method is called.
-    #[must_use]
-    pub fn resolve(&self) -> ResolvedBrowserTestVisibility {
-        match self {
-            Self::Headless => ResolvedBrowserTestVisibility::Headless,
-            Self::Visible => ResolvedBrowserTestVisibility::Visible,
-            Self::FromEnvVar(env_var) => {
-                ResolvedBrowserTestVisibility::from_visible(env_flag_enabled(env_var))
+    /// See [`Self::from_env_var`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidEnvVar`] if the variable is not a boolean flag.
+    pub fn from_env() -> Result<Option<Self>, InvalidEnvVar> {
+        Self::from_env_var(DEFAULT_VISIBLE_ENV)
+    }
+
+    /// Read the visibility from the boolean flag `env_var`: enabled means [`Self::Visible`].
+    ///
+    /// Returns `None` if the variable is unset or empty, so the caller picks the default:
+    /// `Visibility::from_env()?.unwrap_or_default()`. `1`, `true`, `yes`, `on`, and `enabled`
+    /// enable the flag; `0`, `false`, `no`, `off`, and `disabled` disable it (ignoring case). The
+    /// variable is read when this function is called.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidEnvVar`] if the variable is not a boolean flag.
+    pub fn from_env_var(env_var: impl AsRef<str>) -> Result<Option<Self>, InvalidEnvVar> {
+        Ok(env_flag(env_var.as_ref())?.map(|visible| {
+            if visible {
+                Self::Visible
+            } else {
+                Self::Headless
             }
-            Self::FromEnv => {
-                ResolvedBrowserTestVisibility::from_visible(env_flag_enabled(DEFAULT_VISIBLE_ENV))
-            }
-        }
-    }
-}
-
-impl ResolvedBrowserTestVisibility {
-    /// Build a resolved headless visibility value.
-    #[must_use]
-    pub const fn headless() -> Self {
-        Self::Headless
+        }))
     }
 
-    /// Build a resolved visible visibility value.
-    #[must_use]
-    pub const fn visible() -> Self {
-        Self::Visible
+    pub(crate) const fn is_visible(self) -> bool {
+        matches!(self, Self::Visible)
     }
-
-    /// Build a resolved visibility value from a boolean.
-    #[must_use]
-    pub const fn from_visible(visible: bool) -> Self {
-        if visible {
-            Self::Visible
-        } else {
-            Self::Headless
-        }
-    }
-
-    /// Whether the browser should run visibly.
-    #[must_use]
-    pub const fn is_visible(self) -> bool {
-        match self {
-            Self::Headless => false,
-            Self::Visible => true,
-        }
-    }
-
-    /// Whether the browser should run headlessly.
-    #[must_use]
-    pub const fn is_headless(self) -> bool {
-        !self.is_visible()
-    }
-}
-
-impl From<ResolvedBrowserTestVisibility> for BrowserTestVisibility {
-    fn from(visibility: ResolvedBrowserTestVisibility) -> Self {
-        match visibility {
-            ResolvedBrowserTestVisibility::Headless => Self::Headless,
-            ResolvedBrowserTestVisibility::Visible => Self::Visible,
-        }
-    }
-}
-
-/// Where [`BrowserTestRunner`] prints the summary of a run.
-///
-/// The summary is the `Display` output of [`BrowserTestRunReport`]: test counts, time spent
-/// creating, resetting, and quitting sessions, the slowest tests, and the slowest
-/// [`crate::step`] kinds.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub enum RunSummary {
-    /// Print the summary to stderr. Like all output of a test, the test harness captures it unless
-    /// the test fails or runs with `--nocapture`.
-    #[default]
-    Stderr,
-
-    /// Log the summary through `tracing` at `info` level.
-    Log,
-
-    /// Do not print the summary. [`BrowserTestRunner::run_with_report`] still returns it.
-    Disabled,
 }
 
 /// Runs [`crate::BrowserTest`] implementations through Chrome for Testing.
 #[derive(Clone)]
 pub struct BrowserTestRunner {
     channel: Channel,
-    visibility: ResolvedBrowserTestVisibility,
-    pause: Option<ResolvedPauseConfig>,
-    hint: Option<String>,
-    parallelism: BrowserTestParallelism,
-    failure_policy: BrowserTestFailurePolicy,
-    webdriver_timeouts: Option<BrowserTimeouts>,
-    element_query_wait: Option<ElementQueryWaitConfig>,
+    visibility: Visibility,
+    pause: Pause,
+    failure_policy: FailurePolicy,
+    timeouts: Option<Timeouts>,
+    element_query_wait: Option<ElementQueryWait>,
     chrome_capabilities_setups: Vec<Arc<ChromeCapabilitiesSetup>>,
-    browser_driver_output: ResolvedDriverOutputConfig,
+    driver_output: DriverOutput,
     chrome_for_testing_cache_dir: Option<PathBuf>,
     headless_chrome_binary: ChromeBinary,
-    session_reuse: bool,
-    session_resets: Vec<Arc<dyn SessionReset>>,
+    spare_sessions: Option<usize>,
     progress_warnings: ProgressWarnings,
-    run_summary: RunSummary,
+    report_consumers: Vec<Arc<dyn RunReportConsumer>>,
 }
 
 impl Default for BrowserTestRunner {
     fn default() -> Self {
         Self {
             channel: Channel::Stable,
-            visibility: ResolvedBrowserTestVisibility::Headless,
-            pause: None,
-            hint: None,
-            parallelism: BrowserTestParallelism::Sequential,
-            failure_policy: BrowserTestFailurePolicy::FailFast,
-            webdriver_timeouts: None,
+            visibility: Visibility::Headless,
+            pause: Pause::disabled(),
+            failure_policy: FailurePolicy::FailFast,
+            timeouts: None,
             element_query_wait: None,
             chrome_capabilities_setups: Vec::new(),
-            browser_driver_output: ResolvedDriverOutputConfig::Disabled,
+            driver_output: DriverOutput::disabled(),
             chrome_for_testing_cache_dir: None,
             headless_chrome_binary: ChromeBinary::Chrome,
-            session_reuse: true,
-            session_resets: Vec::new(),
+            spare_sessions: None,
             progress_warnings: ProgressWarnings::default(),
-            run_summary: RunSummary::Stderr,
+            report_consumers: Vec::new(),
         }
     }
 }
@@ -219,25 +112,22 @@ impl fmt::Debug for BrowserTestRunner {
             .field("channel", &self.channel)
             .field("visibility", &self.visibility)
             .field("pause", &self.pause)
-            .field("hint", &self.hint)
-            .field("parallelism", &self.parallelism)
             .field("failure_policy", &self.failure_policy)
-            .field("webdriver_timeouts", &self.webdriver_timeouts)
+            .field("timeouts", &self.timeouts)
             .field("element_query_wait", &self.element_query_wait)
             .field(
                 "chrome_capabilities_setup_count",
                 &self.chrome_capabilities_setups.len(),
             )
-            .field("browser_driver_output", &self.browser_driver_output)
+            .field("driver_output", &self.driver_output)
             .field(
                 "chrome_for_testing_cache_dir",
                 &self.chrome_for_testing_cache_dir,
             )
             .field("headless_chrome_binary", &self.headless_chrome_binary)
-            .field("session_reuse", &self.session_reuse)
-            .field("session_reset_count", &self.session_resets.len())
+            .field("spare_sessions", &self.spare_sessions)
             .field("progress_warnings", &self.progress_warnings)
-            .field("run_summary", &self.run_summary)
+            .field("report_consumer_count", &self.report_consumers.len())
             .finish()
     }
 }
@@ -249,35 +139,28 @@ impl BrowserTestRunner {
         Self::default()
     }
 
-    /// Select the Chrome release channel.
+    /// Select the Chrome release channel. Defaults to [`Channel::Stable`].
     #[must_use]
     pub fn with_channel(mut self, channel: Channel) -> Self {
         self.channel = channel;
         self
     }
 
-    /// Configure browser visibility.
+    /// Select whether the browser runs headless or visibly. Defaults to [`Visibility::Headless`].
     #[must_use]
-    pub fn with_visibility(mut self, visibility: impl Into<BrowserTestVisibility>) -> Self {
-        self.visibility = visibility.into().resolve();
+    pub const fn with_visibility(mut self, visibility: Visibility) -> Self {
+        self.visibility = visibility;
         self
     }
 
-    /// Pause before starting webdriver when the config is enabled.
+    /// Configure the manual pause before tests run. Defaults to [`Pause::disabled`].
     ///
-    /// If the pause is aborted, [`Self::run`] returns successfully without starting webdriver or
+    /// If the pause is aborted, [`Self::run`] returns successfully without starting the browser or
     /// running any tests. If stdin reaches EOF while waiting for a pause response, [`Self::run`]
     /// returns an error instead.
     #[must_use]
-    pub fn with_pause(mut self, pause: impl Into<PauseConfig>) -> Self {
-        self.pause = Some(pause.into().resolve());
-        self
-    }
-
-    /// Set extra context shown when a manual pause prompt is enabled.
-    #[must_use]
-    pub fn with_hint(mut self, hint: impl Display) -> Self {
-        self.hint = Some(hint.to_string());
+    pub fn with_pause(mut self, pause: Pause) -> Self {
+        self.pause = pause;
         self
     }
 
@@ -295,69 +178,39 @@ impl BrowserTestRunner {
         self
     }
 
-    /// Set timeouts applied to every session before running tests.
+    /// Set the `WebDriver` timeouts of every session.
     ///
     /// Individual [`crate::BrowserTest`] implementations can override this by returning `Some` from
     /// [`crate::BrowserTest::timeouts`].
     #[must_use]
-    pub fn with_timeouts(mut self, timeouts: BrowserTimeouts) -> Self {
-        self.webdriver_timeouts = Some(timeouts);
+    pub const fn with_timeouts(mut self, timeouts: Timeouts) -> Self {
+        self.timeouts = Some(timeouts);
         self
     }
 
-    /// Deprecated name for [`Self::with_timeouts`].
-    ///
-    /// Use [`Self::with_timeouts`] in new code.
-    #[deprecated(since = "0.1.0", note = "use with_timeouts instead")]
-    #[must_use]
-    pub fn with_webdriver_timeouts(self, timeouts: BrowserTimeouts) -> Self {
-        self.with_timeouts(timeouts)
-    }
-
-    /// Set the element query wait applied to every session before running tests.
+    /// Set the element query wait of every session.
     ///
     /// Individual [`crate::BrowserTest`] implementations can override this by returning `Some` from
     /// [`crate::BrowserTest::element_query_wait`].
     #[must_use]
-    pub const fn with_element_query_wait(mut self, wait: ElementQueryWaitConfig) -> Self {
+    pub const fn with_element_query_wait(mut self, wait: ElementQueryWait) -> Self {
         self.element_query_wait = Some(wait);
         self
     }
 
-    /// Configure how browser tests are scheduled.
+    /// Set how test failures affect the rest of the run. Defaults to [`FailurePolicy::FailFast`].
     #[must_use]
-    pub fn with_test_parallelism(mut self, parallelism: impl Into<BrowserTestParallelism>) -> Self {
-        self.parallelism = parallelism.into();
+    pub const fn with_failure_policy(mut self, failure_policy: FailurePolicy) -> Self {
+        self.failure_policy = failure_policy;
         self
     }
 
-    /// Configure how browser test failures affect the rest of the run.
+    /// Capture recent browser-driver output and attach it to the errors of failed runs and tests.
+    /// Defaults to [`DriverOutput::disabled`].
     #[must_use]
-    pub fn with_failure_policy(
-        mut self,
-        failure_policy: impl Into<BrowserTestFailurePolicy>,
-    ) -> Self {
-        self.failure_policy = failure_policy.into();
+    pub const fn with_driver_output(mut self, driver_output: DriverOutput) -> Self {
+        self.driver_output = driver_output;
         self
-    }
-
-    /// Capture recent browser-driver output for failure diagnostics.
-    ///
-    /// This stores capture configuration and creates a fresh capture buffer for each
-    /// [`Self::run`] call.
-    #[must_use]
-    pub fn with_driver_output(mut self, config: impl Into<DriverOutputConfig>) -> Self {
-        self.browser_driver_output = config.into().resolve();
-        self
-    }
-
-    /// Deprecated name for [`Self::with_driver_output`].
-    ///
-    /// Use [`Self::with_driver_output`] in new code.
-    #[deprecated(since = "0.1.0", note = "use with_driver_output instead")]
-    #[must_use]
-    pub fn with_browser_driver_output(self, config: impl Into<DriverOutputConfig>) -> Self {
-        self.with_driver_output(config)
     }
 
     /// Set the cache directory used for Chrome-for-Testing downloads.
@@ -372,37 +225,30 @@ impl BrowserTestRunner {
         self
     }
 
-    /// Select the browser binary used for headless runs.
+    /// Select the browser binary used for headless runs. Defaults to [`ChromeBinary::Chrome`].
     ///
     /// Visible runs always use regular Chrome because Chrome Headless Shell cannot show an
     /// interactive debugging window.
     #[must_use]
-    pub fn with_headless_chrome_binary(mut self, chrome_binary: ChromeBinary) -> Self {
+    pub const fn with_headless_chrome_binary(mut self, chrome_binary: ChromeBinary) -> Self {
         self.headless_chrome_binary = chrome_binary;
         self
     }
 
-    /// Configure whether tests share `WebDriver` sessions.
+    /// Set how many `WebDriver` sessions the runner creates ahead of the tests that use them.
     ///
-    /// Enabled by default: consecutive tests (per parallel slot) that return
-    /// [`crate::SessionRequirement::Shared`] from [`crate::BrowserTest::session`] and have the
-    /// same effective timeouts and element query wait run in one session, which the runner resets
-    /// between them. A session is never reused after a test failed or panicked. Pass `false` (or
-    /// [`SessionReuse::Disabled`]) to give every test a fresh session, or
-    /// [`SessionReuse::from_env`] to read the setting from `BROWSER_TEST_SESSION_REUSE`.
-    #[must_use]
-    pub fn with_session_reuse(mut self, session_reuse: impl Into<SessionReuse>) -> Self {
-        self.session_reuse = session_reuse.into().is_enabled();
-        self
-    }
-
-    /// Add an app-specific reset that runs before a shared session is handed to the next test.
+    /// Every test runs in a fresh session. Creating one starts a new browser, so the runner
+    /// creates the sessions of the next tests while earlier tests run, and a test usually finds its
+    /// session ready when its turn comes. Sessions are quit in the background after their test.
     ///
-    /// Resets run after the built-in reset, in the order they were added. See
-    /// [`SessionReset`].
+    /// Defaults to the number of tests that can run at the same time (see
+    /// [`BrowserTests::parallel`]): one spare session per running test. Up to `parallel tests + spare sessions` browsers are open at once,
+    /// so lower this on machines with little memory. `0` creates each session only when its test
+    /// is about to run. In visible runs, the spare sessions' browser windows open ahead of their
+    /// tests.
     #[must_use]
-    pub fn with_session_reset(mut self, reset: impl SessionReset + 'static) -> Self {
-        self.session_resets.push(Arc::new(reset));
+    pub const fn with_spare_sessions(mut self, spare_sessions: usize) -> Self {
+        self.spare_sessions = Some(spare_sessions);
         self
     }
 
@@ -415,29 +261,34 @@ impl BrowserTestRunner {
         self
     }
 
-    /// Configure where the summary of a run is printed. Defaults to [`RunSummary::Stderr`].
+    /// Add a consumer of the report of every run, e.g. [`crate::StderrSummary`] to print a
+    /// summary of where the run spent its time.
+    ///
+    /// Consumers are called in the order they were added. Without a consumer, the report is
+    /// neither printed nor logged. See [`RunReportConsumer`].
     #[must_use]
-    pub const fn with_run_summary(mut self, run_summary: RunSummary) -> Self {
-        self.run_summary = run_summary;
+    pub fn with_report_consumer(mut self, consumer: impl RunReportConsumer + 'static) -> Self {
+        self.report_consumers.push(Arc::new(consumer));
         self
     }
 
-    /// Run every test, reusing `WebDriver` sessions where allowed (see
-    /// [`Self::with_session_reuse`]).
+    /// Run every test with a fresh `WebDriver` session.
+    ///
+    /// Sessions are created ahead of the tests that use them, see [`Self::with_spare_sessions`].
     ///
     /// The shared chromedriver process is always terminated, even when a test returns an error or
     /// panics. Test panics are converted into [`BrowserTestError::Panic`] reports instead of being
     /// resumed.
     ///
-    /// Tests run sequentially and stop on the first failure by default. Use
-    /// [`Self::with_test_parallelism`] to run multiple `WebDriver` sessions at once. Use
-    /// [`Self::with_failure_policy`] to execute every test and return all failures as child reports
-    /// on one aggregate report.
+    /// `tests` decides which tests run one after another and which at the same time, see
+    /// [`BrowserTests`]. The run stops on the first failure by default; use
+    /// [`Self::with_failure_policy`] to run every test and return all failures as child reports on
+    /// one aggregate report.
     ///
-    /// Logs each test's timing when it finishes and prints a summary of the run at the end (see
-    /// [`Self::with_run_summary`]). Use [`Self::run_with_report`] to also get the timings as data.
+    /// Logs each test's timing when it finishes. If tests ran, the run's report is handed to the
+    /// consumers added with [`Self::with_report_consumer`].
     ///
-    /// Non-empty runs require a multithreaded Tokio runtime because [`Chromedriver::run`]
+    /// Non-empty runs require a multithreaded Tokio runtime because [`ChromeForTesting::launch`]
     /// requires one. Use `#[tokio::test(flavor = "multi_thread")]` for browser tests.
     ///
     /// # Parameters
@@ -446,8 +297,8 @@ impl BrowserTestRunner {
     ///
     /// # Errors
     ///
-    /// Returns an error if chromedriver cannot be started or terminated, if a session cannot be
-    /// created, or if any test fails.
+    /// Returns an error if Chrome for Testing cannot be launched or shut down, if a session cannot
+    /// be created, or if any test fails.
     pub async fn run<Context, TestError>(
         &self,
         context: &Context,
@@ -457,31 +308,16 @@ impl BrowserTestRunner {
         Context: Sync + ?Sized,
         TestError: ?Sized + 'static,
     {
-        self.run_with_report(context, tests).await.result
-    }
-
-    /// Like [`Self::run`], but also returns where the run spent its time.
-    pub async fn run_with_report<Context, TestError>(
-        &self,
-        context: &Context,
-        tests: BrowserTests<Context, TestError>,
-    ) -> BrowserTestRunOutcome
-    where
-        Context: Sync + ?Sized,
-        TestError: ?Sized + 'static,
-    {
         let start = Instant::now();
         let mut report = BrowserTestRunReport::default();
         let result = self.run_reporting(context, tests, &mut report).await;
         report.total = start.elapsed();
         if !report.tests.is_empty() {
-            match self.run_summary {
-                RunSummary::Stderr => eprintln!("{report}"),
-                RunSummary::Log => tracing::info!("{report}"),
-                RunSummary::Disabled => {}
+            for consumer in &self.report_consumers {
+                consumer.consume(&report);
             }
         }
-        BrowserTestRunOutcome { result, report }
+        result
     }
 
     async fn run_reporting<Context, TestError>(
@@ -499,58 +335,50 @@ impl BrowserTestRunner {
             return Ok(());
         }
 
-        if let Some(pause) = self.pause.clone()
-            && pause::pause_if_requested(pause, self.hint.as_deref()).await? == PauseDecision::Abort
-        {
+        if pause::pause_if_requested(&self.pause).await? == PauseDecision::Abort {
             tracing::info!("Browser test run aborted at manual pause.");
             return Ok(());
         }
 
-        tracing::info!("Starting webdriver...");
-        let browser_driver_output = self.browser_driver_output_capture_for_run();
-        let output_listener: Option<DriverOutputListener> = browser_driver_output
-            .as_ref()
-            .map(DriverOutputCapture::listener);
-
+        tracing::info!("Launching Chrome for Testing...");
         let startup_start = Instant::now();
-        let chromedriver = match Chromedriver::run(
-            ChromedriverRunConfig::builder()
+        // A launch failure carries the driver's recent output itself.
+        let chrome = ChromeForTesting::launch(
+            ChromeForTestingConfig::builder()
                 .version(VersionRequest::LatestIn(self.channel.clone()))
                 .chrome_binary(self.chrome_binary_for_run())
-                .port(PortRequest::Any)
-                .output_listener_opt(output_listener)
                 .cache_dir_opt(self.chrome_for_testing_cache_dir.clone())
                 .build(),
         )
         .await
-        .context(BrowserTestError::StartWebdriver)
-        {
-            Ok(chromedriver) => chromedriver,
-            Err(mut err) => {
-                attach_browser_driver_output(&mut err, browser_driver_output.as_ref());
-                return Err(err);
-            }
-        };
+        .context(BrowserTestError::LaunchChromeForTesting)?;
         report.webdriver_startup = startup_start.elapsed();
+        let driver_output = self.driver_output_capture_for_run();
+        let output_follower = driver_output
+            .as_ref()
+            .map(|capture| capture.follow(&chrome));
 
-        let (records, test_result) = self.run_tests(&chromedriver, context, tests).await;
-        report.tests = records;
+        let execution = self.run_tests(&chrome, context, tests).await;
+        report.tests = execution.records;
+        report.groups = execution.groups;
+        let test_result = execution.result;
 
         let shutdown_start = Instant::now();
-        let termination_result = chromedriver
-            .terminate()
+        let shutdown_result = chrome
+            .shutdown()
             .await
-            .context(BrowserTestError::TerminateWebdriver);
+            .map(|_exit_status| ())
+            .context(BrowserTestError::ShutDownChromeForTesting);
         report.webdriver_shutdown = shutdown_start.elapsed();
-
-        if let Err(err) = termination_result {
-            return attach_browser_driver_output_to_result(
-                merge_termination_result(test_result, err),
-                browser_driver_output.as_ref(),
-            );
+        if let Some(output_follower) = output_follower {
+            output_follower.finish().await;
         }
 
-        attach_browser_driver_output_to_result(test_result, browser_driver_output.as_ref())
+        let result = match shutdown_result {
+            Ok(()) => test_result,
+            Err(shutdown_error) => merge_shutdown_result(test_result, shutdown_error),
+        };
+        attach_browser_driver_output_to_result(result, driver_output.as_ref())
     }
 
     fn chrome_binary_for_run(&self) -> ChromeBinary {
@@ -561,381 +389,190 @@ impl BrowserTestRunner {
         }
     }
 
-    /// Runs `tests` while respecting this runner's `parallelism` configuration.
     async fn run_tests<Context, TestError>(
         &self,
-        chromedriver: &Chromedriver,
+        chrome: &ChromeForTesting,
         context: &Context,
         tests: BrowserTests<Context, TestError>,
-    ) -> (Vec<BrowserTestRecord>, Result<(), Report<BrowserTestError>>)
+    ) -> Execution
     where
         Context: Sync + ?Sized,
         TestError: ?Sized + 'static,
     {
         let config = ExecutionConfig {
-            chromedriver,
+            chrome,
             visible: self.visibility.is_visible(),
-            webdriver_timeouts: self.webdriver_timeouts.as_ref(),
+            timeouts: self.timeouts.as_ref(),
             element_query_wait: self.element_query_wait.as_ref(),
             chrome_capabilities_setups: &self.chrome_capabilities_setups,
-            session_reuse: self.session_reuse,
-            session_resets: &self.session_resets,
             failure_policy: self.failure_policy,
             progress_warnings: self.progress_warnings,
-            max_parallel_tests: self.parallelism.max_parallel_tests(),
+            spare_sessions: self.spare_sessions,
         };
         execute_tests(&config, context, tests).await
     }
 
-    fn browser_driver_output_capture_for_run(&self) -> Option<DriverOutputCapture> {
-        match &self.browser_driver_output {
-            ResolvedDriverOutputConfig::Disabled => None,
-            ResolvedDriverOutputConfig::TailLines(tail_lines) => {
-                Some(DriverOutputCapture::new(*tail_lines))
-            }
-        }
+    fn driver_output_capture_for_run(&self) -> Option<DriverOutputCapture> {
+        self.driver_output
+            .tail_line_count()
+            .map(DriverOutputCapture::new)
     }
 }
 
-fn merge_termination_result(
+fn merge_shutdown_result(
     test_result: Result<(), Report<BrowserTestError>>,
-    termination_error: Report<BrowserTestError>,
+    shutdown_error: Report<BrowserTestError>,
 ) -> Result<(), Report<BrowserTestError>> {
     let Err(mut test_error) = test_result else {
-        return Err(termination_error);
+        return Err(shutdown_error);
     };
 
     tracing::error!(
-        "Failed to terminate chromedriver after browser test failure: {termination_error:?}"
+        "Failed to shut down Chrome for Testing after browser test failure: {shutdown_error:?}"
     );
 
     test_error
         .children_mut()
-        .push(termination_error.into_dynamic().into_cloneable());
+        .push(shutdown_error.into_dynamic().into_cloneable());
     Err(test_error)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::driver_output::DEFAULT_BROWSER_DRIVER_OUTPUT_ENV;
-    use crate::driver_output::DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES;
-    use crate::driver_output::DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES_ENV;
     use crate::test_support::EnvVarGuard;
     use assertr::prelude::*;
     use chrome_for_testing_manager::{DriverOutputLine, DriverOutputSource};
-    use std::env;
-    use std::num::NonZeroUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use thirtyfour::ChromiumLikeCapabilities;
 
     #[test]
-    fn runner_defaults_to_sequential_fail_fast_execution() {
+    fn runner_defaults_to_sequential_fail_fast_headless_execution() {
         let runner = BrowserTestRunner::new();
 
-        assert_that!(runner.parallelism).is_equal_to(BrowserTestParallelism::Sequential);
-        assert_that!(runner.failure_policy).is_equal_to(BrowserTestFailurePolicy::FailFast);
+        assert_that!(runner.failure_policy).is_equal_to(FailurePolicy::FailFast);
+        assert_that!(runner.visibility).is_equal_to(Visibility::Headless);
+        assert_that!(runner.pause.is_enabled()).is_false();
+        assert_that!(runner.driver_output_capture_for_run().is_none()).is_true();
     }
 
     #[test]
-    fn runner_parallelism_builders_set_scheduling_mode() {
-        let max_parallel_tests =
-            NonZeroUsize::new(3).expect("literal parallelism should be non-zero");
+    fn runner_builders_set_their_settings() {
+        let timeouts = Timeouts::builder()
+            .script_timeout(Duration::from_secs(10))
+            .build();
+        let wait = ElementQueryWait::new(Duration::from_secs(10), Duration::from_millis(500))
+            .expect("non-zero interval is valid");
 
         let runner = BrowserTestRunner::new()
-            .with_test_parallelism(BrowserTestParallelism::Parallel(max_parallel_tests));
-        assert_that!(runner.parallelism)
-            .is_equal_to(BrowserTestParallelism::Parallel(max_parallel_tests));
+            .with_failure_policy(FailurePolicy::RunAll)
+            .with_visibility(Visibility::Visible)
+            .with_pause(Pause::enabled())
+            .with_timeouts(timeouts)
+            .with_element_query_wait(wait)
+            .with_chrome_capabilities(|caps| caps.add_arg("--no-sandbox"))
+            .with_chrome_for_testing_cache_dir("/tmp/browser-test-cft-cache");
 
-        let runner = runner.with_test_parallelism(BrowserTestParallelism::Sequential);
-        assert_that!(runner.parallelism).is_equal_to(BrowserTestParallelism::Sequential);
+        assert_that!(runner.failure_policy).is_equal_to(FailurePolicy::RunAll);
+        assert_that!(runner.visibility).is_equal_to(Visibility::Visible);
+        assert_that!(runner.pause.is_enabled()).is_true();
+        assert_that!(runner.timeouts).is_equal_to(Some(timeouts));
+        assert_that!(runner.element_query_wait).is_equal_to(Some(wait));
+        assert_that!(runner.chrome_capabilities_setups.len()).is_equal_to(1);
+        assert_that!(runner.chrome_for_testing_cache_dir)
+            .is_equal_to(Some(PathBuf::from("/tmp/browser-test-cft-cache")));
     }
 
     #[test]
-    fn runner_failure_policy_builders_set_failure_mode() {
-        let runner = BrowserTestRunner::new().with_failure_policy(BrowserTestFailurePolicy::RunAll);
-        assert_that!(runner.failure_policy).is_equal_to(BrowserTestFailurePolicy::RunAll);
-
-        let runner = runner.with_failure_policy(BrowserTestFailurePolicy::FailFast);
-        assert_that!(runner.failure_policy).is_equal_to(BrowserTestFailurePolicy::FailFast);
-    }
-
-    #[test]
-    fn runner_visibility_builder_sets_visible_mode() {
-        let runner = BrowserTestRunner::new().with_visibility(BrowserTestVisibility::Visible);
-        assert_that!(runner.visibility).is_equal_to(ResolvedBrowserTestVisibility::Visible);
-
-        let runner = runner.with_visibility(BrowserTestVisibility::Headless);
-        assert_that!(runner.visibility).is_equal_to(ResolvedBrowserTestVisibility::Headless);
-    }
-
-    #[test]
-    fn runner_visibility_builder_accepts_resolved_visibility() {
-        let runner =
-            BrowserTestRunner::new().with_visibility(ResolvedBrowserTestVisibility::Visible);
-        assert_that!(runner.visibility).is_equal_to(ResolvedBrowserTestVisibility::Visible);
-
-        let runner = runner.with_visibility(ResolvedBrowserTestVisibility::Headless);
-        assert_that!(runner.visibility).is_equal_to(ResolvedBrowserTestVisibility::Headless);
-    }
-
-    #[test]
-    fn runner_visibility_builder_reads_default_env() {
+    fn visibility_reads_env() {
         let env = EnvVarGuard::new(DEFAULT_VISIBLE_ENV);
-        env.set("yes");
-
-        let runner = BrowserTestRunner::new().with_visibility(BrowserTestVisibility::from_env());
-
-        assert_that!(runner.visibility).is_equal_to(ResolvedBrowserTestVisibility::Visible);
-    }
-
-    #[test]
-    fn visibility_resolves_default_env() {
-        let env = EnvVarGuard::new(DEFAULT_VISIBLE_ENV);
-        env.set("yes");
-
-        assert_that!(BrowserTestVisibility::from_env().resolve())
-            .is_equal_to(ResolvedBrowserTestVisibility::Visible);
-
-        env.set("no");
-
-        assert_that!(BrowserTestVisibility::from_env().resolve())
-            .is_equal_to(ResolvedBrowserTestVisibility::Headless);
-    }
-
-    #[test]
-    fn visibility_resolves_custom_env() {
-        let env = EnvVarGuard::new("BROWSER_TEST_CUSTOM_VISIBLE");
-        env.set("on");
-
-        assert_that!(BrowserTestVisibility::from_env_var("BROWSER_TEST_CUSTOM_VISIBLE").resolve())
-            .is_equal_to(ResolvedBrowserTestVisibility::Visible);
-    }
-
-    #[test]
-    fn resolved_visibility_reports_mode() {
-        assert_that!(ResolvedBrowserTestVisibility::Visible.is_visible()).is_true();
-        assert_that!(ResolvedBrowserTestVisibility::Visible.is_headless()).is_false();
-        assert_that!(ResolvedBrowserTestVisibility::Headless.is_visible()).is_false();
-        assert_that!(ResolvedBrowserTestVisibility::Headless.is_headless()).is_true();
-    }
-
-    #[test]
-    fn runner_pause_builder_accepts_resolved_pause_config() {
-        let runner = BrowserTestRunner::new().with_pause(ResolvedPauseConfig::enabled(true));
-
-        assert_that!(
-            runner
-                .pause
-                .expect("pause should be configured")
-                .is_enabled()
-        )
-        .is_true();
-    }
-
-    #[test]
-    fn runner_browser_driver_output_builder_sets_capture() {
-        let runner =
-            BrowserTestRunner::new().with_driver_output(DriverOutputConfig::tail_lines(12));
-
-        let ResolvedDriverOutputConfig::TailLines(tail_lines) = runner.browser_driver_output else {
-            panic!("browser driver output tail-line capture should be configured");
-        };
-        assert_that!(tail_lines.get()).is_equal_to(12);
-    }
-
-    #[test]
-    fn runner_browser_driver_output_builder_accepts_resolved_config() {
-        let runner = BrowserTestRunner::new()
-            .with_driver_output(ResolvedDriverOutputConfig::from_tail_lines(12));
-
-        let ResolvedDriverOutputConfig::TailLines(tail_lines) = runner.browser_driver_output else {
-            panic!("browser driver output tail-line capture should be configured");
-        };
-        assert_that!(tail_lines.get()).is_equal_to(12);
-    }
-
-    #[allow(deprecated)]
-    #[test]
-    fn deprecated_browser_driver_output_builder_sets_capture() {
-        let runner = BrowserTestRunner::new()
-            .with_browser_driver_output(crate::BrowserDriverOutputConfig::new(12));
-
-        let ResolvedDriverOutputConfig::TailLines(tail_lines) = runner.browser_driver_output else {
-            panic!("browser driver output tail-line capture should be configured");
-        };
-        assert_that!(tail_lines.get()).is_equal_to(12);
-    }
-
-    #[test]
-    fn runner_browser_driver_output_zero_tail_disables_capture() {
-        let runner = BrowserTestRunner::new().with_driver_output(DriverOutputConfig::tail_lines(0));
-
-        assert_that!(matches!(
-            runner.browser_driver_output,
-            ResolvedDriverOutputConfig::Disabled
-        ))
-        .is_true();
-    }
-
-    #[test]
-    fn browser_driver_output_from_env_uses_default_tail_lines() {
-        let env = EnvVarGuard::new(DEFAULT_BROWSER_DRIVER_OUTPUT_ENV);
-        let original_tail = env::var_os(DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES_ENV);
         env.set("1");
-        // SAFETY: `env` holds the crate's environment lock for this test.
-        unsafe {
-            env::remove_var(DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES_ENV);
-        }
+        assert_that!(Visibility::from_env()).is_equal_to(Ok(Some(Visibility::Visible)));
 
-        let runner = BrowserTestRunner::new().with_driver_output(DriverOutputConfig::from_env());
+        env.set("0");
+        assert_that!(Visibility::from_env()).is_equal_to(Ok(Some(Visibility::Headless)));
 
-        let ResolvedDriverOutputConfig::TailLines(tail_lines) = runner.browser_driver_output else {
-            panic!("env browser driver output tail-line capture should be configured");
-        };
-        assert_that!(tail_lines.get()).is_equal_to(DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES);
+        env.remove();
+        assert_that!(Visibility::from_env()).is_equal_to(Ok(None));
 
-        // SAFETY: `env` holds the crate's environment lock for this test.
-        unsafe {
-            match original_tail {
-                Some(value) => env::set_var(DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES_ENV, value),
-                None => env::remove_var(DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES_ENV),
-            }
-        }
+        env.set("visible");
+        assert_that!(Visibility::from_env().is_err()).is_true();
     }
 
     #[test]
-    fn browser_driver_output_tail_lines_creates_fresh_capture_per_run() {
-        let runner = BrowserTestRunner::new().with_driver_output(DriverOutputConfig::tail_lines(1));
+    fn visibility_reads_custom_env_var() {
+        let env = EnvVarGuard::new("BROWSER_TEST_CUSTOM_VISIBLE");
+        env.set("yes");
+
+        assert_that!(Visibility::from_env_var("BROWSER_TEST_CUSTOM_VISIBLE"))
+            .is_equal_to(Ok(Some(Visibility::Visible)));
+    }
+
+    #[test]
+    fn headless_chrome_binary_is_used_only_in_headless_runs() {
+        let runner =
+            BrowserTestRunner::new().with_headless_chrome_binary(ChromeBinary::ChromeHeadlessShell);
+        assert_that!(runner.chrome_binary_for_run()).is_equal_to(ChromeBinary::ChromeHeadlessShell);
+
+        let runner = runner.with_visibility(Visibility::Visible);
+        assert_that!(runner.chrome_binary_for_run()).is_equal_to(ChromeBinary::Chrome);
+    }
+
+    #[test]
+    fn driver_output_creates_a_fresh_capture_per_run() {
+        let runner = BrowserTestRunner::new().with_driver_output(DriverOutput::tail_lines(1));
 
         let first = runner
-            .browser_driver_output_capture_for_run()
+            .driver_output_capture_for_run()
             .expect("tail-line capture should be enabled");
         let second = runner
-            .browser_driver_output_capture_for_run()
+            .driver_output_capture_for_run()
             .expect("tail-line capture should be enabled");
-
-        first.push(DriverOutputLine {
-            source: DriverOutputSource::Stdout,
-            sequence: 0,
-            line: "first run".to_owned(),
-        });
+        first.push(DriverOutputLine::new(
+            DriverOutputSource::Stdout,
+            "first run",
+        ));
 
         assert_that!(first.snapshot().total_lines).is_equal_to(1);
         assert_that!(second.snapshot().total_lines).is_equal_to(0);
     }
 
     #[test]
-    fn browser_driver_output_disabled_creates_no_capture_for_run() {
-        let runner = BrowserTestRunner::new().with_driver_output(DriverOutputConfig::disabled());
+    fn driver_output_of_zero_lines_creates_no_capture() {
+        let runner = BrowserTestRunner::new().with_driver_output(DriverOutput::tail_lines(0));
 
-        assert_that!(runner.browser_driver_output_capture_for_run().is_none()).is_true();
+        assert_that!(runner.driver_output_capture_for_run().is_none()).is_true();
     }
 
-    #[test]
-    fn runner_chrome_capabilities_builder_adds_setup() {
+    #[tokio::test]
+    async fn report_consumers_are_not_called_for_runs_without_tests() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
         let runner =
-            BrowserTestRunner::new().with_chrome_capabilities(|caps| caps.add_arg("--no-sandbox"));
+            BrowserTestRunner::new().with_report_consumer(move |_report: &BrowserTestRunReport| {
+                counter.fetch_add(1, Ordering::SeqCst);
+            });
 
-        assert_that!(runner.chrome_capabilities_setups.len()).is_equal_to(1);
+        let result = runner.run(&(), BrowserTests::<()>::sequential()).await;
+
+        assert_that!(result.is_ok()).is_true();
+        assert_that!(calls.load(Ordering::SeqCst)).is_equal_to(0);
     }
 
     #[test]
-    fn runner_chrome_for_testing_cache_dir_builder_sets_cache_dir() {
-        let cache_dir = PathBuf::from("/tmp/browser-test-cft-cache");
-
-        let runner = BrowserTestRunner::new().with_chrome_for_testing_cache_dir(&cache_dir);
-
-        assert_that!(runner.chrome_for_testing_cache_dir).is_equal_to(Some(cache_dir));
-    }
-
-    #[test]
-    fn runner_headless_chrome_binary_builder_sets_headless_binary() {
-        let runner =
-            BrowserTestRunner::new().with_headless_chrome_binary(ChromeBinary::ChromeHeadlessShell);
-
-        assert_that!(runner.chrome_binary_for_run()).is_equal_to(ChromeBinary::ChromeHeadlessShell);
-    }
-
-    #[test]
-    fn runner_visible_mode_forces_regular_chrome() {
-        let runner = BrowserTestRunner::new()
-            .with_headless_chrome_binary(ChromeBinary::ChromeHeadlessShell)
-            .with_visibility(BrowserTestVisibility::Visible);
-
-        assert_that!(runner.chrome_binary_for_run()).is_equal_to(ChromeBinary::Chrome);
-    }
-
-    #[test]
-    fn runner_webdriver_timeouts_builder_sets_default_timeouts() {
-        let timeouts = BrowserTimeouts::builder()
-            .script_timeout(Duration::from_secs(10))
-            .page_load_timeout(Duration::from_secs(10))
-            .implicit_wait_timeout(Duration::from_secs(0))
-            .build();
-
-        let runner = BrowserTestRunner::new().with_timeouts(timeouts);
-
-        assert_that!(runner.webdriver_timeouts).is_equal_to(Some(timeouts));
-    }
-
-    #[allow(deprecated)]
-    #[test]
-    fn deprecated_webdriver_timeouts_builder_sets_default_timeouts() {
-        let timeouts = BrowserTimeouts::builder()
-            .script_timeout(Duration::from_secs(10))
-            .page_load_timeout(Duration::from_secs(10))
-            .implicit_wait_timeout(Duration::from_secs(0))
-            .build();
-
-        let runner = BrowserTestRunner::new().with_webdriver_timeouts(timeouts);
-
-        assert_that!(runner.webdriver_timeouts).is_equal_to(Some(timeouts));
-    }
-
-    #[test]
-    fn runner_element_query_wait_builder_sets_default_wait() {
-        let wait = ElementQueryWaitConfig::builder()
-            .timeout(Duration::from_secs(10))
-            .interval(Duration::from_millis(500))
-            .build();
-
-        let runner = BrowserTestRunner::new().with_element_query_wait(wait);
-
-        assert_that!(runner.element_query_wait).is_equal_to(Some(wait));
-    }
-
-    #[test]
-    fn runner_with_no_tests_returns_without_starting_webdriver_or_pausing() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .expect("current-thread runtime should build");
-
-        runtime.block_on(async {
-            BrowserTestRunner::new()
-                .with_pause(PauseConfig::enabled(true))
-                .run(&(), BrowserTests::<()>::new())
-                .await
-                .expect("empty test runs should be a no-op");
-        });
-    }
-
-    #[test]
-    fn termination_failure_is_attached_to_existing_test_failure() {
-        let test_result = Err(Report::new(BrowserTestError::RunTest {
+    fn shutdown_error_is_attached_to_a_test_failure() {
+        let test_error = Report::new(BrowserTestError::RunTest {
             test_name: "login".to_owned(),
-        }));
-        let termination_error = Report::new(BrowserTestError::TerminateWebdriver);
+        });
+        let shutdown_error = Report::new(BrowserTestError::ShutDownChromeForTesting);
 
-        let err = merge_termination_result(test_result, termination_error)
-            .expect_err("test and termination failure should fail");
+        let error = merge_shutdown_result(Err(test_error), shutdown_error)
+            .expect_err("a failed test stays an error");
 
-        assert_that!(err.to_string()).contains(
-            BrowserTestError::RunTest {
-                test_name: "login".to_owned(),
-            }
-            .to_string(),
-        );
-        assert_that!(err.children().len()).is_equal_to(1);
+        assert_that!(error.current_context().clone()).is_equal_to(BrowserTestError::RunTest {
+            test_name: "login".to_owned(),
+        });
+        assert_that!(error.children().len()).is_equal_to(1);
     }
 }

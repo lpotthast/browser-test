@@ -1,9 +1,10 @@
 /// Error contexts reported by browser-test runner operations.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum BrowserTestError {
-    /// Chromedriver could not be started.
-    #[error("Failed to start webdriver.")]
-    StartWebdriver,
+    /// Chrome for Testing could not be resolved, downloaded, or launched.
+    #[error("Failed to launch Chrome for Testing.")]
+    LaunchChromeForTesting,
 
     /// A browser test failed while running in its `WebDriver` session.
     #[error("Browser test '{test_name}' failed.")]
@@ -28,9 +29,9 @@ pub enum BrowserTestError {
         failed_tests: usize,
     },
 
-    /// Chromedriver could not be terminated cleanly.
-    #[error("Failed to terminate chromedriver.")]
-    TerminateWebdriver,
+    /// Chrome for Testing could not be shut down cleanly.
+    #[error("Failed to shut down Chrome for Testing.")]
+    ShutDownChromeForTesting,
 
     /// The pause prompt could not be flushed to stdout.
     #[error("Failed to flush pause prompt.")]

@@ -1,10 +1,12 @@
 use std::collections::VecDeque;
-use std::env;
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use chrome_for_testing_manager::{DriverOutputLine, DriverOutputListener, DriverOutputSource};
+use chrome_for_testing_manager::{
+    ChromeForTesting, DriverOutputLine, DriverOutputSource, DriverOutputSubscriptionError,
+};
 use rootcause::Report;
 use rootcause::handlers::{
     AttachmentFormattingPlacement, AttachmentFormattingStyle, AttachmentHandler, FormattingFunction,
@@ -12,145 +14,79 @@ use rootcause::handlers::{
 use rootcause::report_attachment::ReportAttachment;
 
 use crate::BrowserTestError;
-use crate::env::env_flag_enabled;
+use crate::env::{InvalidEnvVar, env_flag, env_number};
 
 /// Default environment variable enabling browser driver output capture.
 pub(crate) const DEFAULT_BROWSER_DRIVER_OUTPUT_ENV: &str = "BROWSER_TEST_DRIVER_OUTPUT";
 
-/// Default environment variable controlling the captured browser driver output tail size.
-pub(crate) const DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES_ENV: &str =
-    "BROWSER_TEST_DRIVER_OUTPUT_TAIL_LINES";
-
 /// Default number of browser driver output lines retained when env capture is enabled.
 pub(crate) const DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES: usize = 200;
 
-/// Browser-driver output capture mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DriverOutputConfig {
-    /// Do not capture browser-driver output.
-    Disabled,
-
-    /// Capture the last `usize` browser-driver output lines for failure diagnostics.
-    ///
-    /// `0` disables capture.
-    TailLines(usize),
-
-    /// Read capture settings from `BROWSER_TEST_DRIVER_OUTPUT` and
-    /// `BROWSER_TEST_DRIVER_OUTPUT_TAIL_LINES`.
-    FromEnv,
-}
-
-/// Resolved browser-driver output capture mode.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub enum ResolvedDriverOutputConfig {
-    /// Do not capture browser-driver output.
-    #[default]
-    Disabled,
-
-    /// Capture recent browser-driver output lines for failure diagnostics.
-    TailLines(NonZeroUsize),
-}
-
-/// Deprecated name for [`DriverOutputConfig`].
+/// Capture of recent browser-driver output, attached to the errors of failed runs and tests.
 ///
-/// Use [`DriverOutputConfig`] in new code.
-#[deprecated(since = "0.1.0", note = "use DriverOutputConfig instead")]
-pub type BrowserDriverOutputConfig = DriverOutputConfig;
+/// Disabled by default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct DriverOutput {
+    tail_lines: Option<NonZeroUsize>,
+}
 
-impl DriverOutputConfig {
-    /// Disable browser-driver output capture.
+impl DriverOutput {
+    /// Do not capture browser-driver output.
     #[must_use]
     pub const fn disabled() -> Self {
-        Self::Disabled
+        Self { tail_lines: None }
     }
 
-    /// Capture the last `tail_lines` browser-driver output lines for failure diagnostics.
-    ///
-    /// `0` disables capture.
+    /// Capture the last `tail_lines` browser-driver output lines. `0` disables capture.
     #[must_use]
     pub const fn tail_lines(tail_lines: usize) -> Self {
-        Self::TailLines(tail_lines)
-    }
-
-    /// Capture the last `tail_lines` browser-driver output lines for failure diagnostics.
-    ///
-    /// `0` disables capture.
-    #[must_use]
-    pub const fn new(tail_lines: usize) -> Self {
-        Self::tail_lines(tail_lines)
-    }
-
-    /// Read capture settings from the browser-driver output environment variables.
-    #[must_use]
-    pub const fn from_env() -> Self {
-        Self::FromEnv
-    }
-
-    /// Resolve this config to an immediate browser-driver output capture mode.
-    ///
-    /// Environment-backed configs read their environment variables when this method is called.
-    #[must_use]
-    pub fn resolve(&self) -> ResolvedDriverOutputConfig {
-        match self {
-            Self::Disabled => ResolvedDriverOutputConfig::Disabled,
-            Self::TailLines(tail_lines) => ResolvedDriverOutputConfig::from_tail_lines(*tail_lines),
-            Self::FromEnv => resolved_browser_driver_output_config_from_env(),
-        }
-    }
-}
-
-impl ResolvedDriverOutputConfig {
-    /// Disable browser-driver output capture.
-    #[must_use]
-    pub const fn disabled() -> Self {
-        Self::Disabled
-    }
-
-    /// Capture the last `tail_lines` browser-driver output lines for failure diagnostics.
-    #[must_use]
-    pub const fn tail_lines(tail_lines: NonZeroUsize) -> Self {
-        Self::TailLines(tail_lines)
-    }
-
-    /// Capture the last `tail_lines` browser-driver output lines for failure diagnostics.
-    #[must_use]
-    pub const fn new(tail_lines: NonZeroUsize) -> Self {
-        Self::tail_lines(tail_lines)
-    }
-
-    /// Build a resolved capture mode from a raw tail-line count.
-    ///
-    /// `0` disables capture.
-    #[must_use]
-    pub const fn from_tail_lines(tail_lines: usize) -> Self {
-        match NonZeroUsize::new(tail_lines) {
-            Some(tail_lines) => Self::TailLines(tail_lines),
-            None => Self::Disabled,
+        Self {
+            tail_lines: NonZeroUsize::new(tail_lines),
         }
     }
 
-    /// Whether browser-driver output should be captured.
-    #[must_use]
-    pub const fn is_enabled(self) -> bool {
-        matches!(self, Self::TailLines(_))
+    /// Read the capture from `BROWSER_TEST_DRIVER_OUTPUT` and
+    /// `BROWSER_TEST_DRIVER_OUTPUT_TAIL_LINES`.
+    ///
+    /// See [`Self::from_env_var`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidEnvVar`] if a variable is set to a value that cannot be interpreted.
+    pub fn from_env() -> Result<Option<Self>, InvalidEnvVar> {
+        Self::from_env_var(DEFAULT_BROWSER_DRIVER_OUTPUT_ENV)
     }
 
-    /// Number of recent output lines retained when capture is enabled.
+    /// Read the capture from the boolean flag `env_var` and the number of lines from
+    /// `<env_var>_TAIL_LINES`.
+    ///
+    /// Returns `None` if `env_var` is unset or empty, so the caller picks the default:
+    /// `DriverOutput::from_env()?.unwrap_or_default()`. `1`, `true`, `yes`, `on`, and `enabled`
+    /// enable capture; `0`, `false`, `no`, `off`, and `disabled` disable it (ignoring case). An
+    /// enabled capture retains `<env_var>_TAIL_LINES` lines, 200 if that variable is unset or
+    /// empty; `0` disables capture. Both variables are read when this function is called.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidEnvVar`] if `env_var` is not a boolean flag or `<env_var>_TAIL_LINES` is
+    /// not a number.
+    pub fn from_env_var(env_var: impl AsRef<str>) -> Result<Option<Self>, InvalidEnvVar> {
+        let env_var = env_var.as_ref();
+        match env_flag(env_var)? {
+            None => Ok(None),
+            Some(false) => Ok(Some(Self::disabled())),
+            Some(true) => {
+                let tail_lines = env_number(&format!("{env_var}_TAIL_LINES"))?
+                    .unwrap_or(DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES);
+                Ok(Some(Self::tail_lines(tail_lines)))
+            }
+        }
+    }
+
+    /// Number of recent output lines retained, or `None` if capture is disabled.
     #[must_use]
     pub const fn tail_line_count(self) -> Option<NonZeroUsize> {
-        match self {
-            Self::Disabled => None,
-            Self::TailLines(tail_lines) => Some(tail_lines),
-        }
-    }
-}
-
-impl From<ResolvedDriverOutputConfig> for DriverOutputConfig {
-    fn from(config: ResolvedDriverOutputConfig) -> Self {
-        match config {
-            ResolvedDriverOutputConfig::Disabled => Self::Disabled,
-            ResolvedDriverOutputConfig::TailLines(tail_lines) => Self::TailLines(tail_lines.get()),
-        }
+        self.tail_lines
     }
 }
 
@@ -164,13 +100,45 @@ pub(crate) struct DriverOutputCapture {
 struct BrowserDriverOutputState {
     tail_capacity: NonZeroUsize,
     total_lines: usize,
-    tail_lines: VecDeque<DriverOutputLine>,
+    tail_lines: VecDeque<CapturedDriverOutputLine>,
+}
+
+/// A captured driver output line and its position in the captured output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CapturedDriverOutputLine {
+    /// Zero-based position of the line in the output seen by the capture.
+    pub(crate) sequence: usize,
+
+    /// The driver output line.
+    pub(crate) line: DriverOutputLine,
+}
+
+/// How long [`DriverOutputFollower::finish`] waits for output still in flight after the driver
+/// was shut down.
+const FINISH_FOLLOWING_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// A task copying live driver output into a [`DriverOutputCapture`].
+#[derive(Debug)]
+pub(crate) struct DriverOutputFollower {
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl DriverOutputFollower {
+    /// Wait briefly for the output of a terminated driver to be copied, then stop following.
+    pub(crate) async fn finish(self) {
+        let mut task = self.task;
+        if tokio::time::timeout(FINISH_FOLLOWING_TIMEOUT, &mut task)
+            .await
+            .is_err()
+        {
+            task.abort();
+        }
+    }
 }
 
 impl DriverOutputCapture {
     /// Create a capture handle retaining the last `tail_lines` driver output lines.
     ///
-    /// Use [`DriverOutputConfig`] when `0` should mean disabled.
     #[must_use]
     pub(crate) fn new(tail_lines: NonZeroUsize) -> Self {
         Self {
@@ -200,11 +168,29 @@ impl DriverOutputCapture {
         }
     }
 
-    pub(crate) fn listener(&self) -> DriverOutputListener {
+    /// Capture the driver's output so far, then keep capturing its live output until the driver
+    /// shuts down.
+    ///
+    /// A line printed while following starts can be captured twice.
+    pub(crate) fn follow(&self, chrome: &ChromeForTesting) -> DriverOutputFollower {
+        let mut subscription = chrome.subscribe_output();
+        for line in chrome.recent_output() {
+            self.push(line);
+        }
         let capture = self.clone();
-        DriverOutputListener::new(move |line| {
-            capture.push(line);
-        })
+        let task = tokio::spawn(async move {
+            loop {
+                match subscription.recv().await {
+                    Ok(line) => capture.push(line),
+                    Err(DriverOutputSubscriptionError::Lagged { skipped }) => {
+                        capture.skip(skipped);
+                    }
+                    // `Closed`, or a future error: no more output can be received.
+                    Err(_) => return,
+                }
+            }
+        });
+        DriverOutputFollower { task }
     }
 
     pub(crate) fn push(&self, line: DriverOutputLine) {
@@ -212,12 +198,24 @@ impl DriverOutputCapture {
             .inner
             .lock()
             .expect("browser driver output capture mutex should not be poisoned");
+        let sequence = state.total_lines;
         state.total_lines += 1;
 
         while state.tail_lines.len() >= state.tail_capacity.get() {
             state.tail_lines.pop_front();
         }
-        state.tail_lines.push_back(line);
+        state
+            .tail_lines
+            .push_back(CapturedDriverOutputLine { sequence, line });
+    }
+
+    /// Account for `count` lines that were not captured because capturing fell behind.
+    fn skip(&self, count: u64) {
+        let mut state = self
+            .inner
+            .lock()
+            .expect("browser driver output capture mutex should not be poisoned");
+        state.total_lines += usize::try_from(count).unwrap_or(usize::MAX);
     }
 }
 
@@ -230,8 +228,8 @@ pub(crate) struct DriverOutputSnapshot {
     /// Maximum number of recent output lines retained.
     pub(crate) tail_capacity: usize,
 
-    /// Recent output lines in callback sequence order.
-    pub(crate) tail_lines: Vec<DriverOutputLine>,
+    /// Recent output lines in capture order.
+    pub(crate) tail_lines: Vec<CapturedDriverOutputLine>,
 }
 
 impl DriverOutputSnapshot {
@@ -265,13 +263,13 @@ impl AttachmentHandler<DriverOutputAttachment> for DriverOutputAttachmentHandler
             )?;
         }
 
-        for line in &value.snapshot.tail_lines {
+        for captured in &value.snapshot.tail_lines {
             writeln!(
                 formatter,
                 "[{} {}] {}",
-                line.sequence,
-                source_label(line.source),
-                line.line,
+                captured.sequence,
+                source_label(captured.line.source),
+                captured.line.line,
             )?;
         }
 
@@ -325,34 +323,6 @@ pub(crate) fn attach_browser_driver_output_to_result(
     })
 }
 
-fn resolved_browser_driver_output_config_from_env() -> ResolvedDriverOutputConfig {
-    if !env_flag_enabled(DEFAULT_BROWSER_DRIVER_OUTPUT_ENV) {
-        return ResolvedDriverOutputConfig::Disabled;
-    }
-
-    let tail_lines = env::var_os(DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES_ENV).map_or(
-        DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES,
-        |value| {
-            let value = value.to_string_lossy();
-            match value.trim().parse::<usize>() {
-                Ok(tail_lines) => tail_lines,
-                Err(err) => {
-                    tracing::warn!(
-                        env_var = DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES_ENV,
-                        value = %value,
-                        error = %err,
-                        fallback = DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES,
-                        "invalid browser driver output tail-line setting"
-                    );
-                    DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES
-                }
-            }
-        },
-    );
-
-    ResolvedDriverOutputConfig::from_tail_lines(tail_lines)
-}
-
 fn source_label(source: DriverOutputSource) -> &'static str {
     match source {
         DriverOutputSource::Stdout => "stdout",
@@ -366,67 +336,40 @@ mod tests {
     use crate::test_support::EnvVarGuard;
     use assertr::prelude::*;
 
-    #[allow(deprecated)]
     #[test]
-    fn deprecated_browser_driver_output_config_alias_matches_driver_output_config() {
-        let config: BrowserDriverOutputConfig = DriverOutputConfig::tail_lines(3);
-
-        assert_that!(config).is_equal_to(DriverOutputConfig::TailLines(3));
+    fn tail_lines_of_zero_disables_capture() {
+        assert_that!(DriverOutput::default()).is_equal_to(DriverOutput::disabled());
+        assert_that!(DriverOutput::tail_lines(0)).is_equal_to(DriverOutput::disabled());
+        assert_that!(
+            DriverOutput::tail_lines(3)
+                .tail_line_count()
+                .map(NonZeroUsize::get)
+        )
+        .is_equal_to(Some(3));
     }
 
     #[test]
-    fn driver_output_config_resolves_direct_modes() {
-        assert_that!(DriverOutputConfig::disabled().resolve())
-            .is_equal_to(ResolvedDriverOutputConfig::Disabled);
-        assert_that!(DriverOutputConfig::tail_lines(0).resolve())
-            .is_equal_to(ResolvedDriverOutputConfig::Disabled);
-
-        let ResolvedDriverOutputConfig::TailLines(tail_lines) =
-            DriverOutputConfig::tail_lines(3).resolve()
-        else {
-            panic!("non-zero tail-line capture should be enabled");
-        };
-        assert_that!(tail_lines.get()).is_equal_to(3);
-    }
-
-    #[test]
-    fn resolved_driver_output_config_reports_capture_state() {
-        let tail_lines = NonZeroUsize::new(3).expect("literal tail-line count should be non-zero");
-        assert_that!(ResolvedDriverOutputConfig::disabled().is_enabled()).is_false();
-        assert_that!(ResolvedDriverOutputConfig::tail_lines(tail_lines).is_enabled()).is_true();
-        assert_that!(ResolvedDriverOutputConfig::tail_lines(tail_lines).tail_line_count())
-            .is_equal_to(Some(tail_lines));
-        assert_that!(ResolvedDriverOutputConfig::disabled().tail_line_count()).is_equal_to(None);
-    }
-
-    #[test]
-    fn driver_output_config_resolves_env() {
+    fn from_env_reads_flag_and_tail_lines() {
         let env = EnvVarGuard::new(DEFAULT_BROWSER_DRIVER_OUTPUT_ENV);
-        let original_tail = env::var_os(DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES_ENV);
+        let tail_lines = EnvVarGuard::new_unlocked("BROWSER_TEST_DRIVER_OUTPUT_TAIL_LINES");
+
         env.set("1");
-        // SAFETY: `env` holds the crate's environment lock for this test.
-        unsafe {
-            env::set_var(DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES_ENV, "12");
-        }
+        tail_lines.set("12");
+        assert_that!(DriverOutput::from_env()).is_equal_to(Ok(Some(DriverOutput::tail_lines(12))));
 
-        let resolved = DriverOutputConfig::from_env().resolve();
+        tail_lines.remove();
+        assert_that!(DriverOutput::from_env()).is_equal_to(Ok(Some(DriverOutput::tail_lines(
+            DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES,
+        ))));
 
-        let ResolvedDriverOutputConfig::TailLines(tail_lines) = resolved else {
-            panic!("env browser-driver output capture should be enabled");
-        };
-        assert_that!(tail_lines.get()).is_equal_to(12);
+        tail_lines.set("lots");
+        assert_that!(DriverOutput::from_env().is_err()).is_true();
 
         env.set("0");
-        assert_that!(DriverOutputConfig::from_env().resolve())
-            .is_equal_to(ResolvedDriverOutputConfig::Disabled);
+        assert_that!(DriverOutput::from_env()).is_equal_to(Ok(Some(DriverOutput::disabled())));
 
-        // SAFETY: `env` holds the crate's environment lock for this test.
-        unsafe {
-            match original_tail {
-                Some(value) => env::set_var(DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES_ENV, value),
-                None => env::remove_var(DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES_ENV),
-            }
-        }
+        env.remove();
+        assert_that!(DriverOutput::from_env()).is_equal_to(Ok(None));
     }
 
     #[test]
@@ -435,18 +378,21 @@ mod tests {
             NonZeroUsize::new(2).expect("literal tail capacity should be non-zero"),
         );
 
-        capture.push(line(DriverOutputSource::Stdout, 0, "one"));
-        capture.push(line(DriverOutputSource::Stderr, 1, "two"));
-        capture.push(line(DriverOutputSource::Stdout, 2, "three"));
+        capture.push(line(DriverOutputSource::Stdout, "one"));
+        capture.push(line(DriverOutputSource::Stderr, "two"));
+        capture.skip(2);
+        capture.push(line(DriverOutputSource::Stdout, "three"));
 
         let snapshot = capture.snapshot();
 
-        assert_that!(snapshot.total_lines).is_equal_to(3);
+        assert_that!(snapshot.total_lines).is_equal_to(5);
         assert_that!(snapshot.tail_capacity).is_equal_to(2);
         assert_that!(snapshot.tail_lines.len()).is_equal_to(2);
-        assert_that!(&snapshot.tail_lines[0].line).is_equal_to("two");
-        assert_that!(&snapshot.tail_lines[1].line).is_equal_to("three");
-        assert_that!(snapshot.tail_lines[0].source).is_equal_to(DriverOutputSource::Stderr);
+        assert_that!(&snapshot.tail_lines[0].line.line).is_equal_to("two");
+        assert_that!(snapshot.tail_lines[0].sequence).is_equal_to(1);
+        assert_that!(&snapshot.tail_lines[1].line.line).is_equal_to("three");
+        assert_that!(snapshot.tail_lines[1].sequence).is_equal_to(4);
+        assert_that!(snapshot.tail_lines[0].line.source).is_equal_to(DriverOutputSource::Stderr);
     }
 
     #[test]
@@ -454,7 +400,7 @@ mod tests {
         let capture = DriverOutputCapture::new(
             NonZeroUsize::new(5).expect("literal tail capacity should be non-zero"),
         );
-        capture.push(line(DriverOutputSource::Stdout, 0, "Starting ChromeDriver"));
+        capture.push(line(DriverOutputSource::Stdout, "Starting ChromeDriver"));
         let mut report: Report<BrowserTestError> = Report::new(BrowserTestError::RunTest {
             test_name: "login".to_owned(),
         });
@@ -468,11 +414,7 @@ mod tests {
         assert_that!(report.to_string()).contains("parallel tests may interleave lines");
     }
 
-    fn line(source: DriverOutputSource, sequence: u64, line: &str) -> DriverOutputLine {
-        DriverOutputLine {
-            source,
-            sequence,
-            line: line.to_owned(),
-        }
+    fn line(source: DriverOutputSource, line: &str) -> DriverOutputLine {
+        DriverOutputLine::new(source, line)
     }
 }

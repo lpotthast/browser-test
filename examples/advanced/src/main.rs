@@ -1,11 +1,10 @@
 mod tests;
 
-use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use browser_test::{
-    BrowserTestParallelism, BrowserTestRunner, BrowserTestVisibility, BrowserTests,
-    DriverOutputConfig, ElementQueryWaitConfig, PauseConfig,
+    BrowserTestRunner, BrowserTests, DriverOutput, ElementQueryWait, Parallelism, Pause,
+    StderrSummary, Visibility,
 };
 use rootcause::Report;
 use rootcause::hooks::Hooks;
@@ -47,31 +46,31 @@ async fn main() -> Result<(), Report> {
         base_url: "https://www.wikipedia.org/",
     };
 
-    let tests = BrowserTests::new()
+    let tests = BrowserTests::parallel(Parallelism::parallel(2))
         .with(TitleContainsWikipedia)
         .with(SearchInputIsVisible);
 
     BrowserTestRunner::new()
-        .with_visibility(BrowserTestVisibility::Visible)
-        .with_pause(PauseConfig::from_env())
+        .with_visibility(Visibility::Visible)
+        .with_pause(
+            Pause::from_env()
+                .context("Reading the pause setting")?
+                .unwrap_or_default()
+                .with_hint(format!("Wikipedia is available at {}", context.base_url)),
+        )
         .with_timeouts(
-            browser_test::BrowserTimeouts::builder()
+            browser_test::Timeouts::builder()
                 .script_timeout(Duration::from_secs(5))
                 .page_load_timeout(Duration::from_secs(10))
                 .implicit_wait_timeout(Duration::from_secs(0))
                 .build(),
         )
         .with_element_query_wait(
-            ElementQueryWaitConfig::builder()
-                .timeout(Duration::from_secs(10))
-                .interval(Duration::from_millis(500))
-                .build(),
+            ElementQueryWait::new(Duration::from_secs(10), Duration::from_millis(500))
+                .context("Configuring element query waits")?,
         )
-        .with_driver_output(DriverOutputConfig::new(100))
-        .with_test_parallelism(BrowserTestParallelism::Parallel(
-            NonZeroUsize::new(2).expect("parallelism should be non-zero"),
-        ))
-        .with_hint(format!("Wikipedia is available at {}", context.base_url))
+        .with_driver_output(DriverOutput::tail_lines(100))
+        .with_report_consumer(StderrSummary)
         .run(&context, tests)
         .await
         .context("Running browser tests")?;
