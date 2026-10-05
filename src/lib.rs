@@ -9,8 +9,12 @@ mod env;
 mod error;
 mod execution;
 mod pause;
+mod progress;
+mod report;
 mod runner;
 mod scheduler;
+mod session;
+mod step;
 mod test_case;
 #[cfg(test)]
 mod test_support;
@@ -22,8 +26,17 @@ pub use driver_output::BrowserDriverOutputConfig;
 pub use driver_output::{DriverOutputConfig, ResolvedDriverOutputConfig};
 pub use error::BrowserTestError;
 pub use pause::{PauseConfig, ResolvedPauseConfig};
-pub use runner::{BrowserTestRunner, BrowserTestVisibility, ResolvedBrowserTestVisibility};
+pub use progress::{ProgressWarnings, ProgressWarningsBuilder};
+pub use report::{
+    BrowserTestRecord, BrowserTestRunOutcome, BrowserTestRunReport, SessionAcquisition, StepStats,
+    TestOutcome,
+};
+pub use runner::{
+    BrowserTestRunner, BrowserTestVisibility, ResolvedBrowserTestVisibility, RunSummary,
+};
 pub use scheduler::{BrowserTestFailurePolicy, BrowserTestParallelism};
+pub use session::{SessionRequirement, SessionReset, SessionReuse};
+pub use step::step;
 pub use test_case::{BrowserTest, BrowserTests};
 pub use timeout::{BrowserTimeouts, BrowserTimeoutsBuilder};
 pub use wait::{

@@ -4,9 +4,13 @@ use async_trait::async_trait;
 use rootcause::Report;
 use thirtyfour::WebDriver;
 
-use crate::{BrowserTimeouts, ElementQueryWaitConfig};
+use crate::{BrowserTimeouts, ElementQueryWaitConfig, SessionRequirement};
 
-/// A browser test that can run against one fresh `WebDriver` session.
+/// A browser test that runs against a `WebDriver` session.
+///
+/// By default, tests share sessions: the runner hands a session that a passing test used on to the
+/// next test, after resetting it. Return [`SessionRequirement::Fresh`] from [`Self::session`] for
+/// tests that need a session of their own.
 #[async_trait]
 pub trait BrowserTest<Context = (), TestError = rootcause::markers::Dynamic>: Send + Sync
 where
@@ -31,6 +35,14 @@ where
     /// Returning `None` uses the runner's default element query wait configuration, if one is set.
     fn element_query_wait(&self) -> Option<ElementQueryWaitConfig> {
         None
+    }
+
+    /// Whether this test may share its `WebDriver` session with other tests.
+    ///
+    /// Defaults to [`SessionRequirement::Shared`]. See the crate documentation ("Session Reuse")
+    /// for what a shared session's reset clears before a test runs.
+    fn session(&self) -> SessionRequirement {
+        SessionRequirement::Shared
     }
 
     /// Execute the test body.

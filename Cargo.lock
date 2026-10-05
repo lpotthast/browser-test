@@ -103,6 +103,7 @@ dependencies = [
  "chrome-for-testing-manager",
  "futures-util",
  "rootcause 0.13.0",
+ "serde_json",
  "serial_test",
  "thirtyfour",
  "thiserror",

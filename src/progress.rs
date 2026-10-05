@@ -1,0 +1,268 @@
+//! Warnings about browser tests that make no progress.
+
+use std::fmt::{self, Display};
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
+
+use typed_builder::TypedBuilder;
+
+use crate::report::FormatDuration;
+use crate::step::DEFAULT_SLOW_STEP;
+
+/// When [`crate::BrowserTestRunner`] warns that a test run seems not to progress fast enough.
+///
+/// Slow progress often hints at a slowed-down system (e.g. a busy CI machine) or at a test waiting
+/// for something that never happens. Warnings are logged through `tracing` at `warn` level.
+///
+/// Set a threshold to `None` (through the builder's `_opt` setters) to disable its warnings.
+///
+/// # Examples
+///
+/// ```rust
+/// use std::time::Duration;
+///
+/// use browser_test::{BrowserTestRunner, ProgressWarnings};
+///
+/// let runner = BrowserTestRunner::new().with_progress_warnings(
+///     ProgressWarnings::builder()
+///         .test_running(Duration::from_secs(60))
+///         .slow_step_opt(None)
+///         .build(),
+/// );
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, TypedBuilder)]
+pub struct ProgressWarnings {
+    /// Warn when a test body is still running after this duration, and again every time this
+    /// duration passes. Defaults to 30 seconds.
+    #[builder(
+        default = Some(Duration::from_secs(30)),
+        setter(strip_option(fallback_suffix = "_opt"))
+    )]
+    test_running: Option<Duration>,
+
+    /// Warn when creating, resetting, or quitting a session takes longer than this. Defaults to 5
+    /// seconds.
+    #[builder(
+        default = Some(Duration::from_secs(5)),
+        setter(strip_option(fallback_suffix = "_opt"))
+    )]
+    session: Option<Duration>,
+
+    /// Warn when a [`crate::step`] takes longer than this. Defaults to 2 seconds.
+    #[builder(
+        default = Some(DEFAULT_SLOW_STEP),
+        setter(strip_option(fallback_suffix = "_opt"))
+    )]
+    slow_step: Option<Duration>,
+}
+
+impl Default for ProgressWarnings {
+    fn default() -> Self {
+        Self::builder().build()
+    }
+}
+
+impl ProgressWarnings {
+    /// Never warn.
+    #[must_use]
+    pub const fn disabled() -> Self {
+        Self {
+            test_running: None,
+            session: None,
+            slow_step: None,
+        }
+    }
+
+    /// Threshold for test bodies that are still running.
+    #[must_use]
+    pub const fn test_running(self) -> Option<Duration> {
+        self.test_running
+    }
+
+    /// Threshold for creating, resetting, and quitting sessions.
+    #[must_use]
+    pub const fn session(self) -> Option<Duration> {
+        self.session
+    }
+
+    /// Threshold for [`crate::step`]s.
+    #[must_use]
+    pub const fn slow_step(self) -> Option<Duration> {
+        self.slow_step
+    }
+
+    const fn threshold(self, phase: Phase) -> Option<Duration> {
+        match phase {
+            Phase::RunningTest => self.test_running,
+            Phase::CreatingSession | Phase::ResettingSession | Phase::QuittingSession => {
+                self.session
+            }
+        }
+    }
+
+    /// How often the watchdog checks for overdue phases.
+    fn tick(self) -> Option<Duration> {
+        [self.test_running, self.session]
+            .into_iter()
+            .flatten()
+            .min()
+            .map(|min| (min / 4).clamp(Duration::from_millis(50), Duration::from_secs(1)))
+    }
+}
+
+/// What a parallel slot is doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Phase {
+    CreatingSession,
+    ResettingSession,
+    RunningTest,
+    QuittingSession,
+}
+
+impl Display for Phase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::CreatingSession => "creating a session for",
+            Self::ResettingSession => "resetting the session for",
+            Self::RunningTest => "running",
+            Self::QuittingSession => "quitting the session of",
+        })
+    }
+}
+
+#[derive(Debug)]
+struct SlotStatus {
+    test: String,
+    phase: Phase,
+    since: Instant,
+    warnings: u32,
+}
+
+/// What every parallel slot is currently doing, for the watchdog.
+#[derive(Debug)]
+pub(crate) struct ProgressBoard {
+    slots: Mutex<Vec<Option<SlotStatus>>>,
+}
+
+impl ProgressBoard {
+    pub(crate) fn new(slots: usize) -> Self {
+        Self {
+            slots: Mutex::new((0..slots).map(|_| None).collect()),
+        }
+    }
+
+    pub(crate) fn enter(&self, slot: usize, test: &str, phase: Phase) {
+        self.slots.lock().unwrap_or_else(PoisonError::into_inner)[slot] = Some(SlotStatus {
+            test: test.to_owned(),
+            phase,
+            since: Instant::now(),
+            warnings: 0,
+        });
+    }
+
+    pub(crate) fn clear(&self, slot: usize) {
+        self.slots.lock().unwrap_or_else(PoisonError::into_inner)[slot] = None;
+    }
+
+    /// Log a warning for every slot whose current phase exceeded its threshold once more.
+    fn warn_overdue(&self, warnings: ProgressWarnings, now: Instant) {
+        let mut slots = self.slots.lock().unwrap_or_else(PoisonError::into_inner);
+        for status in slots.iter_mut().flatten() {
+            let Some(threshold) = warnings.threshold(status.phase) else {
+                continue;
+            };
+            let elapsed = now.saturating_duration_since(status.since);
+            if is_overdue(elapsed, threshold, status.warnings) {
+                status.warnings += 1;
+                tracing::warn!(
+                    test = %status.test,
+                    elapsed_ms = elapsed.as_millis(),
+                    "Still {} browser test '{}' after {}.",
+                    status.phase,
+                    status.test,
+                    FormatDuration(elapsed),
+                );
+            }
+        }
+    }
+
+    /// Warn about overdue phases until the returned future is dropped.
+    pub(crate) async fn watch(&self, warnings: ProgressWarnings) {
+        let Some(tick) = warnings.tick() else {
+            return std::future::pending().await;
+        };
+        loop {
+            tokio::time::sleep(tick).await;
+            self.warn_overdue(warnings, Instant::now());
+        }
+    }
+}
+
+/// Whether a phase running for `elapsed` deserves another warning, after `warnings` were logged.
+/// Warnings repeat every `threshold`.
+fn is_overdue(elapsed: Duration, threshold: Duration, warnings: u32) -> bool {
+    !threshold.is_zero() && elapsed >= threshold.saturating_mul(warnings + 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assertr::prelude::*;
+
+    #[test]
+    fn defaults_warn_about_long_tests_and_slow_sessions() {
+        let warnings = ProgressWarnings::default();
+
+        assert_that!(warnings.test_running()).is_equal_to(Some(Duration::from_secs(30)));
+        assert_that!(warnings.session()).is_equal_to(Some(Duration::from_secs(5)));
+        assert_that!(warnings.slow_step()).is_equal_to(Some(Duration::from_secs(2)));
+        assert_that!(warnings.tick()).is_equal_to(Some(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn disabled_never_ticks() {
+        assert_that!(ProgressWarnings::disabled().tick()).is_none();
+    }
+
+    #[test]
+    fn tick_follows_the_smallest_threshold() {
+        let warnings = ProgressWarnings::builder()
+            .test_running(Duration::from_millis(400))
+            .session_opt(None)
+            .build();
+
+        assert_that!(warnings.tick()).is_equal_to(Some(Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn overdue_warnings_repeat_every_threshold() {
+        let threshold = Duration::from_secs(30);
+
+        assert_that!(is_overdue(Duration::from_secs(29), threshold, 0)).is_false();
+        assert_that!(is_overdue(Duration::from_secs(30), threshold, 0)).is_true();
+        assert_that!(is_overdue(Duration::from_secs(45), threshold, 1)).is_false();
+        assert_that!(is_overdue(Duration::from_secs(60), threshold, 1)).is_true();
+        assert_that!(is_overdue(Duration::from_secs(60), Duration::ZERO, 0)).is_false();
+    }
+
+    #[test]
+    fn board_counts_warnings_per_phase() {
+        let board = ProgressBoard::new(2);
+        let warnings = ProgressWarnings::default();
+        board.enter(1, "slow test", Phase::RunningTest);
+        let since = board.slots.lock().unwrap()[1]
+            .as_ref()
+            .map(|status| status.since)
+            .unwrap();
+
+        board.warn_overdue(warnings, since + Duration::from_secs(31));
+        board.warn_overdue(warnings, since + Duration::from_secs(32));
+
+        assert_that!(board.slots.lock().unwrap()[1].as_ref().unwrap().warnings).is_equal_to(1);
+
+        board.enter(1, "slow test", Phase::QuittingSession);
+        assert_that!(board.slots.lock().unwrap()[1].as_ref().unwrap().warnings).is_equal_to(0);
+        board.clear(1);
+        assert_that!(board.slots.lock().unwrap()[1].is_none()).is_true();
+    }
+}

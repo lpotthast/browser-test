@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Session reuse: tests share `WebDriver` sessions, which the runner resets between tests (new blank tab with all other
+  windows closed, cookies and storage cleared, window rect and timeouts restored). Tests opt out with the new
+  `BrowserTest::session` method returning `SessionRequirement::Fresh`. Only tests with equal effective timeouts and
+  element query waits share a session, and a session is never reused after a failed or panicking test. Configure it
+  with `BrowserTestRunner::with_session_reuse` (`bool` or `SessionReuse`, incl. `SessionReuse::from_env()` reading
+  `BROWSER_TEST_SESSION_REUSE`). Add app-specific resets with `BrowserTestRunner::with_session_reset` and the
+  `SessionReset` trait.
+- Timing: every test's session acquisition (created or reused), body, and teardown are measured and logged when it
+  finishes. A summary (counts, session time, slowest tests, slowest steps) is printed at the end of every run, see
+  `BrowserTestRunner::with_run_summary` and `RunSummary`. `BrowserTestRunner::run_with_report` returns the data as a
+  `BrowserTestRunReport`.
+- `browser_test::step`: times a step of a test (e.g. a navigation or a wait in a page-object helper), logs it, warns
+  when it is slow, and aggregates its duration per kind into the test's record and the run summary. Test bodies run
+  in a `browser_test` tracing span with the test's name.
+- Progress warnings: a watchdog warns when a test runs long or session creation, reset, or teardown is slow.
+  Configure with `BrowserTestRunner::with_progress_warnings` and `ProgressWarnings`.
+
+### Changed
+
+- **Behavior:** Tests no longer get a fresh `WebDriver` session each by default; see "Session reuse" above. Use
+  `with_session_reuse(false)` for the previous behavior.
+- With `BrowserTestFailurePolicy::FailFast`, parallel slots stop starting tests as soon as a test body failed, not only
+  once the failed test's session was quit.
+- The `thirtyfour` dependency now enables its `cdp` feature (used to clear cookies and storage).
+
 ## [0.4.0] - 2026-06-17
 
 ### Added

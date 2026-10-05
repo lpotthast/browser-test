@@ -2,6 +2,7 @@ use std::{
     fmt::{self, Display},
     path::PathBuf,
     sync::Arc,
+    time::Instant,
 };
 
 use chrome_for_testing_manager::{
@@ -17,13 +18,14 @@ use crate::driver_output::{
     attach_browser_driver_output, attach_browser_driver_output_to_result,
 };
 use crate::env::env_flag_enabled;
-use crate::execution::{ChromeCapabilitiesSetup, browser_test_executions};
+use crate::execution::{ChromeCapabilitiesSetup, ExecutionConfig, execute_tests};
 use crate::pause::{self, PauseConfig, PauseDecision, ResolvedPauseConfig};
-use crate::scheduler::{
-    BrowserTestFailurePolicy, BrowserTestParallelism, run_test_executions_parallel,
-    run_test_executions_sequential,
+use crate::report::{BrowserTestRecord, BrowserTestRunOutcome, BrowserTestRunReport};
+use crate::scheduler::{BrowserTestFailurePolicy, BrowserTestParallelism};
+use crate::{
+    BrowserTestError, BrowserTests, BrowserTimeouts, ElementQueryWaitConfig, ProgressWarnings,
+    SessionReset, SessionReuse,
 };
-use crate::{BrowserTestError, BrowserTests, BrowserTimeouts, ElementQueryWaitConfig};
 
 pub(crate) const DEFAULT_VISIBLE_ENV: &str = "BROWSER_TEST_VISIBLE";
 
@@ -148,6 +150,25 @@ impl From<ResolvedBrowserTestVisibility> for BrowserTestVisibility {
     }
 }
 
+/// Where [`BrowserTestRunner`] prints the summary of a run.
+///
+/// The summary is the `Display` output of [`BrowserTestRunReport`]: test counts, time spent
+/// creating, resetting, and quitting sessions, the slowest tests, and the slowest
+/// [`crate::step`] kinds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum RunSummary {
+    /// Print the summary to stderr. Like all output of a test, the test harness captures it unless
+    /// the test fails or runs with `--nocapture`.
+    #[default]
+    Stderr,
+
+    /// Log the summary through `tracing` at `info` level.
+    Log,
+
+    /// Do not print the summary. [`BrowserTestRunner::run_with_report`] still returns it.
+    Disabled,
+}
+
 /// Runs [`crate::BrowserTest`] implementations through Chrome for Testing.
 #[derive(Clone)]
 pub struct BrowserTestRunner {
@@ -163,6 +184,10 @@ pub struct BrowserTestRunner {
     browser_driver_output: ResolvedDriverOutputConfig,
     chrome_for_testing_cache_dir: Option<PathBuf>,
     headless_chrome_binary: ChromeBinary,
+    session_reuse: bool,
+    session_resets: Vec<Arc<dyn SessionReset>>,
+    progress_warnings: ProgressWarnings,
+    run_summary: RunSummary,
 }
 
 impl Default for BrowserTestRunner {
@@ -180,6 +205,10 @@ impl Default for BrowserTestRunner {
             browser_driver_output: ResolvedDriverOutputConfig::Disabled,
             chrome_for_testing_cache_dir: None,
             headless_chrome_binary: ChromeBinary::Chrome,
+            session_reuse: true,
+            session_resets: Vec::new(),
+            progress_warnings: ProgressWarnings::default(),
+            run_summary: RunSummary::Stderr,
         }
     }
 }
@@ -205,6 +234,10 @@ impl fmt::Debug for BrowserTestRunner {
                 &self.chrome_for_testing_cache_dir,
             )
             .field("headless_chrome_binary", &self.headless_chrome_binary)
+            .field("session_reuse", &self.session_reuse)
+            .field("session_reset_count", &self.session_resets.len())
+            .field("progress_warnings", &self.progress_warnings)
+            .field("run_summary", &self.run_summary)
             .finish()
     }
 }
@@ -349,16 +382,60 @@ impl BrowserTestRunner {
         self
     }
 
-    /// Run every test with a fresh `WebDriver` session.
+    /// Configure whether tests share `WebDriver` sessions.
+    ///
+    /// Enabled by default: consecutive tests (per parallel slot) that return
+    /// [`crate::SessionRequirement::Shared`] from [`crate::BrowserTest::session`] and have the
+    /// same effective timeouts and element query wait run in one session, which the runner resets
+    /// between them. A session is never reused after a test failed or panicked. Pass `false` (or
+    /// [`SessionReuse::Disabled`]) to give every test a fresh session, or
+    /// [`SessionReuse::from_env`] to read the setting from `BROWSER_TEST_SESSION_REUSE`.
+    #[must_use]
+    pub fn with_session_reuse(mut self, session_reuse: impl Into<SessionReuse>) -> Self {
+        self.session_reuse = session_reuse.into().is_enabled();
+        self
+    }
+
+    /// Add an app-specific reset that runs before a shared session is handed to the next test.
+    ///
+    /// Resets run after the built-in reset, in the order they were added. See
+    /// [`SessionReset`].
+    #[must_use]
+    pub fn with_session_reset(mut self, reset: impl SessionReset + 'static) -> Self {
+        self.session_resets.push(Arc::new(reset));
+        self
+    }
+
+    /// Configure when the runner warns that tests do not progress fast enough.
+    ///
+    /// Defaults to [`ProgressWarnings::default`].
+    #[must_use]
+    pub const fn with_progress_warnings(mut self, progress_warnings: ProgressWarnings) -> Self {
+        self.progress_warnings = progress_warnings;
+        self
+    }
+
+    /// Configure where the summary of a run is printed. Defaults to [`RunSummary::Stderr`].
+    #[must_use]
+    pub const fn with_run_summary(mut self, run_summary: RunSummary) -> Self {
+        self.run_summary = run_summary;
+        self
+    }
+
+    /// Run every test, reusing `WebDriver` sessions where allowed (see
+    /// [`Self::with_session_reuse`]).
     ///
     /// The shared chromedriver process is always terminated, even when a test returns an error or
     /// panics. Test panics are converted into [`BrowserTestError::Panic`] reports instead of being
     /// resumed.
     ///
     /// Tests run sequentially and stop on the first failure by default. Use
-    /// [`Self::with_test_parallelism`] to run multiple fresh `WebDriver` sessions at once. Use
+    /// [`Self::with_test_parallelism`] to run multiple `WebDriver` sessions at once. Use
     /// [`Self::with_failure_policy`] to execute every test and return all failures as child reports
     /// on one aggregate report.
+    ///
+    /// Logs each test's timing when it finishes and prints a summary of the run at the end (see
+    /// [`Self::with_run_summary`]). Use [`Self::run_with_report`] to also get the timings as data.
     ///
     /// Non-empty runs require a multithreaded Tokio runtime because [`Chromedriver::run`]
     /// requires one. Use `#[tokio::test(flavor = "multi_thread")]` for browser tests.
@@ -375,6 +452,43 @@ impl BrowserTestRunner {
         &self,
         context: &Context,
         tests: BrowserTests<Context, TestError>,
+    ) -> Result<(), Report<BrowserTestError>>
+    where
+        Context: Sync + ?Sized,
+        TestError: ?Sized + 'static,
+    {
+        self.run_with_report(context, tests).await.result
+    }
+
+    /// Like [`Self::run`], but also returns where the run spent its time.
+    pub async fn run_with_report<Context, TestError>(
+        &self,
+        context: &Context,
+        tests: BrowserTests<Context, TestError>,
+    ) -> BrowserTestRunOutcome
+    where
+        Context: Sync + ?Sized,
+        TestError: ?Sized + 'static,
+    {
+        let start = Instant::now();
+        let mut report = BrowserTestRunReport::default();
+        let result = self.run_reporting(context, tests, &mut report).await;
+        report.total = start.elapsed();
+        if !report.tests.is_empty() {
+            match self.run_summary {
+                RunSummary::Stderr => eprintln!("{report}"),
+                RunSummary::Log => tracing::info!("{report}"),
+                RunSummary::Disabled => {}
+            }
+        }
+        BrowserTestRunOutcome { result, report }
+    }
+
+    async fn run_reporting<Context, TestError>(
+        &self,
+        context: &Context,
+        tests: BrowserTests<Context, TestError>,
+        report: &mut BrowserTestRunReport,
     ) -> Result<(), Report<BrowserTestError>>
     where
         Context: Sync + ?Sized,
@@ -398,6 +512,7 @@ impl BrowserTestRunner {
             .as_ref()
             .map(DriverOutputCapture::listener);
 
+        let startup_start = Instant::now();
         let chromedriver = match Chromedriver::run(
             ChromedriverRunConfig::builder()
                 .version(VersionRequest::LatestIn(self.channel.clone()))
@@ -416,13 +531,17 @@ impl BrowserTestRunner {
                 return Err(err);
             }
         };
+        report.webdriver_startup = startup_start.elapsed();
 
-        let test_result = self.run_tests(&chromedriver, context, tests).await;
+        let (records, test_result) = self.run_tests(&chromedriver, context, tests).await;
+        report.tests = records;
 
+        let shutdown_start = Instant::now();
         let termination_result = chromedriver
             .terminate()
             .await
             .context(BrowserTestError::TerminateWebdriver);
+        report.webdriver_shutdown = shutdown_start.elapsed();
 
         if let Err(err) = termination_result {
             return attach_browser_driver_output_to_result(
@@ -448,27 +567,24 @@ impl BrowserTestRunner {
         chromedriver: &Chromedriver,
         context: &Context,
         tests: BrowserTests<Context, TestError>,
-    ) -> Result<(), Report<BrowserTestError>>
+    ) -> (Vec<BrowserTestRecord>, Result<(), Report<BrowserTestError>>)
     where
         Context: Sync + ?Sized,
         TestError: ?Sized + 'static,
     {
-        let max_parallel_tests = self.parallelism.max_parallel_tests();
-        let executions = browser_test_executions(
+        let config = ExecutionConfig {
             chromedriver,
-            self.visibility.is_visible(),
-            self.webdriver_timeouts.as_ref(),
-            self.element_query_wait.as_ref(),
-            &self.chrome_capabilities_setups,
-            context,
-            tests,
-        );
-
-        if max_parallel_tests.get() == 1 {
-            run_test_executions_sequential(self.failure_policy, executions).await
-        } else {
-            run_test_executions_parallel(self.failure_policy, executions, max_parallel_tests).await
-        }
+            visible: self.visibility.is_visible(),
+            webdriver_timeouts: self.webdriver_timeouts.as_ref(),
+            element_query_wait: self.element_query_wait.as_ref(),
+            chrome_capabilities_setups: &self.chrome_capabilities_setups,
+            session_reuse: self.session_reuse,
+            session_resets: &self.session_resets,
+            failure_policy: self.failure_policy,
+            progress_warnings: self.progress_warnings,
+            max_parallel_tests: self.parallelism.max_parallel_tests(),
+        };
+        execute_tests(&config, context, tests).await
     }
 
     fn browser_driver_output_capture_for_run(&self) -> Option<DriverOutputCapture> {

@@ -28,6 +28,19 @@ pub(crate) fn env_flag_enabled(env_var: impl AsRef<str>) -> bool {
     false
 }
 
+/// Read an optional boolean flag from the environment.
+///
+/// Returns `None` if the variable is unset or empty (after trimming), so that callers can fall back
+/// to their default. Otherwise, interprets the value like [`env_flag_enabled`].
+#[must_use]
+pub(crate) fn env_flag_value(env_var: impl AsRef<str>) -> Option<bool> {
+    let value = env::var_os(env_var.as_ref())?;
+    if value.to_string_lossy().trim().is_empty() {
+        return None;
+    }
+    Some(env_flag_enabled(env_var))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,6 +96,30 @@ mod tests {
                     .with_detail_message(format!("Testing: '{value}'"))
                     .is_false();
             }
+        }
+    }
+
+    mod env_flag_value {
+        use super::*;
+
+        #[test]
+        fn is_none_when_unset_or_empty() {
+            let env = EnvVarGuard::new(ENV_FLAG_TEST_VAR);
+            env.remove();
+            assert_that!(env_flag_value(ENV_FLAG_TEST_VAR)).is_none();
+
+            env.set(" ");
+            assert_that!(env_flag_value(ENV_FLAG_TEST_VAR)).is_none();
+        }
+
+        #[test]
+        fn interprets_set_values() {
+            let env = EnvVarGuard::new(ENV_FLAG_TEST_VAR);
+            env.set("off");
+            assert_that!(env_flag_value(ENV_FLAG_TEST_VAR)).is_equal_to(Some(false));
+
+            env.set("yes");
+            assert_that!(env_flag_value(ENV_FLAG_TEST_VAR)).is_equal_to(Some(true));
         }
     }
 }
