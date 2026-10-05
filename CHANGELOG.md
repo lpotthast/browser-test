@@ -157,7 +157,9 @@ does what it is told. See "Changed" for the renames.
 - Added environment-variable controls for visibility, pauses, and browser-driver output diagnostics.
 - Added re-exports for `async_trait::async_trait`, `chrome_for_testing_manager::Channel` and the `thirtyfour` crate.
 
-[Unreleased]: https://github.com/lpotthast/browser-test/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/lpotthast/browser-test/compare/v0.5.0...HEAD
+
+[0.5.0]: https://github.com/lpotthast/browser-test/compare/v0.4.0...v0.5.0
 
 [0.4.0]: https://github.com/lpotthast/browser-test/compare/v0.3.0...v0.4.0
 
