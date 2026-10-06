@@ -95,7 +95,7 @@ checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
 
 [[package]]
 name = "browser-test"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "assertr",
  "async-trait",
@@ -163,6 +163,8 @@ dependencies = [
 [[package]]
 name = "chrome-for-testing-manager"
 version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69cc366cd3f23378bc593a4cf8585255641699f59ba85fce02a6335fcdb6dd70"
 dependencies = [
  "chrome-for-testing",
  "directories",
@@ -1828,9 +1830,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-process-tools"
-version = "0.11.2"
+version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "559a2934c72973f30261dcfa311834fcfff21be5877931cc6752bf2b6ccbb542"
+checksum = "525a22a4c2b878347c184b08db73c74bee55778c9aca6be67a02b2c59a51eb59"
 dependencies = [
  "bytes",
  "memchr",

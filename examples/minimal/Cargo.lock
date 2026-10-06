@@ -79,12 +79,12 @@ checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
 
 [[package]]
 name = "browser-test"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "chrome-for-testing-manager",
  "futures-util",
- "rootcause 0.13.0",
+ "rootcause",
  "thirtyfour",
  "thiserror",
  "tokio",
@@ -97,7 +97,7 @@ name = "browser-test-minimal-example"
 version = "0.1.0"
 dependencies = [
  "browser-test",
- "rootcause 0.13.0",
+ "rootcause",
  "tokio",
  "tracing-subscriber",
 ]
@@ -140,12 +140,12 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chrome-for-testing"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cabe5069b1ad28e931e7d583358f1ab5288d783ed43d40182195622a665ce745"
+checksum = "7288952ddd4e771298ba284ca64fdb27396b87ac80a905c9d96a9a404c073cb0"
 dependencies = [
  "reqwest",
- "rootcause 0.12.1",
+ "rootcause",
  "serde",
  "thiserror",
  "time",
@@ -154,19 +154,21 @@ dependencies = [
 
 [[package]]
 name = "chrome-for-testing-manager"
-version = "0.12.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d756c8a6fd0e3277c122cd1bc23c70347f2acf1741cd7a343063ffd175cb58b"
+checksum = "69cc366cd3f23378bc593a4cf8585255641699f59ba85fce02a6335fcdb6dd70"
 dependencies = [
  "chrome-for-testing",
  "directories",
  "futures",
  "reqwest",
- "rootcause 0.13.0",
+ "rootcause",
+ "serde_json",
  "thirtyfour",
  "thiserror",
  "tokio",
  "tokio-process-tools",
+ "tokio-util",
  "tracing",
  "typed-builder",
  "unwrap-infallible",
@@ -524,12 +526,6 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
-version = "0.16.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
-
-[[package]]
-name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
@@ -744,7 +740,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
 dependencies = [
  "equivalent",
- "hashbrown 0.17.1",
+ "hashbrown",
 ]
 
 [[package]]
@@ -1217,36 +1213,14 @@ dependencies = [
 
 [[package]]
 name = "rootcause"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fc4bd36159c7ce180fe2de1e5371ef107a2885f0048430f631e78202e2255d4"
-dependencies = [
- "hashbrown 0.16.1",
- "indexmap",
- "rootcause-internals 0.12.1",
- "rustc-hash",
- "triomphe",
-]
-
-[[package]]
-name = "rootcause"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b660d9968fae12f4e691f2b2be5d9a3a6de875300c682e8d2cb89a618dd60875"
 dependencies = [
- "hashbrown 0.17.1",
+ "hashbrown",
  "indexmap",
- "rootcause-internals 0.13.0",
+ "rootcause-internals",
  "rustc-hash",
- "triomphe",
-]
-
-[[package]]
-name = "rootcause-internals"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d0df4f84d119d09b5c9c9e8db0fe9bfb5b47b04d0bb95b0763cf81bd9baa559"
-dependencies = [
  "triomphe",
 ]
 
@@ -1781,9 +1755,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-process-tools"
-version = "0.11.2"
+version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "559a2934c72973f30261dcfa311834fcfff21be5877931cc6752bf2b6ccbb542"
+checksum = "525a22a4c2b878347c184b08db73c74bee55778c9aca6be67a02b2c59a51eb59"
 dependencies = [
  "bytes",
  "memchr",
@@ -1827,6 +1801,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]
