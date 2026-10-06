@@ -9,7 +9,7 @@ use typed_builder::TypedBuilder;
 /// timeout on the `WebDriver` session.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, TypedBuilder)]
 #[allow(clippy::struct_field_names)]
-pub struct BrowserTimeouts {
+pub struct Timeouts {
     /// Maximum time `WebDriver` waits for asynchronous script execution.
     ///
     /// This timeout applies to browser-side scripts that explicitly wait for completion, such as
@@ -49,7 +49,7 @@ pub struct BrowserTimeouts {
     /// That can make missing-element assertions slower and can compound with explicit polling.
     ///
     /// For tests using `thirtyfour` element queries, `WebElement::wait_until`, or this crate's
-    /// [`ElementQueryWaitConfig`](crate::ElementQueryWaitConfig), prefer keeping this at
+    /// [`ElementQueryWait`](crate::ElementQueryWait), prefer keeping this at
     /// `Duration::ZERO` and using explicit waits instead. Explicit waits make the waiting behavior
     /// local to the assertion or action that needs it, while a non-zero implicit wait affects every
     /// element lookup in the session.
@@ -62,7 +62,7 @@ pub struct BrowserTimeouts {
     implicit_wait_timeout: Option<Duration>,
 }
 
-impl BrowserTimeouts {
+impl Timeouts {
     /// Maximum time `WebDriver` waits for asynchronous script execution.
     ///
     /// Returning `None` means this timeout is not updated.
@@ -103,7 +103,7 @@ mod tests {
 
     #[test]
     fn builder_preserves_all_timeout_fields() {
-        let timeouts = BrowserTimeouts::builder()
+        let timeouts = Timeouts::builder()
             .script_timeout(Duration::from_secs(5))
             .page_load_timeout(Duration::from_secs(10))
             .implicit_wait_timeout(Duration::from_secs(20))
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn builder_leaves_unset_fields_unconfigured() {
-        let timeouts = BrowserTimeouts::builder().build();
+        let timeouts = Timeouts::builder().build();
 
         assert_that!(timeouts.script_timeout()).is_none();
         assert_that!(timeouts.page_load_timeout()).is_none();
@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn builder_accepts_wrapped_option_values() {
-        let timeouts = BrowserTimeouts::builder()
+        let timeouts = Timeouts::builder()
             .script_timeout_opt(Some(Duration::from_secs(5)))
             .page_load_timeout_opt(None)
             .implicit_wait_timeout_opt(Some(Duration::ZERO))
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn conversion_preserves_unset_fields() {
-        let timeouts = BrowserTimeouts::builder()
+        let timeouts = Timeouts::builder()
             .script_timeout(Duration::from_secs(5))
             .build()
             .into_thirtyfour_timeout_configuration();

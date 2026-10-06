@@ -1,38 +1,89 @@
-use std::{future::Future, num::NonZeroUsize, pin::Pin};
+use std::num::NonZeroUsize;
 
-use futures_util::stream::{FuturesUnordered, StreamExt as _};
 use rootcause::Report;
 use rootcause::report_collection::ReportCollection;
 
 use crate::BrowserTestError;
+use crate::env::{InvalidEnvVar, env_number};
 
-/// How [`crate::BrowserTestRunner`] schedules browser tests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BrowserTestParallelism {
-    /// Run one test at a time.
-    #[default]
-    Sequential,
+/// Default environment variable read by [`Parallelism::from_env`].
+pub(crate) const DEFAULT_PARALLELISM_ENV: &str = "BROWSER_TEST_PARALLELISM";
 
-    /// Run up to the given number of tests at the same time.
-    ///
-    /// Each test still receives a fresh `WebDriver` session.
-    ///
-    /// Using `1` here leads to the same behavior as using `Sequential`.
-    Parallel(NonZeroUsize),
+/// How many entries of a [`crate::BrowserTests`] group run at the same time, each test in its own
+/// session.
+///
+/// Sequential by default. Tests take parallel slots in their given order; a test whose browser is
+/// already running may start before an earlier test whose browser is still starting. Only run
+/// tests in parallel that can use the same application state at the same time.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct Parallelism {
+    /// `None` runs sequentially.
+    max_parallel_tests: Option<NonZeroUsize>,
 }
 
-impl BrowserTestParallelism {
+impl Parallelism {
+    /// Run one test at a time.
+    #[must_use]
+    pub const fn sequential() -> Self {
+        Self {
+            max_parallel_tests: None,
+        }
+    }
+
+    /// Run up to `max_parallel_tests` tests at the same time. `0` and `1` run tests sequentially.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use browser_test::{BrowserTests, Parallelism};
+    ///
+    /// let tests = BrowserTests::<()>::parallel(Parallelism::parallel(4));
+    /// ```
+    #[must_use]
+    pub const fn parallel(max_parallel_tests: usize) -> Self {
+        match NonZeroUsize::new(max_parallel_tests) {
+            Some(max_parallel_tests) if max_parallel_tests.get() > 1 => Self {
+                max_parallel_tests: Some(max_parallel_tests),
+            },
+            _ => Self::sequential(),
+        }
+    }
+
+    /// Read the number of tests to run at the same time from `BROWSER_TEST_PARALLELISM`.
+    ///
+    /// See [`Self::from_env_var`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidEnvVar`] if the variable is not a number.
+    pub fn from_env() -> Result<Option<Self>, InvalidEnvVar> {
+        Self::from_env_var(DEFAULT_PARALLELISM_ENV)
+    }
+
+    /// Read the number of tests to run at the same time from `env_var`.
+    ///
+    /// Returns `None` if the variable is unset or empty, so the caller picks the default:
+    /// `Parallelism::from_env()?.unwrap_or(Parallelism::parallel(4))`. The value is a number as
+    /// accepted by [`Self::parallel`]. The variable is read when this function is called.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidEnvVar`] if the variable is not a number.
+    pub fn from_env_var(env_var: impl AsRef<str>) -> Result<Option<Self>, InvalidEnvVar> {
+        Ok(env_number(env_var.as_ref())?.map(Self::parallel))
+    }
+
     pub(crate) const fn max_parallel_tests(self) -> NonZeroUsize {
-        match self {
-            Self::Sequential => NonZeroUsize::MIN,
-            Self::Parallel(max_parallel_tests) => max_parallel_tests,
+        match self.max_parallel_tests {
+            Some(max_parallel_tests) => max_parallel_tests,
+            None => NonZeroUsize::MIN,
         }
     }
 }
 
 /// How [`crate::BrowserTestRunner`] handles failed browser tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BrowserTestFailurePolicy {
+pub enum FailurePolicy {
     /// Stop after the first failed test.
     ///
     /// When tests are running in parallel, the runner stops starting additional tests and waits for
@@ -44,83 +95,28 @@ pub enum BrowserTestFailurePolicy {
     RunAll,
 }
 
-pub(crate) struct BrowserTestExecution {
-    pub(crate) test_index: usize,
-    pub(crate) result: Result<(), Report<BrowserTestError>>,
-}
-
-pub(crate) type BrowserTestExecutionFuture<'a> =
-    Pin<Box<dyn Future<Output = BrowserTestExecution> + Send + 'a>>;
-
-pub(crate) async fn run_test_executions_sequential<'a>(
-    failure_policy: BrowserTestFailurePolicy,
-    executions: impl IntoIterator<Item = BrowserTestExecutionFuture<'a>>,
-) -> Result<(), Report<BrowserTestError>> {
-    let mut failures = BrowserTestFailures::default();
-
-    for execution in executions {
-        let execution = execution.await;
-        match execution.result {
-            Ok(()) => {}
-            Err(err) => {
-                if failure_policy == BrowserTestFailurePolicy::FailFast {
-                    return Err(err);
-                }
-                failures.push(execution.test_index, err);
-            }
-        }
-    }
-
-    failures.into_result()
-}
-
-pub(crate) async fn run_test_executions_parallel<'a>(
-    failure_policy: BrowserTestFailurePolicy,
-    executions: impl IntoIterator<Item = BrowserTestExecutionFuture<'a>>,
-    max_parallel_tests: NonZeroUsize,
-) -> Result<(), Report<BrowserTestError>> {
-    let mut tests = executions.into_iter();
-    let mut running = FuturesUnordered::new();
-    let mut keep_starting = true;
-    let mut collected_failures = BrowserTestFailures::default();
-
-    // Start up to `max_parallel_tests` initially.
-    while running.len() < max_parallel_tests.get() {
-        match tests.next() {
-            None => break,
-            Some(test) => running.push(test),
-        }
-    }
-
-    // Keep starting an additional test once any previous test completes, keeping us topped up at
-    // `max_parallel_tests` until all tests are executing and completing.
-    while let Some(execution) = running.next().await {
-        if let Err(err) = execution.result {
-            if failure_policy == BrowserTestFailurePolicy::FailFast {
-                keep_starting = false;
-            }
-            collected_failures.push(execution.test_index, err);
-        }
-
-        if keep_starting && let Some(test) = tests.next() {
-            running.push(test);
-        }
-    }
-
-    collected_failures.into_result()
-}
-
 #[derive(Default)]
-struct BrowserTestFailures {
+pub(crate) struct BrowserTestFailures {
     failures: Vec<(usize, Report<BrowserTestError>)>,
 }
 
 impl BrowserTestFailures {
-    fn push(&mut self, test_index: usize, failure: Report<BrowserTestError>) {
+    pub(crate) fn push(&mut self, test_index: usize, failure: Report<BrowserTestError>) {
         self.failures.push((test_index, failure));
     }
 
-    fn into_result(mut self) -> Result<(), Report<BrowserTestError>> {
+    /// The first failure as is, for sequential fail-fast runs, which stop after it.
+    pub(crate) fn into_first_result(mut self) -> Result<(), Report<BrowserTestError>> {
+        if self.failures.len() > 1 {
+            return self.into_result();
+        }
+        match self.failures.pop() {
+            None => Ok(()),
+            Some((_test_index, failure)) => Err(failure),
+        }
+    }
+
+    pub(crate) fn into_result(mut self) -> Result<(), Report<BrowserTestError>> {
         if self.failures.is_empty() {
             return Ok(());
         }
@@ -140,32 +136,41 @@ impl BrowserTestFailures {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
-
     use assertr::prelude::*;
 
     use super::*;
+    use crate::test_support::EnvVarGuard;
 
     #[test]
-    fn parallelism_max_parallel_tests_treats_sequential_as_one() {
-        assert_that!(
-            BrowserTestParallelism::Sequential
-                .max_parallel_tests()
-                .get()
-        )
-        .is_equal_to(1);
+    fn parallel_treats_zero_and_one_as_sequential() {
+        assert_that!(Parallelism::default()).is_equal_to(Parallelism::sequential());
+        assert_that!(Parallelism::parallel(0)).is_equal_to(Parallelism::sequential());
+        assert_that!(Parallelism::parallel(1)).is_equal_to(Parallelism::sequential());
+        assert_that!(Parallelism::sequential().max_parallel_tests().get()).is_equal_to(1);
+        assert_that!(Parallelism::parallel(4).max_parallel_tests().get()).is_equal_to(4);
+    }
 
-        let max_parallel_tests =
-            NonZeroUsize::new(3).expect("literal parallelism should be non-zero");
-        assert_that!(
-            BrowserTestParallelism::Parallel(max_parallel_tests)
-                .max_parallel_tests()
-                .get()
-        )
-        .is_equal_to(3);
+    #[test]
+    fn from_env_reads_the_number_of_parallel_tests() {
+        let env = EnvVarGuard::new(DEFAULT_PARALLELISM_ENV);
+
+        env.remove();
+        assert_that!(Parallelism::from_env()).is_equal_to(Ok(None));
+
+        env.set(" 4 ");
+        assert_that!(Parallelism::from_env()).is_equal_to(Ok(Some(Parallelism::parallel(4))));
+
+        env.set("many");
+        assert_that!(Parallelism::from_env().is_err()).is_true();
+    }
+
+    #[test]
+    fn from_env_var_reads_a_custom_variable() {
+        let env = EnvVarGuard::new("BROWSER_TEST_CUSTOM_PARALLELISM");
+        env.set("3");
+
+        assert_that!(Parallelism::from_env_var("BROWSER_TEST_CUSTOM_PARALLELISM"))
+            .is_equal_to(Ok(Some(Parallelism::parallel(3))));
     }
 
     #[test]
@@ -201,138 +206,27 @@ mod tests {
     }
 
     #[test]
-    fn sequential_fail_fast_stops_after_first_failure() {
-        let runtime = current_thread_runtime();
-        let first = Arc::new(AtomicUsize::new(0));
-        let second = Arc::new(AtomicUsize::new(0));
+    fn browser_test_failures_first_result_returns_single_failure_unwrapped() {
+        let mut failures = BrowserTestFailures::default();
+        failures.push(
+            0,
+            Report::new(BrowserTestError::RunTest {
+                test_name: "login".to_owned(),
+            }),
+        );
 
-        let result = runtime.block_on(run_test_executions_sequential(
-            BrowserTestFailurePolicy::FailFast,
-            [
-                tracked_execution(first.clone(), failing_execution(0, "first")),
-                tracked_execution(second.clone(), passing_execution(1)),
-            ],
-        ));
+        let err = failures
+            .into_first_result()
+            .expect_err("a failure should fail");
 
-        assert_that!(result).is_err();
-        assert_that!(first.load(Ordering::SeqCst)).is_equal_to(1);
-        assert_that!(second.load(Ordering::SeqCst)).is_equal_to(0);
+        assert_that!(err.current_context().clone()).is_equal_to(BrowserTestError::RunTest {
+            test_name: "login".to_owned(),
+        });
+        assert_that!(err.children().len()).is_equal_to(0);
     }
 
     #[test]
-    fn sequential_run_all_continues_after_failure_and_panic() {
-        let runtime = current_thread_runtime();
-        let first = Arc::new(AtomicUsize::new(0));
-        let second = Arc::new(AtomicUsize::new(0));
-        let third = Arc::new(AtomicUsize::new(0));
-
-        let err = runtime
-            .block_on(run_test_executions_sequential(
-                BrowserTestFailurePolicy::RunAll,
-                [
-                    tracked_execution(first.clone(), failing_execution(0, "first")),
-                    tracked_execution(second.clone(), panicked_execution(1, "second")),
-                    tracked_execution(third.clone(), passing_execution(2)),
-                ],
-            ))
-            .expect_err("run-all should report collected failures");
-
-        assert_that!(first.load(Ordering::SeqCst)).is_equal_to(1);
-        assert_that!(second.load(Ordering::SeqCst)).is_equal_to(1);
-        assert_that!(third.load(Ordering::SeqCst)).is_equal_to(1);
-        assert_that!(err.children().len()).is_equal_to(2);
-        assert_that!(err.to_string())
-            .contains(BrowserTestError::RunTests { failed_tests: 2 }.to_string());
-    }
-
-    #[test]
-    fn parallel_fail_fast_stops_starting_new_tests_but_waits_for_running_tests() {
-        let runtime = current_thread_runtime();
-        let first = Arc::new(AtomicUsize::new(0));
-        let second = Arc::new(AtomicUsize::new(0));
-        let third = Arc::new(AtomicUsize::new(0));
-
-        let err = runtime
-            .block_on(run_test_executions_parallel(
-                BrowserTestFailurePolicy::FailFast,
-                [
-                    tracked_execution(first.clone(), failing_execution(0, "first")),
-                    tracked_execution(second.clone(), failing_execution(1, "second")),
-                    tracked_execution(third.clone(), passing_execution(2)),
-                ],
-                NonZeroUsize::new(2).expect("literal parallelism should be non-zero"),
-            ))
-            .expect_err("fail-fast should report failures from already-running tests");
-
-        assert_that!(err.children().len()).is_equal_to(2);
-        assert_that!(first.load(Ordering::SeqCst)).is_equal_to(1);
-        assert_that!(second.load(Ordering::SeqCst)).is_equal_to(1);
-        assert_that!(third.load(Ordering::SeqCst)).is_equal_to(0);
-    }
-
-    #[test]
-    fn parallel_run_all_starts_every_test() {
-        let runtime = current_thread_runtime();
-        let first = Arc::new(AtomicUsize::new(0));
-        let second = Arc::new(AtomicUsize::new(0));
-        let third = Arc::new(AtomicUsize::new(0));
-
-        runtime
-            .block_on(run_test_executions_parallel(
-                BrowserTestFailurePolicy::RunAll,
-                [
-                    tracked_execution(first.clone(), passing_execution(0)),
-                    tracked_execution(second.clone(), passing_execution(1)),
-                    tracked_execution(third.clone(), passing_execution(2)),
-                ],
-                NonZeroUsize::new(2).expect("literal parallelism should be non-zero"),
-            ))
-            .expect("all passing executions should succeed");
-
-        assert_that!(first.load(Ordering::SeqCst)).is_equal_to(1);
-        assert_that!(second.load(Ordering::SeqCst)).is_equal_to(1);
-        assert_that!(third.load(Ordering::SeqCst)).is_equal_to(1);
-    }
-
-    fn current_thread_runtime() -> tokio::runtime::Runtime {
-        tokio::runtime::Builder::new_current_thread()
-            .build()
-            .expect("current-thread runtime should build")
-    }
-
-    fn tracked_execution(
-        counter: Arc<AtomicUsize>,
-        execution: BrowserTestExecution,
-    ) -> BrowserTestExecutionFuture<'static> {
-        Box::pin(async move {
-            counter.fetch_add(1, Ordering::SeqCst);
-            execution
-        })
-    }
-
-    fn passing_execution(test_index: usize) -> BrowserTestExecution {
-        BrowserTestExecution {
-            test_index,
-            result: Ok(()),
-        }
-    }
-
-    fn failing_execution(test_index: usize, test_name: &str) -> BrowserTestExecution {
-        BrowserTestExecution {
-            test_index,
-            result: Err(Report::new(BrowserTestError::RunTest {
-                test_name: test_name.to_owned(),
-            })),
-        }
-    }
-
-    fn panicked_execution(test_index: usize, test_name: &str) -> BrowserTestExecution {
-        BrowserTestExecution {
-            test_index,
-            result: Err(Report::new(BrowserTestError::Panic {
-                test_name: test_name.to_owned(),
-                message: "boom".to_owned(),
-            })),
-        }
+    fn browser_test_failures_first_result_is_ok_when_empty() {
+        assert_that!(BrowserTestFailures::default().into_first_result()).is_ok();
     }
 }

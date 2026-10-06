@@ -9,7 +9,7 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 pub(crate) struct EnvVarGuard {
     name: &'static str,
     original: Option<OsString>,
-    _lock: MutexGuard<'static, ()>,
+    _lock: Option<MutexGuard<'static, ()>>,
 }
 
 impl EnvVarGuard {
@@ -21,7 +21,17 @@ impl EnvVarGuard {
         Self {
             name,
             original,
-            _lock: lock,
+            _lock: Some(lock),
+        }
+    }
+
+    /// Guard another variable while a guard created with [`Self::new`] holds the environment
+    /// lock.
+    pub(crate) fn new_unlocked(name: &'static str) -> Self {
+        Self {
+            name,
+            original: env::var_os(name),
+            _lock: None,
         }
     }
 

@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use browser_test::thirtyfour::WebDriver;
 use browser_test::{
-    BrowserTest, BrowserTestError, BrowserTestRunner, BrowserTestVisibility, BrowserTests,
+    BrowserTest, BrowserTestError, BrowserTestRunner, Visibility, BrowserTests,
     async_trait,
 };
 use rootcause::{Report, report};
@@ -41,7 +41,7 @@ async fn main() -> Result<(), Report<BrowserTestError>> {
     };
 
     BrowserTestRunner::new()
-        .with_visibility(BrowserTestVisibility::Visible)
-        .run(&context, BrowserTests::new().with(PageTitleTest))
+        .with_visibility(Visibility::Visible)
+        .run(&context, BrowserTests::sequential().with(PageTitleTest))
         .await
 }

@@ -2,7 +2,6 @@
 
 use std::{
     borrow::Cow,
-    num::NonZeroUsize,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -12,8 +11,8 @@ use std::{
 use assertr::prelude::*;
 use browser_test::thirtyfour::{ChromiumLikeCapabilities, WebDriver};
 use browser_test::{
-    BrowserTest, BrowserTestError, BrowserTestFailurePolicy, BrowserTestParallelism,
-    BrowserTestRunner, BrowserTests, BrowserTimeouts, ElementQueryWaitConfig, async_trait,
+    BrowserTest, BrowserTestError, BrowserTestRunner, BrowserTests, ElementQueryWait,
+    FailurePolicy, Parallelism, Timeouts, async_trait,
 };
 use rootcause::Report;
 use rootcause::prelude::ResultExt;
@@ -165,7 +164,7 @@ impl BrowserTest<IntegrationContext, IntegrationTestError> for MetadataPanicTest
         Cow::Borrowed("metadata panic")
     }
 
-    fn timeouts(&self) -> Option<BrowserTimeouts> {
+    fn timeouts(&self) -> Option<Timeouts> {
         if matches!(self.panic_in, MetadataPanicHook::WebdriverTimeouts) {
             panic!("webdriver timeout hook failed");
         }
@@ -173,7 +172,7 @@ impl BrowserTest<IntegrationContext, IntegrationTestError> for MetadataPanicTest
         None
     }
 
-    fn element_query_wait(&self) -> Option<ElementQueryWaitConfig> {
+    fn element_query_wait(&self) -> Option<ElementQueryWait> {
         if matches!(self.panic_in, MetadataPanicHook::ElementQueryWait) {
             panic!("element query wait hook failed");
         }
@@ -209,8 +208,7 @@ fn runner() -> BrowserTestRunner {
             caps.add_arg("--disable-dev-shm-usage")?;
             Ok(())
         })
-        .with_test_parallelism(BrowserTestParallelism::Sequential)
-        .with_failure_policy(BrowserTestFailurePolicy::RunAll)
+        .with_failure_policy(FailurePolicy::RunAll)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -219,7 +217,7 @@ async fn default_sequential_fail_fast_runs_page_title_test() -> RunnerResult {
     runner()
         .run(
             &IntegrationContext::default(),
-            BrowserTests::new().with(page_title_test("page title")),
+            BrowserTests::sequential().with(page_title_test("page title")),
         )
         .await
 }
@@ -228,10 +226,9 @@ async fn default_sequential_fail_fast_runs_page_title_test() -> RunnerResult {
 #[serial]
 async fn explicit_sequential_runs_page_title_test() -> RunnerResult {
     runner()
-        .with_test_parallelism(BrowserTestParallelism::Sequential)
         .run(
             &IntegrationContext::default(),
-            BrowserTests::new().with(page_title_test("page title")),
+            BrowserTests::sequential().with(page_title_test("page title")),
         )
         .await
 }
@@ -240,12 +237,9 @@ async fn explicit_sequential_runs_page_title_test() -> RunnerResult {
 #[serial]
 async fn bounded_parallel_runs_page_title_tests() -> RunnerResult {
     runner()
-        .with_test_parallelism(BrowserTestParallelism::Parallel(
-            NonZeroUsize::new(2).expect("literal parallelism should be non-zero"),
-        ))
         .run(
             &IntegrationContext::default(),
-            BrowserTests::new()
+            BrowserTests::parallel(Parallelism::parallel(2))
                 .with(page_title_test(String::from("page title one")))
                 .with(page_title_test("page title two")),
         )
@@ -256,10 +250,10 @@ async fn bounded_parallel_runs_page_title_tests() -> RunnerResult {
 #[serial]
 async fn run_all_runs_successful_page_title_tests() -> RunnerResult {
     runner()
-        .with_failure_policy(BrowserTestFailurePolicy::RunAll)
+        .with_failure_policy(FailurePolicy::RunAll)
         .run(
             &IntegrationContext::default(),
-            BrowserTests::new()
+            BrowserTests::sequential()
                 .with(page_title_test("page title one"))
                 .with(page_title_test("page title two")),
         )
@@ -270,10 +264,10 @@ async fn run_all_runs_successful_page_title_tests() -> RunnerResult {
 #[serial]
 async fn run_all_reports_intentional_failure_and_runs_page_title_test() {
     let err = runner()
-        .with_failure_policy(BrowserTestFailurePolicy::RunAll)
+        .with_failure_policy(FailurePolicy::RunAll)
         .run(
             &IntegrationContext::default(),
-            BrowserTests::new()
+            BrowserTests::sequential()
                 .with(IntentionalFailureTest { started: None })
                 .with(page_title_test("page title")),
         )
@@ -290,10 +284,10 @@ async fn run_all_reports_intentional_failure_and_runs_page_title_test() {
 async fn run_all_reports_metadata_hook_panics_and_runs_remaining_page_title_test() {
     let started = Arc::new(AtomicUsize::new(0));
     let err = runner()
-        .with_failure_policy(BrowserTestFailurePolicy::RunAll)
+        .with_failure_policy(FailurePolicy::RunAll)
         .run(
             &IntegrationContext::default(),
-            BrowserTests::new()
+            BrowserTests::sequential()
                 .with(MetadataPanicTest {
                     panic_in: MetadataPanicHook::Name,
                 })
@@ -325,13 +319,10 @@ async fn run_all_reports_metadata_hook_panics_and_runs_remaining_page_title_test
 async fn parallel_run_all_reports_panic_and_runs_remaining_page_title_tests() {
     let started = Arc::new(AtomicUsize::new(0));
     let err = runner()
-        .with_test_parallelism(BrowserTestParallelism::Parallel(
-            NonZeroUsize::new(2).expect("literal parallelism should be non-zero"),
-        ))
-        .with_failure_policy(BrowserTestFailurePolicy::RunAll)
+        .with_failure_policy(FailurePolicy::RunAll)
         .run(
             &IntegrationContext::default(),
-            BrowserTests::new()
+            BrowserTests::parallel(Parallelism::parallel(2))
                 .with(PanicTest {
                     started: Some(Arc::clone(&started)),
                 })
@@ -358,13 +349,10 @@ async fn parallel_run_all_reports_panic_and_runs_remaining_page_title_tests() {
 async fn parallel_fail_fast_waits_for_running_page_title_test_without_starting_more() {
     let started = Arc::new(AtomicUsize::new(0));
     let err = runner()
-        .with_test_parallelism(BrowserTestParallelism::Parallel(
-            NonZeroUsize::new(2).expect("literal parallelism should be non-zero"),
-        ))
-        .with_failure_policy(BrowserTestFailurePolicy::FailFast)
+        .with_failure_policy(FailurePolicy::FailFast)
         .run(
             &IntegrationContext::default(),
-            BrowserTests::new()
+            BrowserTests::parallel(Parallelism::parallel(2))
                 .with(IntentionalFailureTest {
                     started: Some(Arc::clone(&started)),
                 })
