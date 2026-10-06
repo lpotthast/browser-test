@@ -12,7 +12,7 @@ pub(crate) const DEFAULT_PARALLELISM_ENV: &str = "BROWSER_TEST_PARALLELISM";
 /// How many entries of a [`crate::BrowserTests`] group run at the same time, each test in its own
 /// session.
 ///
-/// Sequential by default. Tests take parallel slots in their given order; a test whose browser is
+/// Sequential by default. Tests take parallel slots in their given order. A test whose browser is
 /// already running may start before an earlier test whose browser is still starting. Only run
 /// tests in parallel that can use the same application state at the same time.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -84,14 +84,17 @@ impl Parallelism {
 /// How [`crate::BrowserTestRunner`] handles failed browser tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FailurePolicy {
-    /// Stop after the first failed test.
+    /// Stop starting tests after the first failed test.
     ///
-    /// When tests are running in parallel, the runner stops starting additional tests and waits for
-    /// already-started sessions to finish before reporting failures from those sessions.
+    /// Tests in groups marked [`crate::BrowserTests::run_always`] still run. Tests that already
+    /// started when the failure occurred run to completion, and their failures are reported too.
+    /// If only one test can run at a time, its failure is returned as is. Otherwise, failures are
+    /// returned as child reports of a [`crate::BrowserTestError::RunTests`] report.
     #[default]
     FailFast,
 
-    /// Run every test and return all failures as child reports on one aggregate report.
+    /// Run every test and return all failures as child reports of one
+    /// [`crate::BrowserTestError::RunTests`] report.
     RunAll,
 }
 

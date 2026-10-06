@@ -2,8 +2,7 @@ use std::borrow::Cow;
 
 use browser_test::thirtyfour::WebDriver;
 use browser_test::{
-    BrowserTest, BrowserTestError, BrowserTestRunner, Visibility, BrowserTests,
-    async_trait,
+    BrowserTest, BrowserTestError, BrowserTestRunner, BrowserTests, Visibility, async_trait,
 };
 use rootcause::{Report, report};
 

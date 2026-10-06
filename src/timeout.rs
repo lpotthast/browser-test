@@ -21,7 +21,7 @@ pub struct Timeouts {
     /// does not finish before this duration, the script command fails even if the page itself is
     /// otherwise healthy.
     ///
-    /// Use the builders `script_timeout(...)` to update the timeout. Use `script_timeout_opt(None)`
+    /// Use the builder's `script_timeout(...)` to update the timeout. Use `script_timeout_opt(None)`
     /// to leave the session's current script timeout unchanged.
     #[builder(default, setter(strip_option(fallback_suffix = "_opt")))]
     script_timeout: Option<Duration>,
@@ -37,7 +37,7 @@ pub struct Timeouts {
     /// navigation: single-page app hydration, background requests, animations, and delayed DOM
     /// updates should still be handled with element-query waits or test-specific polling.
     ///
-    /// Use the builders `page_load_timeout(...)` to update the timeout. Use
+    /// Use the builder's `page_load_timeout(...)` to update the timeout. Use
     /// `page_load_timeout_opt(None)` to leave the session's current page-load timeout unchanged.
     #[builder(default, setter(strip_option(fallback_suffix = "_opt")))]
     page_load_timeout: Option<Duration>,
@@ -54,7 +54,7 @@ pub struct Timeouts {
     /// local to the assertion or action that needs it, while a non-zero implicit wait affects every
     /// element lookup in the session.
     ///
-    /// Use the builders `implicit_wait_timeout(...)` to update the timeout. Passing
+    /// Use the builder's `implicit_wait_timeout(...)` to update the timeout. Passing
     /// `Duration::ZERO` explicitly disables implicit waiting for the session. Use
     /// `implicit_wait_timeout_opt(None)` to leave the session's current implicit wait timeout
     /// unchanged.

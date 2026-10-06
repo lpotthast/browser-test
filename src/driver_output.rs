@@ -62,9 +62,9 @@ impl DriverOutput {
     ///
     /// Returns `None` if `env_var` is unset or empty, so the caller picks the default:
     /// `DriverOutput::from_env()?.unwrap_or_default()`. `1`, `true`, `yes`, `on`, and `enabled`
-    /// enable capture; `0`, `false`, `no`, `off`, and `disabled` disable it (ignoring case). An
-    /// enabled capture retains `<env_var>_TAIL_LINES` lines, 200 if that variable is unset or
-    /// empty; `0` disables capture. Both variables are read when this function is called.
+    /// enable capture, `0`, `false`, `no`, `off`, and `disabled` disable it (ignoring case). An
+    /// enabled capture retains `<env_var>_TAIL_LINES` lines, or 200 if that variable is unset or
+    /// empty. `0` lines disable capture. Both variables are read when this function is called.
     ///
     /// # Errors
     ///

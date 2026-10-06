@@ -1,3 +1,4 @@
+use browser_test::StepExt;
 use browser_test::thirtyfour::prelude::ElementQueryable;
 use browser_test::thirtyfour::{By, WebDriver};
 use rootcause::Report;
@@ -28,20 +29,22 @@ pub(crate) enum WikipediaTestError {
 }
 
 #[tracing::instrument(
-    name = "browser_test_step",
+    name = "wikipedia_helper",
     skip_all,
     fields(helper = "goto", url = %url),
 )]
 async fn goto(driver: &WebDriver, url: &str) -> Result<(), Report<WikipediaTestError>> {
     driver
         .goto(url)
+        .step("goto")
+        .detail(url)
         .await
         .context(WikipediaTestError::OpenPage)?;
     Ok(())
 }
 
 #[tracing::instrument(
-    name = "browser_test_step",
+    name = "wikipedia_helper",
     skip_all,
     fields(helper = "title_contains", expected = %expected),
 )]
@@ -51,6 +54,7 @@ async fn title_contains(
 ) -> Result<(), Report<WikipediaTestError>> {
     let title = driver
         .title()
+        .step("read_title")
         .await
         .context(WikipediaTestError::ReadTitle)?;
     if !title.contains(expected) {
@@ -64,7 +68,7 @@ async fn title_contains(
 }
 
 #[tracing::instrument(
-    name = "browser_test_step",
+    name = "wikipedia_helper",
     skip_all,
     fields(helper = "wait_for_visible", selector = %selector),
 )]
@@ -76,6 +80,8 @@ async fn wait_for_visible(
         .query(By::Css(selector))
         .and_displayed()
         .first()
+        .step("wait_for_visible")
+        .detail(selector)
         .await
         .context(WikipediaTestError::FindVisibleElement {
             selector: selector.to_owned(),

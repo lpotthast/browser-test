@@ -15,7 +15,9 @@ pub(crate) const DEFAULT_PAUSE_ENV: &str = "BROWSER_TEST_PAUSE";
 /// debugger before tests start.
 ///
 /// Disabled by default. When enabled, the runner prints the message, an optional hint, and the
-/// prompt, and waits for an answer on stdin before starting the browser.
+/// prompt, and waits for an answer on stdin before starting the browser. `y`, `yes`, `c`, or
+/// `continue` start the tests. `n`, `no`, `q`, `quit`, or an empty answer end the run
+/// successfully without starting the browser.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pause {
     enabled: bool,
@@ -66,7 +68,7 @@ impl Pause {
     ///
     /// Returns `None` if the variable is unset or empty, so the caller picks the default:
     /// `Pause::from_env()?.unwrap_or_default()`. `1`, `true`, `yes`, `on`, and `enabled` enable the
-    /// flag; `0`, `false`, `no`, `off`, and `disabled` disable it (ignoring case). The variable is
+    /// flag, `0`, `false`, `no`, `off`, and `disabled` disable it (ignoring case). The variable is
     /// read when this function is called.
     ///
     /// # Errors

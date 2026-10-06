@@ -36,7 +36,7 @@ Add `browser-test` to the crate that owns your browser integration tests:
 
 ```toml
 [dev-dependencies]
-browser-test = "0.4"
+browser-test = "0.5"
 rootcause = "0.13"
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
 ```
@@ -62,8 +62,7 @@ use std::borrow::Cow;
 
 use browser_test::thirtyfour::WebDriver;
 use browser_test::{
-    BrowserTest, BrowserTestError, BrowserTestRunner, Visibility, BrowserTests,
-    async_trait,
+    BrowserTest, BrowserTestError, BrowserTestRunner, BrowserTests, Visibility, async_trait,
 };
 use rootcause::{Report, report};
 
@@ -94,8 +93,6 @@ impl BrowserTest<Context> for PageTitleTest {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Report<BrowserTestError>> {
-    //tracing_subscriber::fmt::init();
-
     let context = Context {
         base_url: "https://www.wikipedia.org".into(),
     };
@@ -105,11 +102,11 @@ async fn main() -> Result<(), Report<BrowserTestError>> {
         .run(&context, BrowserTests::sequential().with(PageTitleTest))
         .await
 }
-
 ```
 
 `BrowserTestRunner::run(...)` returns `Report<BrowserTestError>`, so runner failures, test failures,
-and panics get useful context.
+and panics get useful context. The runner logs through `tracing`. Install a subscriber (e.g. `tracing-subscriber`) to see
+its output.
 
 Browser tests must run on a multithreaded Tokio runtime because the Chrome for Testing manager requires it.
 Use `#[tokio::test(flavor = "multi_thread")]` for integration tests.
@@ -132,11 +129,22 @@ let runner = BrowserTestRunner::new()
 interpret (e.g. `BROWSER_TEST_VISIBLE=ture`) instead of silently ignoring it. Then enable the options when needed:
 
 ```sh
-BROWSER_TEST_VISIBLE=1 BROWSER_TEST_PAUSE=1 BROWSER_TEST_DRIVER_OUTPUT=1 BROWSER_TEST_PARALLELISM=4 cargo test -- --nocapture
+BROWSER_TEST_VISIBLE=1 BROWSER_TEST_PAUSE=1 BROWSER_TEST_DRIVER_OUTPUT=1 cargo test -- --nocapture
 ```
 
+| Variable                                | Read by                     | Effect                                                     |
+|-----------------------------------------|-----------------------------|------------------------------------------------------------|
+| `BROWSER_TEST_VISIBLE`                  | `Visibility::from_env()`    | Show the browser windows instead of running headless.      |
+| `BROWSER_TEST_PAUSE`                    | `Pause::from_env()`         | Ask for confirmation before starting the browser.          |
+| `BROWSER_TEST_DRIVER_OUTPUT`            | `DriverOutput::from_env()`  | Attach recent chromedriver output to errors.               |
+| `BROWSER_TEST_DRIVER_OUTPUT_TAIL_LINES` | `DriverOutput::from_env()`  | Number of output lines kept (default 200).                 |
+| `BROWSER_TEST_PARALLELISM`              | `Parallelism::from_env()`   | Number of tests run at the same time (see below).          |
+
 Use `0`/`1`, `false`/`true`, `no`/`yes`, `off`/`on` or `disabled`/`enabled` for boolean environment flags (ignoring
-case).
+case). Each type also has `from_env_var(name)` to read a variable of your choice.
+
+The pause lets you inspect the app or attach a debugger before any test runs. Answer `y` to start the tests. Answering
+`n` or pressing Enter ends the run successfully without starting the browser.
 
 ## Common Configuration
 
@@ -178,6 +186,26 @@ let runner = BrowserTestRunner::new()
 
 A `BrowserTest` can override runner-level timeouts and element-query waits for one test by implementing `timeouts()` or
 `element_query_wait()`.
+
+### Chrome
+
+The runner downloads the latest Chrome for Testing of a release channel (stable by default) and caches it in the
+platform's per-user cache directory. In CI, a project-local cache directory, the smaller Chrome Headless Shell, and extra
+Chrome arguments are often useful:
+
+```rust
+use browser_test::thirtyfour::ChromiumLikeCapabilities;
+use browser_test::{BrowserTestRunner, Channel, ChromeBinary};
+
+let runner = BrowserTestRunner::new()
+    .with_channel(Channel::Stable)
+    .with_chrome_for_testing_cache_dir("target/chrome-for-testing")
+    .with_headless_chrome_binary(ChromeBinary::ChromeHeadlessShell)
+    .with_chrome_capabilities(|caps| caps.add_arg("--window-size=1280,800"));
+```
+
+The headless binary is only used in headless runs. Visible runs always use regular Chrome. Capability setups apply to
+every session, after the runner's own headless or visible arguments.
 
 ## Execution Model
 
@@ -224,7 +252,7 @@ whose browser is still starting. Only run tests in parallel that can safely shar
 chromedriver process is shared for the run, so captured driver output can contain interleaved lines from different
 sessions.
 
-By default, the runner stops starting tests after the first failure (`FailurePolicy::FailFast`); tests in groups marked
+By default, the runner stops starting tests after the first failure (`FailurePolicy::FailFast`). Tests in groups marked
 `run_always()` still run, e.g. checks that must see the whole run. With `FailurePolicy::RunAll`, every test of every
 group runs, and all failures are returned as child reports on one aggregate `Report<BrowserTestError>`. A sequential
 group only means its tests must not run at the same time: a failing test does not skip the ones after it.
@@ -243,12 +271,15 @@ Up to `parallel tests + spare sessions` browsers are open at once. Lower the num
 little memory, or disable them, with `BrowserTestRunner::with_spare_sessions(n)`. In visible runs, the browser windows
 of spare sessions open ahead of their tests.
 
+Spare sessions use the runner's element-query wait. A test that overrides `element_query_wait()` with a different value
+gets a session created when its turn comes, so it waits for its browser to start.
+
 ## Timing and Progress
 
 Every test's timing is logged (`tracing`, `info` level) when it finishes: how long creating its session took and how
 long the test waited for it, its body, and the session teardown. At the end of each run, the runner hands a
 `BrowserTestRunReport` to every `RunReportConsumer` added with `BrowserTestRunner::with_report_consumer`. It prints or logs
-nothing on its own. `StderrSummary`, `StdoutSummary`, and `TracingSummary` print a summary of the report; any closure
+nothing on its own. `StderrSummary`, `StdoutSummary`, and `TracingSummary` print a summary of the report. Any closure
 taking a `&BrowserTestRunReport` works as a consumer too:
 
 ```rust
@@ -273,7 +304,7 @@ Browser test run: 39 test(s), 39 passed, 0 failed, in 2m 10.4s
 ```
 
 To see which steps of a test are slow, time them with `StepExt::step`, e.g. inside your page-object helpers. The step
-kind (`"goto"`) aggregates across tests; the optional detail is only logged:
+kind (`"goto"`) aggregates across tests. The optional detail is only logged:
 
 ```rust,no_run
 # use browser_test::thirtyfour::{WebDriver, error::WebDriverResult};
@@ -289,8 +320,8 @@ Steps are logged at `debug` level with their duration, steps slower than 2 secon
 body also runs in a `browser_test` tracing span carrying the test name, so all logs of a test can be attributed to it.
 
 A watchdog warns when a test is still running after 30 seconds (and every 30 seconds after that), and when creating
-or quitting a session takes longer than 5 seconds; slowness that often points at an overloaded machine or a
-test waiting for something that never happens. Configure the thresholds with `BrowserTestRunner::with_progress_warnings`.
+or quitting a session takes longer than 5 seconds. Such slowness often points at an overloaded machine or a test waiting
+for something that never happens. Configure or disable the thresholds with `BrowserTestRunner::with_progress_warnings`.
 
 The runner converts test panics into `BrowserTestError::Panic` reports and still shuts down chromedriver after errors
 or panics.
@@ -304,8 +335,9 @@ cargo run --manifest-path examples/minimal/Cargo.toml
 cargo run --manifest-path examples/advanced/Cargo.toml
 ```
 
-The advanced example shows tracing spans, rootcause span/backtrace collectors, explicit timeouts,
-driver-output capture, pause prompts, and parallel sessions.
+Both open Wikipedia in a visible browser. The advanced example adds a parallel group, timed steps and the run summary,
+tracing spans with rootcause span and backtrace collectors, a custom test error type, explicit timeouts and
+element-query waits, driver-output capture, and the pause prompt (`BROWSER_TEST_PAUSE=1`).
 
 ## Leptos Projects
 

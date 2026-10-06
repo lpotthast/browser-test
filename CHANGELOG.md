@@ -15,19 +15,19 @@ does what it is told. See "Changed" for the renames.
 - User-defined scheduling: `BrowserTests` is a nestable group that runs its entries sequentially
   (`BrowserTests::sequential()`) or up to a number at once (`BrowserTests::parallel(Parallelism)`). Entries are tests
   (`with`) and nested groups (`with_group`), so stages, tests that must not run at the same time, and run-wide checks
-  can be expressed in one run. `named(...)` names a group; the run report lists the wall time of named groups
+  can be expressed in one run. `named(...)` names a group. The run report lists the wall time of named groups
   (`BrowserTestRunReport::groups`, `GroupRecord`), and every `BrowserTestRecord::group` names the test's group.
   `run_always()` makes a group's tests run even after a fail-fast stop. A sequential group only means its tests must
   not overlap: with `FailurePolicy::RunAll`, a failing test does not skip the ones after it.
 - Sessions are created ahead of time: while tests run, the runner keeps fresh `WebDriver` sessions ready, so a starting
   test usually finds its session ready instead of waiting for a browser to start. Sessions are quit in the background
   after their test. Every test still gets its own fresh session. Configure the number of spare sessions with
-  `BrowserTestRunner::with_spare_sessions` (default: one per test that can run at the same time; `0` creates sessions
+  `BrowserTestRunner::with_spare_sessions` (default: one per test that can run at the same time, `0` creates sessions
   only on demand).
 - Run reports: every test's session creation, the time it waited for its session, its body, and its session teardown
   are measured and logged when it finishes. At the end of a run, the runner hands a `BrowserTestRunReport` to every
   `RunReportConsumer` added with `BrowserTestRunner::with_report_consumer`. `StderrSummary`, `StdoutSummary`, and
-  `TracingSummary` print a summary (counts, session time, slowest tests, slowest steps); closures can process the
+  `TracingSummary` print a summary (counts, session time, slowest tests, slowest steps). Closures can process the
   report in any other way. Without a consumer, nothing is printed.
 - `StepExt::step` times a future as a step of a test (e.g. a navigation or a wait in a page-object helper):
   `driver.goto(url).step("goto").detail(url).await`. Steps are logged, slow steps are warned about, and their durations
@@ -61,7 +61,7 @@ does what it is told. See "Changed" for the renames.
   `ElementQueryWait::new(timeout, interval)` validates the interval and is its only constructor (its builder,
   `try_new`, and the unvalidated `new` are removed).
 - **Breaking:** The pause hint moved from `BrowserTestRunner::with_hint` to `Pause::with_hint`.
-- **Breaking:** `BrowserTestRunner::run` is the only way to run tests. Reports are handed to report consumers; there is
+- **Breaking:** `BrowserTestRunner::run` is the only way to run tests. Reports are handed to report consumers. There is
   no `run_with_report` or `BrowserTestRunOutcome`.
 - **Breaking:** `BrowserTestError` is `#[non_exhaustive]`. `StartWebdriver` / `TerminateWebdriver` are renamed to
   `LaunchChromeForTesting` / `ShutDownChromeForTesting`, matching what they report.

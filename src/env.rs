@@ -25,7 +25,7 @@ fn env_value(name: &str) -> Option<String> {
 
 /// Read a boolean flag. `None` if the variable is unset or empty.
 ///
-/// `1`, `true`, `yes`, `on`, and `enabled` enable the flag; `0`, `false`, `no`, `off`, and
+/// `1`, `true`, `yes`, `on`, and `enabled` enable the flag, `0`, `false`, `no`, `off`, and
 /// `disabled` disable it (ignoring case).
 pub(crate) fn env_flag(name: &str) -> Result<Option<bool>, InvalidEnvVar> {
     let Some(value) = env_value(name) else {

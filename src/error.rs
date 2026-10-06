@@ -22,7 +22,10 @@ pub enum BrowserTestError {
         message: String,
     },
 
-    /// Multiple browser tests failed or panicked and were collected into one report.
+    /// One or more browser tests failed or panicked. Each failure is a child report.
+    ///
+    /// Returned for every failed run, except [`crate::FailurePolicy::FailFast`] runs in which only
+    /// one test can run at a time. These return the failed test's report directly.
     #[error("One or more browser tests failed or panicked ({failed_tests} failed).")]
     RunTests {
         /// Number of failed or panicked tests collected as child reports.
@@ -33,7 +36,7 @@ pub enum BrowserTestError {
     #[error("Failed to shut down Chrome for Testing.")]
     ShutDownChromeForTesting,
 
-    /// The pause prompt could not be flushed to stdout.
+    /// The pause message or prompt could not be written to stdout.
     #[error("Failed to flush pause prompt.")]
     FlushPausePrompt,
 

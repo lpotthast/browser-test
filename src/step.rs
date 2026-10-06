@@ -54,12 +54,12 @@ impl StepRecorder {
 
 /// Time futures as steps of a browser test, such as a navigation or a wait.
 ///
-/// Implemented for every future; import it to call [`StepExt::step`].
+/// Implemented for every future. Import it to call [`StepExt::step`].
 pub trait StepExt: Future + Sized {
     /// Time this future as a step of the given `kind`.
     ///
     /// Awaiting the returned [`Step`] awaits this future and returns its output. Every step is
-    /// logged at `debug` level with its duration; a step taking longer than the runner's slow
+    /// logged at `debug` level with its duration. A step taking longer than the runner's slow
     /// step threshold (see [`crate::ProgressWarnings`], 2 seconds by default) is logged at `warn`
     /// level. Inside a test run by [`crate::BrowserTestRunner`], the step's duration is also added
     /// to the test's [`crate::BrowserTestRecord::steps`] under `kind`, and the run summary lists
@@ -67,7 +67,7 @@ pub trait StepExt: Future + Sized {
     ///
     /// Use a small, fixed set of `kind`s (e.g. `"goto"`, `"wait_for_text"`), so that they
     /// aggregate across tests, and add specifics (URL, selector, expected text) with
-    /// [`Step::detail`], which is only logged. Steps may nest; a nested step's time counts towards
+    /// [`Step::detail`], which is only logged. Steps may nest. A nested step's time counts towards
     /// every enclosing kind as well.
     ///
     /// Instrument your page-object helpers with steps to see where your tests spend time.

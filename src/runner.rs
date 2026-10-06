@@ -47,7 +47,7 @@ impl Visibility {
     ///
     /// Returns `None` if the variable is unset or empty, so the caller picks the default:
     /// `Visibility::from_env()?.unwrap_or_default()`. `1`, `true`, `yes`, `on`, and `enabled`
-    /// enable the flag; `0`, `false`, `no`, `off`, and `disabled` disable it (ignoring case). The
+    /// enable the flag, `0`, `false`, `no`, `off`, and `disabled` disable it (ignoring case). The
     /// variable is read when this function is called.
     ///
     /// # Errors
@@ -242,10 +242,14 @@ impl BrowserTestRunner {
     /// session ready when its turn comes. Sessions are quit in the background after their test.
     ///
     /// Defaults to the number of tests that can run at the same time (see
-    /// [`BrowserTests::parallel`]): one spare session per running test. Up to `parallel tests + spare sessions` browsers are open at once,
-    /// so lower this on machines with little memory. `0` creates each session only when its test
-    /// is about to run. In visible runs, the spare sessions' browser windows open ahead of their
-    /// tests.
+    /// [`BrowserTests::parallel`]): one spare session per running test. Up to
+    /// `parallel tests + spare sessions` browsers are open at once, so lower this on machines with
+    /// little memory. `0` creates each session only when its test is about to run. In visible
+    /// runs, the spare sessions' browser windows open ahead of their tests.
+    ///
+    /// Spare sessions use the runner's element query wait. A test overriding
+    /// [`crate::BrowserTest::element_query_wait`] with a different value gets a session created
+    /// when its turn comes.
     #[must_use]
     pub const fn with_spare_sessions(mut self, spare_sessions: usize) -> Self {
         self.spare_sessions = Some(spare_sessions);
@@ -281,7 +285,7 @@ impl BrowserTestRunner {
     /// resumed.
     ///
     /// `tests` decides which tests run one after another and which at the same time, see
-    /// [`BrowserTests`]. The run stops on the first failure by default; use
+    /// [`BrowserTests`]. The run stops on the first failure by default. Use
     /// [`Self::with_failure_policy`] to run every test and return all failures as child reports on
     /// one aggregate report.
     ///

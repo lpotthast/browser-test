@@ -31,6 +31,11 @@ where
     /// Optional element query wait configuration for this test.
     ///
     /// Returning `None` uses the runner's default element query wait configuration, if one is set.
+    ///
+    /// The element query wait is fixed when a session is created. A test returning a value other
+    /// than the runner's does not use the sessions the runner creates ahead of time (see
+    /// [`crate::BrowserTestRunner::with_spare_sessions`]). Its session is created when its turn
+    /// comes.
     fn element_query_wait(&self) -> Option<ElementQueryWait> {
         None
     }
@@ -48,8 +53,8 @@ where
 /// parallel group keeps its tests from running at the same time while other tests run alongside.
 ///
 /// Entries start in the order they were added. Every test runs in a fresh browser session. How
-/// failures affect the run is decided by [`crate::BrowserTestRunner::with_failure_policy`]: with
-/// [`crate::FailurePolicy::RunAll`] every test runs; with [`crate::FailurePolicy::FailFast`] no
+/// failures affect the run is decided by [`crate::BrowserTestRunner::with_failure_policy`]. With
+/// [`crate::FailurePolicy::RunAll`], every test runs. With [`crate::FailurePolicy::FailFast`], no
 /// further test starts after a failure, except in groups marked [`Self::run_always`].
 ///
 /// # Examples

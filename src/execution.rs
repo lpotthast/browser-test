@@ -5,7 +5,7 @@
 //! sessions ready so that a starting test rarely waits for a browser to start. A session's
 //! lifetime is bound to `chrome-for-testing-manager`'s scoped session API, so each session is
 //! owned by a worker future that creates it, offers it to the pool, runs the test it is assigned,
-//! and quits it. Worker futures are driven by [`drive_workers`]; everything crossing between them
+//! and quits it. Worker futures are driven by [`drive_workers`]. Everything crossing between them
 //! and the executor is plain data (test indices, channels), never a borrow of the run's state.
 
 use std::{
