@@ -109,7 +109,7 @@ where
         env.pool.close();
     };
     let run = futures_util::future::join(execution, drive_workers(&env, requests_rx));
-    // The watchdog never finishes on its own; it is dropped once the run is done.
+    // The watchdog never finishes on its own. It is dropped once the run is done.
     let watchdog = env.board.watch(config.progress_warnings);
     futures_util::future::select(pin!(run), pin!(watchdog)).await;
 
@@ -473,7 +473,7 @@ where
             };
             match ticket.job.send(job) {
                 Ok(()) => {
-                    // An error means the worker ended without running the body; it recorded
+                    // An error means the worker ended without running the body. It recorded
                     // the test itself.
                     let _ = body_done_rx.await;
                     return;
@@ -940,7 +940,7 @@ where
             let message = panic_payload_message(payload.as_ref());
             tracing::error!("Browser test '{name}' panicked: {message}");
             run.panic_message = Some(message);
-            // Only ends the session; the runner reports the panic itself.
+            // Only ends the session. The runner reports the panic itself.
             Err(rootcause::report!("browser test '{name}' panicked"))
         }
     }
