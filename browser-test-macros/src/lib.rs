@@ -70,8 +70,9 @@ use syn::ItemFn;
 /// allowed; type and const parameters, `self` and `&mut` arguments are not. A test without
 /// arguments implements `BrowserTest<()>`.
 ///
-/// Functions named `none`, `some`, `ok` or `err` are rejected: their unit structs would shadow
-/// `None`, `Some`, `Ok` and `Err` in the function's module.
+/// Functions whose struct would shadow a name of the standard prelude in the function's module are
+/// rejected, e.g. `result` (`Result`), `copy` (`Copy`) or `ok` (`Ok`). Rename them, and keep the
+/// test's name with `name = "..."`.
 #[manyhow::manyhow]
 #[proc_macro_attribute]
 pub fn browser_test(

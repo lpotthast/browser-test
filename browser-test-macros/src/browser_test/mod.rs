@@ -14,9 +14,54 @@ use syn::{ItemFn, Visibility, ext::IdentExt, spanned::Spanned as _};
 pub(crate) use arguments::Arguments;
 use signature::{Inputs, TestSignature};
 
-/// Struct names that would shadow the prelude's `Option` and `Result` variants: a unit struct also
-/// defines a constant of its name.
-const RESERVED_NAMES: &[&str] = &["None", "Some", "Ok", "Err"];
+/// Struct names that would shadow a name of the standard prelude (Rust 2024) in the test's module:
+/// its types and traits, and the `Option` and `Result` variants, as a unit struct also defines a
+/// constant of its name.
+const RESERVED_NAMES: &[&str] = &[
+    "AsMut",
+    "AsRef",
+    "AsyncFn",
+    "AsyncFnMut",
+    "AsyncFnOnce",
+    "Box",
+    "Clone",
+    "Copy",
+    "Default",
+    "DoubleEndedIterator",
+    "Drop",
+    "Eq",
+    "Err",
+    "ExactSizeIterator",
+    "Extend",
+    "Fn",
+    "FnMut",
+    "FnOnce",
+    "From",
+    "FromIterator",
+    "Future",
+    "Into",
+    "IntoFuture",
+    "IntoIterator",
+    "Iterator",
+    "None",
+    "Ok",
+    "Option",
+    "Ord",
+    "PartialEq",
+    "PartialOrd",
+    "Result",
+    "Send",
+    "Sized",
+    "Some",
+    "String",
+    "Sync",
+    "ToOwned",
+    "ToString",
+    "TryFrom",
+    "TryInto",
+    "Unpin",
+    "Vec",
+];
 
 pub(crate) fn expand(args: Arguments, mut function: ItemFn) -> manyhow::Result<TokenStream> {
     let TestSignature {
@@ -186,6 +231,14 @@ mod tests {
                 "shadowing the prelude's `Ok`",
             ),
             (
+                "async fn result() -> Result<(), Report> { Ok(()) }",
+                "shadowing the prelude's `Result`",
+            ),
+            (
+                "async fn copy() -> Result<(), Report> { Ok(()) }",
+                "shadowing the prelude's `Copy`",
+            ),
+            (
                 "async fn __() -> Result<(), Report> { Ok(()) }",
                 "function name must produce a valid PascalCase struct name",
             ),
@@ -196,5 +249,10 @@ mod tests {
                 .into_token_stream();
             assert!(error.to_string().contains(message), "{error}");
         }
+    }
+
+    #[test]
+    fn reserved_names_are_sorted() {
+        assert!(super::RESERVED_NAMES.is_sorted());
     }
 }
