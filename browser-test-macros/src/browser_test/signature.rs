@@ -129,16 +129,17 @@ impl VisitMut for ElidedLifetimes {
         }
     }
 
+    // Lifetimes elided in `Fn(&str)` and `fn(&str)` are higher-ranked, not parameters of the impl.
+    // These two leave them unnamed by not descending into them.
+    fn visit_parenthesized_generic_arguments_mut(&mut self, _: &mut ParenthesizedGenericArguments) {
+    }
+
+    fn visit_type_fn_ptr_mut(&mut self, _: &mut TypeFnPtr) {}
+
     fn visit_type_reference_mut(&mut self, reference: &mut TypeReference) {
         if reference.lifetime.is_none() {
             reference.lifetime = Some(self.fresh());
         }
         visit_mut::visit_type_reference_mut(self, reference);
-    }
-
-    // Lifetimes elided in `fn(&str)` and `Fn(&str)` are higher-ranked, not parameters of the impl.
-    fn visit_type_fn_ptr_mut(&mut self, _: &mut TypeFnPtr) {}
-
-    fn visit_parenthesized_generic_arguments_mut(&mut self, _: &mut ParenthesizedGenericArguments) {
     }
 }
