@@ -261,6 +261,8 @@ impl BrowserTest<IntegrationContext, IntegrationTestError> for RunForeverTest {
     }
 }
 
+/// Fails. With `started`, counts itself there, and fails only once another test started too, so
+/// that the failure happens while that test runs.
 struct IntentionalFailureTest {
     started: Option<Arc<AtomicUsize>>,
 }
@@ -278,6 +280,9 @@ impl BrowserTest<IntegrationContext, IntegrationTestError> for IntentionalFailur
     ) -> Result<(), Report<IntegrationTestError>> {
         if let Some(started) = &self.started {
             started.fetch_add(1, Ordering::SeqCst);
+            while started.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
         }
 
         Err(Report::new(IntegrationTestError::IntentionalFailure))

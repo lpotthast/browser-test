@@ -97,6 +97,7 @@ pub enum FailurePolicy {
     ///
     /// Tests in groups marked [`crate::BrowserTests::run_always`] still run. Tests that already
     /// started when the failure occurred run to completion, and their failures are reported too.
+    /// A test still waiting for its browser session doesn't start.
     /// If only one test can run at a time, its failure is returned as is. Otherwise, failures are
     /// returned as child reports of a [`crate::BrowserTestError::RunTests`] report.
     #[default]

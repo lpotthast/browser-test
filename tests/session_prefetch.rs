@@ -79,6 +79,8 @@ struct Visit {
     body: Duration,
     fail: bool,
     fresh_session: bool,
+    /// Whether the test has an element query wait of its own, and so a session created for it.
+    dedicated: bool,
     tracker: Arc<Tracker>,
 }
 
@@ -89,6 +91,7 @@ impl Visit {
             body,
             fail: false,
             fresh_session: false,
+            dedicated: false,
             tracker: Arc::clone(tracker),
         }
     }
@@ -101,7 +104,15 @@ impl BrowserTest<str> for Visit {
     }
 
     fn session_settings(&self) -> SessionSettings {
-        SessionSettings::new().with_fresh_session(self.fresh_session)
+        let settings = SessionSettings::new().with_fresh_session(self.fresh_session);
+        if self.dedicated {
+            settings.with_element_query_wait(ElementQueryWait::new(
+                Duration::from_secs(1),
+                Duration::from_millis(100),
+            ))
+        } else {
+            settings
+        }
     }
 
     async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
@@ -295,6 +306,36 @@ async fn fail_fast_does_not_start_tests_whose_session_is_ready() {
     assert_that!(tracker.started.lock().unwrap().clone()).is_equal_to(vec![0]);
     assert_that!(outcome.report.tests.len()).is_equal_to(1);
     assert_that!(outcome.report.tests[0].outcome).is_equal_to(TestOutcome::Failed);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn fail_fast_does_not_start_tests_waiting_for_their_session() {
+    let base_url = serve_fixture().await;
+    let tracker = Arc::new(Tracker::default());
+    let mut failing = Visit::new(1, Duration::ZERO, &tracker);
+    failing.fail = true;
+    // Its session is created when its turn comes, which takes longer than the failing test.
+    let mut waiting = Visit::new(2, Duration::ZERO, &tracker);
+    waiting.dedicated = true;
+
+    let outcome = run(
+        runner().with_failure_policy(FailurePolicy::FailFast),
+        base_url.as_str(),
+        BrowserTests::sequential()
+            // While it runs, a spare session gets ready for the failing test.
+            .with(Visit::new(0, Duration::from_secs(1), &tracker))
+            .with_nested(
+                BrowserTests::parallel(Parallelism::parallel(2))
+                    .with(failing)
+                    .with(waiting),
+            ),
+    )
+    .await;
+
+    assert_that!(outcome.result.is_err()).is_true();
+    assert_that!(tracker.started.lock().unwrap().clone()).is_equal_to(vec![0, 1]);
+    assert_that!(outcome.report.tests.len()).is_equal_to(2);
 }
 
 /// Stores a value in `localStorage` and a cookie, or checks that neither exists.

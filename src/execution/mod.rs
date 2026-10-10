@@ -415,6 +415,12 @@ where
         self.config.cancellation.is_cancelled()
     }
 
+    /// Whether a test starts: unless the run stopped on a failure, or, also for tests that run
+    /// always, was cancelled.
+    fn may_start(&self, run_always: bool) -> bool {
+        self.keep_starting() || (run_always && !self.is_cancelled())
+    }
+
     /// With [`FailurePolicy::FailFast`], start no further tests (after a failure).
     fn stop_starting_on_fail_fast(&self) {
         if self.config.failure_policy == FailurePolicy::FailFast {
@@ -549,9 +555,7 @@ async fn run_node<Context, TestError>(
 {
     match node {
         // Tests not started because of fail-fast or a cancellation are not recorded.
-        Node::Test(index) if env.keep_starting() || (run_always && !env.is_cancelled()) => {
-            run_test(env, *index).await;
-        }
+        Node::Test(index) if env.may_start(run_always) => run_test(env, *index, run_always).await,
         Node::Test(_) => {}
         Node::Group(group) => run_group(env, group, run_always).await,
     }
@@ -559,8 +563,11 @@ async fn run_node<Context, TestError>(
 
 /// Run the test at `index` in a session of the pool (or one created for it) and return once its
 /// body finished. Its session quits or is reset, and its record is completed, in the background.
-async fn run_test<Context, TestError>(env: &Env<'_, Context, TestError>, index: usize)
-where
+async fn run_test<Context, TestError>(
+    env: &Env<'_, Context, TestError>,
+    index: usize,
+    run_always: bool,
+) where
     Context: Sync + ?Sized,
     TestError: ?Sized + 'static,
 {
@@ -584,7 +591,8 @@ where
     };
 
     let requested = Instant::now();
-    let ticket = if test.uses_pool(env.pool.default_wait) {
+    let pooled = test.uses_pool(env.pool.default_wait);
+    let ticket = if pooled {
         // Tests not started because of a cancellation are not recorded.
         let Some(ticket) = env.pool.take(test.fresh_session, env.keep_starting()).await else {
             return;
@@ -594,6 +602,14 @@ where
         env.pool.dedicated(test.element_query_wait).await
     };
     let wait = requested.elapsed();
+    if !env.may_start(run_always) {
+        // A test failed, or the run was cancelled, while this one waited for its session: it
+        // doesn't start, like the tests after it. Its session quits.
+        if pooled && ticket.is_ok() {
+            env.pool.test_finished();
+        }
+        return;
+    }
     let failure = match ticket {
         Ok(ticket) => {
             let (body_done_tx, body_done_rx) = oneshot::channel();
