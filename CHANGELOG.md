@@ -116,6 +116,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `focus`/`focusin` events. The runner brings every new session's page to the front (CDP `Page.bringToFront`); the
   re-exported `thirtyfour` has its `cdp` feature enabled for that.
 - The run summary prints durations just below a full minute as `2m 00.0s` instead of `1m 60.0s`.
+- Driver output capture no longer reserves memory for all of its tail lines up front. A large
+  `BROWSER_TEST_DRIVER_OUTPUT_TAIL_LINES` or `DriverOutput::tail_lines` reserved gigabytes, and `usize::MAX` panicked.
 
 ### Removed
 

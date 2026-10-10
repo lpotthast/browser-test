@@ -167,13 +167,16 @@ impl DriverOutputFollower {
 
 impl DriverOutputCapture {
     /// Create a capture handle retaining the last `tail_lines` driver output lines.
+    ///
+    /// The tail grows with the output, rather than reserving `tail_lines` up front: a large value
+    /// (`usize::MAX` to keep everything) costs nothing until the driver prints that much.
     #[must_use]
     pub(crate) fn new(tail_lines: NonZeroUsize) -> Self {
         Self {
             inner: Arc::new(Mutex::new(BrowserDriverOutputState {
                 tail_capacity: tail_lines,
                 total_lines: 0,
-                tail_lines: VecDeque::with_capacity(tail_lines.get()),
+                tail_lines: VecDeque::new(),
             })),
         }
     }
@@ -422,6 +425,15 @@ mod tests {
         assert_that!(&snapshot.tail_lines[1].line.line).is_equal_to("three");
         assert_that!(snapshot.tail_lines[1].sequence).is_equal_to(4);
         assert_that!(snapshot.tail_lines[0].line.source).is_equal_to(DriverOutputSource::Stderr);
+    }
+
+    #[test]
+    fn capture_of_unbounded_tail_reserves_nothing_up_front() {
+        let capture = DriverOutputCapture::new(NonZeroUsize::MAX);
+
+        capture.push(line(DriverOutputSource::Stdout, "one"));
+
+        assert_that!(capture.snapshot().tail_lines.len()).is_equal_to(1);
     }
 
     #[test]
