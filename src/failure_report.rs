@@ -41,7 +41,7 @@ use crate::{BrowserTestError, report::FormatDuration};
 const OWN_SOURCES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/");
 
 /// The runner's source: frames from here on down called the test.
-const RUNNER_SOURCE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/execution.rs");
+const RUNNER_SOURCE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/execution/");
 
 /// How many steps [`RecentSteps`] keeps.
 pub(crate) const RECENT_STEP_COUNT: usize = 8;
