@@ -71,6 +71,12 @@ use syn::ItemFn;
 /// allowed; type and const parameters, `self` and `&mut` arguments are not. A test without
 /// arguments implements `BrowserTest<()>`.
 ///
+/// A single `&WebDriver` argument is rejected, as a single argument is the context. Take
+/// `(driver: &WebDriver, context: &Context)`, with `&()` for a run without context.
+///
+/// A test never registered with `BrowserTests` warns as an unused function (`dead_code`), unless
+/// its struct is public.
+///
 /// Functions whose struct would shadow a name of the standard prelude in the function's module are
 /// rejected, e.g. `result` (`Result`), `copy` (`Copy`) or `ok` (`Ok`). Rename them, and keep the
 /// test's name with `name = "..."`.

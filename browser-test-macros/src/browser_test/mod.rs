@@ -228,6 +228,10 @@ mod tests {
                 "browser tests must be free functions",
             ),
             (
+                "async fn test(driver: &thirtyfour::WebDriver) -> Result<(), Report> { Ok(()) }",
+                "a single argument is the run's context, not the session's driver",
+            ),
+            (
                 "async fn test() {}",
                 "browser tests must return Result<(), Report>",
             ),

@@ -76,6 +76,15 @@ impl TestSignature {
             // The last argument is the context.
             context = Some((*reference.elem).clone());
         }
+        if let (Inputs::Context, Some(context)) = (&inputs, &context) {
+            ensure!(
+                !names_web_driver(context),
+                &signature.inputs,
+                "a single argument is the run's context, not the session's driver";
+                help = "take the driver and the context: `(driver: &WebDriver, context: &Context)`, \
+                        with `&()` for a run without context",
+            );
+        }
         let ReturnType::Type(_, result) = &signature.output else {
             bail!(signature, "browser tests must return Result<(), Report>");
         };
@@ -94,6 +103,11 @@ impl TestSignature {
             inputs,
         })
     }
+}
+
+/// Whether `ty` names `WebDriver`, by its last path segment (an alias goes unnoticed).
+fn names_web_driver(ty: &Type) -> bool {
+    matches!(ty, Type::Path(path) if path.path.segments.last().is_some_and(|segment| segment.ident == "WebDriver"))
 }
 
 /// Names the elided lifetimes in `context`, returning the lifetime parameters to declare.
