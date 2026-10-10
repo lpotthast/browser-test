@@ -22,10 +22,10 @@ minimal-versions:
 
 # Run the full validation suite: check, clippy, test, build, doc
 verify:
-  cargo check
-  cargo clippy -- -D warnings
-  cargo clippy --all-targets --all-features -- -D warnings
-  cargo test -- --no-capture
-  cargo build
-  cargo doc
+  cargo check --workspace
+  cargo clippy --workspace -- -D warnings
+  cargo clippy --workspace --all-targets --all-features -- -D warnings
+  cargo test --workspace -- --no-capture
+  cargo build --workspace
+  cargo doc --workspace --no-deps
 

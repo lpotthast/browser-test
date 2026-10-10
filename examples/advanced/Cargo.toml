@@ -6,7 +6,7 @@ rust-version = "1.89.0"
 publish = false
 
 [dependencies]
-browser-test = { path = "../..", default-features = false, features = ["rustls"] }
+browser-test = { path = "../../browser-test", default-features = false, features = ["rustls"] }
 rootcause = { version = "0.13.0", default-features = false }
 rootcause-backtrace = { version = "0.13.0", default-features = false }
 rootcause-tracing = { version = "0.13.0", default-features = false }

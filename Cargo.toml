@@ -1,57 +1,22 @@
 [workspace]
-members = ["browser-test-macros"]
+members = ["browser-test", "browser-test-macros"]
 exclude = ["examples/advanced", "examples/minimal"]
 resolver = "2"
 
-[package]
-name = "browser-test"
+[workspace.package]
 version = "0.6.0"
 edition = "2024"
 rust-version = "1.89.0"
 authors = ["Lukas Potthast <privat@lukas-potthast.de>"]
 license = "MIT OR Apache-2.0"
-readme = "README.md"
 repository = "https://github.com/lpotthast/browser-test"
-description = "Small helpers for async browser-driven integration tests."
-categories = ["development-tools::testing", "web-programming"]
-keywords = ["browser", "webdriver", "chrome", "testing", "automation"]
-exclude = [".idea", ".claude", ".vscode", "AGENTS.md", "CLAUDE.md", "Justfile"]
 
-[features]
-default = ["rustls"]
-
-# TLS backend for downloading Chrome for Testing. Forwarded to `chrome-for-testing-manager`, see the README.
-rustls = ["chrome-for-testing-manager/rustls"]
-rustls-no-provider = ["chrome-for-testing-manager/rustls-no-provider"]
-native-tls = ["chrome-for-testing-manager/native-tls"]
-
-# Enables `#[derive(Component)]` in the re-exported `thirtyfour`.
-component = ["thirtyfour/component"]
-
-[dependencies]
-async-trait = { version = "0.1.83", default-features = false }
-backtrace = { version = "0.3.76", default-features = false, features = ["std"] }
+[workspace.dependencies]
 browser-test-macros = { version = "0.6.0", path = "browser-test-macros" }
-chrome-for-testing-manager = { version = "0.14.0", default-features = false, features = ["thirtyfour"] }
-futures-util = { version = "0.3.32", default-features = false, features = ["std"] }
 rootcause = { version = "0.13.0", default-features = false }
-serde_json = { version = "1.0.145", default-features = false, features = ["std"] }
-thirtyfour = { version = "0.37.0", default-features = false, features = ["bidi", "cdp", "reqwest"] }
-thiserror = { version = "2.0.17", default-features = false, features = ["std"] }
-tokio = { version = "1.48.0", default-features = false, features = ["io-std", "io-util", "macros", "rt", "signal", "sync", "time"] }
-tracing = { version = "0.1.41", default-features = false, features = ["std"] }
-url = { version = "2.5.8", default-features = false, features = ["std"] }
 
-[target.'cfg(unix)'.dependencies]
-nix = { version = "0.31.3", default-features = false, features = ["user"] }
-
-[dev-dependencies]
-assertr = { version = "0.7.1", default-features = false, features = ["std"] }
-serial_test = { version = "4.0.1", default-features = false, features = ["async"] }
-tokio = { version = "1.52.3", default-features = false, features = ["macros", "net", "rt-multi-thread", "signal"] }
-
-[lints.rust]
+[workspace.lints.rust]
 missing_docs = "warn"
 
-[lints.clippy]
+[workspace.lints.clippy]
 pedantic = "warn"

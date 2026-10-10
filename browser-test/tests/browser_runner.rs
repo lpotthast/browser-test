@@ -464,7 +464,7 @@ async fn failure_reports_locate_panics() {
     let report = format!("{err:?}");
     assert_that!(&report)
         .contains("Browser test 'panicking' panicked")
-        .contains("Panicked at tests/browser_runner.rs:")
+        .contains("Panicked at browser-test/tests/browser_runner.rs:")
         .contains("Test code:");
 }
 

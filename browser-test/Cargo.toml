@@ -1,0 +1,48 @@
+[package]
+name = "browser-test"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+readme = "README.md"
+repository.workspace = true
+description = "Small helpers for async browser-driven integration tests."
+categories = ["development-tools::testing", "web-programming"]
+keywords = ["browser", "webdriver", "chrome", "testing", "automation"]
+
+[features]
+default = ["rustls"]
+
+# TLS backend for downloading Chrome for Testing. Forwarded to `chrome-for-testing-manager`, see the README.
+rustls = ["chrome-for-testing-manager/rustls"]
+rustls-no-provider = ["chrome-for-testing-manager/rustls-no-provider"]
+native-tls = ["chrome-for-testing-manager/native-tls"]
+
+# Enables `#[derive(Component)]` in the re-exported `thirtyfour`.
+component = ["thirtyfour/component"]
+
+[dependencies]
+async-trait = { version = "0.1.83", default-features = false }
+backtrace = { version = "0.3.76", default-features = false, features = ["std"] }
+browser-test-macros.workspace = true
+chrome-for-testing-manager = { version = "0.14.0", default-features = false, features = ["thirtyfour"] }
+futures-util = { version = "0.3.32", default-features = false, features = ["std"] }
+rootcause.workspace = true
+serde_json = { version = "1.0.145", default-features = false, features = ["std"] }
+thirtyfour = { version = "0.37.0", default-features = false, features = ["bidi", "cdp", "reqwest"] }
+thiserror = { version = "2.0.17", default-features = false, features = ["std"] }
+tokio = { version = "1.48.0", default-features = false, features = ["io-std", "io-util", "macros", "rt", "signal", "sync", "time"] }
+tracing = { version = "0.1.41", default-features = false, features = ["std"] }
+url = { version = "2.5.8", default-features = false, features = ["std"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31.3", default-features = false, features = ["user"] }
+
+[dev-dependencies]
+assertr = { version = "0.7.1", default-features = false, features = ["std"] }
+serial_test = { version = "4.0.1", default-features = false, features = ["async"] }
+tokio = { version = "1.52.3", default-features = false, features = ["macros", "net", "rt-multi-thread", "signal"] }
+
+[lints]
+workspace = true
