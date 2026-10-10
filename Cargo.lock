@@ -136,6 +136,7 @@ dependencies = [
  "browser-test-macros",
  "chrome-for-testing-manager",
  "futures-util",
+ "nix",
  "rootcause",
  "serde_json",
  "serial_test",

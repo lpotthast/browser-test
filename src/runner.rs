@@ -236,7 +236,8 @@ impl BrowserTestRunner {
     }
 
     /// Set the directory in which runs keep the Chrome profiles of their sessions. Defaults to
-    /// `browser-test-profiles` in [`std::env::temp_dir`].
+    /// `browser-test-profiles-<uid>` (Unix, with the user id) or `browser-test-profiles` in
+    /// [`std::env::temp_dir`].
     ///
     /// Every session gets a fresh profile, removed when the session ends. When a run starts, it
     /// also removes the profiles that killed runs left behind. Only entries created by
@@ -248,7 +249,8 @@ impl BrowserTestRunner {
     ///
     /// - is a symlink or not a directory,
     /// - has an absolute path that is not valid UTF-8,
-    /// - is accessible by other users (Unix only), as profiles hold cookies and other browser data, or
+    /// - belongs to another user, or is accessible by other users (Unix only), as profiles hold
+    ///   cookies and other browser data, or
     /// - is on a file system without file locks.
     #[must_use]
     pub fn with_chrome_profiles_dir(mut self, profiles_dir: impl Into<PathBuf>) -> Self {

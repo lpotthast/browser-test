@@ -18,7 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   installation to them. `BrowserTestRunner::with_failure_report_hooks(false)` goes without the hooks. See the README's
   "Failure Reports".
 - `BrowserTestRunner::with_chrome_profiles_dir(path)` sets where runs keep the Chrome profiles of their sessions.
-  Defaults to `"browser-test-profiles"` in the system's temporary directory.
+  Defaults to `"browser-test-profiles-<uid>"` (Unix, with the user id) or `"browser-test-profiles"` in the system's
+  temporary directory.
 - Cancellation of runs, e.g. on Ctrl-C. A cancelled run starts no further tests, cancels running ones, and shuts down
   `ChromeDriver` and its browsers, then `run` returns the new `BrowserTestError::Cancelled`. Without it, an interrupted
   run can leave `ChromeDriver` and its browsers running. See the breaking change below. `CancellationToken` is

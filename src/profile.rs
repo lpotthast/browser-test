@@ -44,7 +44,8 @@ use thirtyfour::{
 
 use crate::BrowserTestError;
 
-/// Name of the default [`ChromeProfilesDir`] in the system's temporary directory.
+/// Name of the default [`ChromeProfilesDir`] in the system's temporary directory, followed by the
+/// user id on Unix.
 const DEFAULT_DIR_NAME: &str = "browser-test-profiles";
 
 /// Prefix of a run's directory. Only directories named like this are ever removed by a sweep.
@@ -74,9 +75,15 @@ impl ChromeProfilesDir {
         Self { path: path.into() }
     }
 
-    /// Keep profiles in `browser-test-profiles` in [`std::env::temp_dir`]. The runner's default.
+    /// Keep profiles in `browser-test-profiles-<uid>` (Unix) or `browser-test-profiles` in
+    /// [`std::env::temp_dir`]. The runner's default. On Unix, users share the temporary directory
+    /// (`/tmp`), and one user's directory, accessible by its owner only, would lock out the others.
     pub(crate) fn in_temp_dir() -> Self {
-        Self::new(std::env::temp_dir().join(DEFAULT_DIR_NAME))
+        #[cfg(unix)]
+        let name = format!("{DEFAULT_DIR_NAME}-{}", nix::unistd::geteuid());
+        #[cfg(not(unix))]
+        let name = DEFAULT_DIR_NAME;
+        Self::new(std::env::temp_dir().join(name))
     }
 
     /// The path as configured, which may be relative.
@@ -111,7 +118,13 @@ impl ChromeProfilesDir {
         }
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt as _;
+            use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+            if metadata.uid() != nix::unistd::geteuid().as_raw() {
+                return Err(io::Error::other(format!(
+                    "{} belongs to another user. Choose another directory",
+                    path.display()
+                )));
+            }
             if metadata.permissions().mode() & 0o077 != 0 {
                 return Err(io::Error::other(format!(
                     "{} is accessible by other users. Restrict it with `chmod 700`",
@@ -546,6 +559,26 @@ mod tests {
         let error = RunProfiles::create_blocking(&profiles_dir.profiles_dir)
             .expect_err("a shared profiles dir should be rejected");
         assert_that!(error.to_string()).contains("chmod 700");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_profiles_dir_of_another_user() {
+        if nix::unistd::geteuid().is_root() {
+            return;
+        }
+        // Owned by root.
+        let error = RunProfiles::create_blocking(&ChromeProfilesDir::new("/"))
+            .expect_err("a profiles dir of another user should be rejected");
+        assert_that!(error.to_string()).contains("belongs to another user");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_default_profiles_dir_is_per_user() {
+        let name = format!("browser-test-profiles-{}", nix::unistd::geteuid());
+        assert_that!(ChromeProfilesDir::in_temp_dir().path())
+            .is_equal_to(std::env::temp_dir().join(name).as_path());
     }
 
     #[cfg(unix)]

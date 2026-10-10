@@ -237,7 +237,8 @@ The headless binary is only used in headless runs. Visible runs always use regul
 every session, after the runner's own headless or visible arguments.
 
 Every session gets a fresh Chrome profile, removed when the session ends. When a run starts, it also removes the
-profiles that killed runs left behind. Profiles are kept in `browser-test-profiles` in the system's temporary directory.
+profiles that killed runs left behind. Profiles are kept in `browser-test-profiles-<uid>` (Unix, with your user id) or
+`browser-test-profiles` in the system's temporary directory.
 Choose another place with `.with_chrome_profiles_dir("target/browser-test-profiles")`. Capability setups must not set
 `--user-data-dir`.
 
