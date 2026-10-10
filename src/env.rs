@@ -59,9 +59,10 @@ pub(crate) fn env_number(name: &str) -> Result<Option<usize>, InvalidEnvVar> {
 
 #[cfg(test)]
 mod tests {
+    use assertr::prelude::*;
+
     use super::*;
     use crate::test_support::EnvVarGuard;
-    use assertr::prelude::*;
 
     const TEST_VAR: &str = "BROWSER_TEST_ENV_TEST";
 

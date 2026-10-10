@@ -3,8 +3,8 @@ mod tests;
 use std::time::Duration;
 
 use browser_test::{
-    BrowserTestRunner, BrowserTests, DriverOutput, ElementQueryWait, Parallelism, Pause,
-    StderrSummary, Visibility,
+    BrowserTestRunner, BrowserTests, Cancellation, DriverOutput, ElementQueryWait, Parallelism,
+    Pause, StderrSummary, Visibility,
 };
 use rootcause::Report;
 use rootcause::hooks::Hooks;
@@ -50,7 +50,7 @@ async fn main() -> Result<(), Report> {
         .with(TitleContainsWikipedia)
         .with(SearchInputIsVisible);
 
-    BrowserTestRunner::new()
+    BrowserTestRunner::new(Cancellation::on_shutdown_signals())
         .with_visibility(Visibility::Visible)
         .with_pause(
             Pause::from_env()

@@ -98,8 +98,9 @@ impl Timeouts {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assertr::prelude::*;
+
+    use super::*;
 
     #[test]
     fn builder_preserves_all_timeout_fields() {

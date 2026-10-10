@@ -5,6 +5,77 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Failure reports (module `failure_report`): every error of a failing test carries the frames of the test code that led
+  to it (`TestCodeFrames`, innermost first, also for errors created in helpers), panics carry their location and
+  frames, and a failing test's report lists its last steps with their timing (`RecentSteps`). `thirtyfour` errors print
+  their `WebDriver` message without chromedriver's native stack trace, and messages print without quotes and escapes,
+  also where a report is printed with `Debug`. The runner installs the `rootcause` hooks behind this with its first
+  run; `BrowserTestRunner::with_failure_report_hooks(false)` and `failure_report::hooks` let applications with hooks of
+  their own add them instead. See the README's "Failure Reports".
+- `BrowserTestRunner::with_chrome_profiles_dir(ChromeProfilesDir)` sets where runs keep the Chrome profiles of their
+  sessions. Defaults to `ChromeProfilesDir::in_temp_dir()`, which is `"browser-test-profiles"` in the system's temporary
+  directory.
+- Cancellation of runs, e.g. on Ctrl-C. A cancelled run starts no further tests, cancels running ones, and shuts down
+  `ChromeDriver` and its browsers, then `run` returns the new `BrowserTestError::Cancelled`. Without it, an interrupted
+  run can leave `ChromeDriver` and its browsers running. See the breaking change below. `CancellationToken` is
+  re-exported.
+- TLS backend features `rustls` (default), `rustls-no-provider` and `native-tls`, forwarded to
+  `chrome-for-testing-manager`. They choose how Chrome for Testing is downloaded, e.g. with the `ring` crypto provider
+  instead of `aws-lc-rs`. See the README.
+- Feature `component` enables `#[derive(Component)]` in the re-exported `thirtyfour`.
+- Session reuse: `BrowserTestRunner::with_session_reuse(SessionReuse::enabled())` returns sessions to the pool after
+  their test: reset, they run further tests as long as upcoming tests need them, instead of a browser starting per test.
+  The pool keeps as many sessions as tests run at the same time plus spares (by default one per eight parallel tests),
+  and quits the others; a session whose reset fails quits. Two resets (`SessionReset`), to cross-check each other:
+  `NewContext` (the default) runs every test in a tab of its own WebDriver BiDi user context and removes it (its tabs,
+  cookies, storage, caches, permissions and renderer processes; the `bidi` feature of `thirtyfour` is enabled);
+  `SessionReset::manual([CachedData::Http])` resets the session's one tab item by item and keeps only the listed
+  cached data, e.g. the HTTP cache with V8's compiled code. Both release pressed keys and buttons and restore the window
+  rect and timeouts. Reusable sessions run without Chrome's back/forward cache unless
+  `SessionReuse::with_back_forward_cache(true)`. `BrowserTest::fresh_session` asks the pool for a session no test ran in,
+  `SessionReuse::with_max_tests_per_session` bounds how many tests a browser runs, and `SessionReuse::from_env` reads
+  `BROWSER_TEST_SESSION_REUSE`. Disabled by default. See the README's "Session Reuse".
+- The run report counts reset sessions (`BrowserTestRunReport::session_resets`, `session_reset_time`), and the summary
+  shows the average duration of every step kind.
+
+### Changed
+
+- **Breaking:** `SessionTiming::creation` became `SessionTiming::preparation`, a `SessionPreparation`: `Created` with
+  the creation time, or `Reset` with the reset time of a reused session. `BrowserTestRecord::teardown` is `None` for a
+  test whose session ran further tests.
+
+- **Breaking:** `BrowserTestRunner::new` requires a `Cancellation`, so that every user decides how runs are cancelled.
+  `Cancellation::on_shutdown_signals()` cancels runs on SIGINT (Ctrl-C) or SIGTERM, or Ctrl-C on Windows. The process
+  listens for them once, from the first run with tests on, on a thread of its own, so any number of runners and Tokio
+  runtimes can use it. A second signal exits the process right away. `Cancellation::from_token(CancellationToken)`
+  cancels runs once your own token is cancelled. `Cancellation::disabled()` keeps the previous behavior. Replace
+  `BrowserTestRunner::new()` with `BrowserTestRunner::new(Cancellation::on_shutdown_signals())`.
+- **Breaking:** `BrowserTestRunner` no longer implements `Default`, as it has no default `Cancellation`.
+- **Breaking:** Updated `chrome-for-testing-manager` to 0.14.
+- **Breaking:** The re-exported `thirtyfour` no longer has its `component` feature enabled. Enable this crate's
+  `component` feature to keep using `#[derive(Component)]`.
+- All dependencies are declared without their default features and enable only what this crate needs. Only the
+  selected TLS feature enables `reqwest`'s TLS backend now, `thirtyfour` no longer enables `reqwest/rustls`.
+- A `--user-data-dir` set through `with_chrome_capabilities` makes sessions fail to start. The runner chooses every
+  session's profile directory itself.
+
+### Fixed
+
+- Browser runs no longer leak Chrome profiles into the temporary directory. `ChromeDriver` removes the profile it
+  creates for a session (`org.chromium.Chromium.scoped_dir.*`, tens of megabytes each) only when the session is quit
+  cleanly. Killed runs could leak them until the disk filled up. The runner now manages profiles itself: every session
+  gets a fresh profile in the `ChromeProfilesDir`, removed when the session ends, and a starting run removes the
+  profiles that killed runs left behind. A run whose profiles cannot be set up fails with the new
+  `BrowserTestError::CreateChromeProfiles`.
+- Sessions on these profiles start with a focused page, as before. On a profile it did not create itself, `ChromeDriver`
+  starts the page without focus: `document.hasFocus()` is `false`, and focusing an element from script fires no
+  `focus`/`focusin` events. The runner brings every new session's page to the front (CDP `Page.bringToFront`); the
+  re-exported `thirtyfour` has its `cdp` feature enabled for that.
+
 ## [0.5.0] - 2026-10-06
 
 This release simplifies the configuration API: every setting has exactly one way to express it, and the runner only
@@ -23,7 +94,7 @@ does what it is told. See "Changed" for the renames.
   test usually finds its session ready instead of waiting for a browser to start. Sessions are quit in the background
   after their test. Every test still gets its own fresh session. Configure the number of spare sessions with
   `BrowserTestRunner::with_spare_sessions` (default: one per test that can run at the same time, `0` creates sessions
-  only on demand).
+  only on demand). Visible runs default to `0`, so that no spare browser window opens on top of the running test.
 - Run reports: every test's session creation, the time it waited for its session, its body, and its session teardown
   are measured and logged when it finishes. At the end of a run, the runner hands a `BrowserTestRunReport` to every
   `RunReportConsumer` added with `BrowserTestRunner::with_report_consumer`. `StderrSummary`, `StdoutSummary`, and

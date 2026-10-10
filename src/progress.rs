@@ -21,9 +21,9 @@ use crate::step::DEFAULT_SLOW_STEP;
 /// ```rust
 /// use std::time::Duration;
 ///
-/// use browser_test::{BrowserTestRunner, ProgressWarnings};
+/// use browser_test::{BrowserTestRunner, Cancellation, ProgressWarnings};
 ///
-/// let runner = BrowserTestRunner::new().with_progress_warnings(
+/// let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals()).with_progress_warnings(
 ///     ProgressWarnings::builder()
 ///         .test_running(Duration::from_secs(60))
 ///         .slow_step_opt(None)
@@ -40,7 +40,8 @@ pub struct ProgressWarnings {
     )]
     test_running: Option<Duration>,
 
-    /// Warn when creating or quitting a session takes longer than this. Defaults to 5 seconds.
+    /// Warn when creating, resetting or quitting a session takes longer than this. Defaults to 5
+    /// seconds.
     #[builder(
         default = Some(Duration::from_secs(5)),
         setter(strip_option(fallback_suffix = "_opt"))
@@ -78,7 +79,7 @@ impl ProgressWarnings {
         self.test_running
     }
 
-    /// Threshold for creating and quitting sessions.
+    /// Threshold for creating, resetting and quitting sessions.
     #[must_use]
     pub const fn session(self) -> Option<Duration> {
         self.session
@@ -93,7 +94,9 @@ impl ProgressWarnings {
     const fn threshold(self, phase: Phase) -> Option<Duration> {
         match phase {
             Phase::RunningTest => self.test_running,
-            Phase::CreatingSession | Phase::QuittingSession => self.session,
+            Phase::CreatingSession | Phase::ResettingSession | Phase::QuittingSession => {
+                self.session
+            }
         }
     }
 
@@ -112,6 +115,8 @@ impl ProgressWarnings {
 pub(crate) enum Phase {
     CreatingSession,
     RunningTest,
+    /// Resetting a test's session for the next test (see [`crate::SessionReuse`]).
+    ResettingSession,
     QuittingSession,
 }
 
@@ -180,6 +185,7 @@ impl ProgressBoard {
                 let doing = match status.phase {
                     Phase::CreatingSession => "creating",
                     Phase::RunningTest => "running",
+                    Phase::ResettingSession => "resetting the session of",
                     Phase::QuittingSession => "quitting the session of",
                 };
                 tracing::warn!(

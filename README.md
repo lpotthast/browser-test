@@ -21,9 +21,12 @@ side of the integration test.
 
 - Manages Chrome for Testing and chromedriver through `chrome-for-testing-manager`.
 - Runs named async `BrowserTest` values collected in `BrowserTests`.
-- Gives every test a fresh `WebDriver` session, created in the background while earlier tests run.
+- Gives every test a fresh `WebDriver` session, created in the background while earlier tests run, or, with session
+  reuse, the reset session of an earlier test (see "Sessions").
 - Runs sequentially and fails fast by default.
-- Measures every test (session creation, waiting for it, body, teardown) and reports each run: the slowest tests, the
+- Reports failures with the line of test code that failed, its callers, and the test's last steps (see "Failure
+  Reports").
+- Measures every test (session creation or reset, waiting for it, body, teardown) and reports each run: the slowest tests, the
   slowest steps, and the time spent on sessions, printed as a summary on request. Warns when tests or sessions take
   unusually long.
 - Supports bounded parallel runs, run-all failure reporting, visible Chrome, manual pauses,
@@ -36,7 +39,7 @@ Add `browser-test` to the crate that owns your browser integration tests:
 
 ```toml
 [dev-dependencies]
-browser-test = "0.5"
+browser-test = "0.6"
 rootcause = "0.13"
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
 ```
@@ -52,6 +55,34 @@ use browser_test::thirtyfour::{By, WebDriver, prelude::*};
 Add a direct `thirtyfour` dependency only if your test crate needs to manage that dependency
 itself.
 
+## Features
+
+- `rustls` *(default)*: Downloads Chrome for Testing through `rustls` with the `aws-lc-rs` crypto provider.
+- `rustls-no-provider`: Downloads through `rustls` with the process-default crypto provider, which you must install
+  before running tests.
+- `native-tls`: Downloads through the platform's native TLS implementation.
+- `component`: Enables `#[derive(Component)]` in the re-exported `thirtyfour`.
+
+The TLS features are forwarded to `chrome-for-testing-manager`. Its release index and downloads are served over HTTPS,
+so enable one of them. Without one, every download fails. Talking to `chromedriver` on localhost needs no TLS.
+
+To use the `ring` crypto provider instead of `aws-lc-rs`, select `rustls-no-provider` and install `ring` as the
+process-default provider. No crate in your dependency graph may enable `reqwest/rustls`. A direct `thirtyfour`
+dependency with default features would, so disable them:
+
+```toml
+[dev-dependencies]
+browser-test = { version = "0.6", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# Only if you depend on `thirtyfour` directly.
+thirtyfour = { version = "0.37", default-features = false, features = ["reqwest"] }
+```
+
+```rust,ignore
+// Once per process, before running tests. Fails harmlessly if a provider is already installed.
+let _ = rustls::crypto::ring::default_provider().install_default();
+```
+
 ## Minimal Test
 
 This example opens Wikipedia. In a real integration test, the shared context is usually your app's
@@ -62,7 +93,8 @@ use std::borrow::Cow;
 
 use browser_test::thirtyfour::WebDriver;
 use browser_test::{
-    BrowserTest, BrowserTestError, BrowserTestRunner, BrowserTests, Visibility, async_trait,
+    BrowserTest, BrowserTestError, BrowserTestRunner, BrowserTests, Cancellation, Visibility,
+    async_trait,
 };
 use rootcause::{Report, report};
 
@@ -97,7 +129,7 @@ async fn main() -> Result<(), Report<BrowserTestError>> {
         base_url: "https://www.wikipedia.org".into(),
     };
 
-    BrowserTestRunner::new()
+    BrowserTestRunner::new(Cancellation::on_shutdown_signals())
         .with_visibility(Visibility::Visible)
         .run(&context, BrowserTests::sequential().with(PageTitleTest))
         .await
@@ -111,14 +143,19 @@ its output.
 Browser tests must run on a multithreaded Tokio runtime because the Chrome for Testing manager requires it.
 Use `#[tokio::test(flavor = "multi_thread")]` for integration tests.
 
+`BrowserTestRunner::new` requires a `Cancellation`, deciding how runs are stopped early. A cancelled run shuts down
+`ChromeDriver` and its browsers and removes their profiles, while an interrupted run that is not cancelled can leave them
+running. `Cancellation::on_shutdown_signals()` cancels runs on Ctrl-C or SIGTERM, `Cancellation::from_token(token)` once
+your application's own token is cancelled, and `Cancellation::disabled()` never.
+
 ## Local Debugging
 
 Configure the runner with environment-driven options:
 
 ```rust,no_run
-use browser_test::{BrowserTestRunner, DriverOutput, Pause, Visibility};
+use browser_test::{BrowserTestRunner, Cancellation, DriverOutput, Pause, Visibility};
 
-let runner = BrowserTestRunner::new()
+let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals())
     .with_visibility(Visibility::from_env()?.unwrap_or_default())
     .with_pause(Pause::from_env()?.unwrap_or_default())
     .with_driver_output(DriverOutput::from_env()?.unwrap_or_default());
@@ -155,8 +192,8 @@ The pause lets you inspect the app or attach a debugger before any test runs. An
 use std::time::Duration;
 
 use browser_test::{
-    BrowserTestRunner, DriverOutput, ElementQueryWait, FailurePolicy, Pause, StderrSummary,
-    Timeouts, Visibility,
+    BrowserTestRunner, Cancellation, DriverOutput, ElementQueryWait, FailurePolicy, Pause,
+    StderrSummary, Timeouts, Visibility,
 };
 
 let pause = Pause::from_env()?
@@ -164,7 +201,7 @@ let pause = Pause::from_env()?
     .with_hint("The app runs at http://127.0.0.1:3000");
 let pause_enabled = pause.is_enabled();
 
-let runner = BrowserTestRunner::new()
+let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals())
     .with_visibility(Visibility::from_env()?.unwrap_or_default())
     .with_pause(pause)
     .with_driver_output(DriverOutput::from_env()?.unwrap_or_default())
@@ -195,9 +232,9 @@ Chrome arguments are often useful:
 
 ```rust
 use browser_test::thirtyfour::ChromiumLikeCapabilities;
-use browser_test::{BrowserTestRunner, Channel, ChromeBinary};
+use browser_test::{BrowserTestRunner, Cancellation, Channel, ChromeBinary};
 
-let runner = BrowserTestRunner::new()
+let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals())
     .with_channel(Channel::Stable)
     .with_chrome_for_testing_cache_dir("target/chrome-for-testing")
     .with_headless_chrome_binary(ChromeBinary::ChromeHeadlessShell)
@@ -206,6 +243,11 @@ let runner = BrowserTestRunner::new()
 
 The headless binary is only used in headless runs. Visible runs always use regular Chrome. Capability setups apply to
 every session, after the runner's own headless or visible arguments.
+
+Every session gets a fresh Chrome profile, removed when the session ends. When a run starts, it also removes the
+profiles that killed runs left behind. Profiles are kept in `browser-test-profiles` in the system's temporary directory.
+Choose another place with `.with_chrome_profiles_dir(ChromeProfilesDir::new("target/browser-test-profiles"))`.
+Capability setups must not set `--user-data-dir`.
 
 ## Execution Model
 
@@ -268,24 +310,101 @@ same time. A test usually finds its session ready when its turn comes, and sessi
 their test.
 
 Up to `parallel tests + spare sessions` browsers are open at once. Lower the number of spare sessions on machines with
-little memory, or disable them, with `BrowserTestRunner::with_spare_sessions(n)`. In visible runs, the browser windows
-of spare sessions open ahead of their tests.
+little memory, or disable them, with `BrowserTestRunner::with_spare_sessions(n)`. With session reuse (below), the default
+is one spare session per eight parallel tests: a returned session only needs a reset, not a new browser.
+
+Visible runs keep no spare sessions by default, because a spare session's browser window would open on top of the
+window of the running test. Each test then waits for its browser to start. Set `with_spare_sessions(n)` explicitly to
+create spare sessions in visible runs as well.
 
 Spare sessions use the runner's element-query wait. A test that overrides `element_query_wait()` with a different value
 gets a session created when its turn comes, so it waits for its browser to start.
 
+### Session Reuse
+
+A run of many short tests spends much of its time starting browsers. With `SessionReuse::enabled()`, sessions return to
+the runner's pool after their test: reset, they run further tests as long as upcoming tests need them, and quit once the
+pool has enough. A run then creates about as many sessions as tests run at the same time, plus spares, however many tests
+it has:
+
+```rust
+use browser_test::{BrowserTestRunner, Cancellation, SessionReuse};
+
+let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals())
+    .with_session_reuse(SessionReuse::from_env()?.unwrap_or(SessionReuse::enabled()));
+# Ok::<(), browser_test::InvalidEnvVar>(())
+```
+
+How a session is reset is its `SessionReset`. Both strategies give the next test a browser without the state of the tests
+before; run a suite with each to cross-check that its tests don't depend on the strategy.
+
+`SessionReset::NewContext` (the default) runs every test in a tab of a user context of its own (`WebDriver` `BiDi`'s
+isolated browser profiles, like incognito windows), and the reset removes it: its tabs and windows (with their history,
+page state and CDP overrides), cookies, storage of every origin, caches and permissions, and the renderer processes of its
+pages. Complete by construction, whatever a test changed, but nothing is kept: every test downloads and compiles the app's
+scripts and WebAssembly again. The session's first tab stays open on `about:blank`, so a test sees two windows; windows a
+test opens with `WebDriver`'s New Window command (they open in the browser's default context) are closed. Grant
+permissions through CDP for the test's context: `Browser.grantPermissions` with the `browserContextId` of the current tab
+(`Target.getTargetInfo`).
+
+`SessionReset::manual([CachedData::Http])` runs every test of a session in the session's one tab and clears what tests can
+change item by item, keeping only the cached data listed:
+
+```rust
+use browser_test::{BrowserTestRunner, CachedData, Cancellation, SessionReset, SessionReuse};
+
+let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals()).with_session_reuse(
+    SessionReuse::enabled().with_reset(SessionReset::manual([CachedData::Http])),
+);
+```
+
+It closes other windows, navigates to an empty page in a new renderer process (a `data:` URL: the test's page and its
+process go, with the caches in it) and clears the history, clears cookies and the storage
+(`localStorage`, `sessionStorage`, `IndexedDB`, cache storage, service workers, file systems) of every origin the tab
+showed, resets CDP permissions and emulation overrides (device metrics, user
+agent, geolocation, media, timezone, locale, touch, CPU throttling, idle state, focus emulation, background color, script
+execution), and clears the HTTP cache unless `CachedData::Http` is kept. Keeping it is safe while the served files don't
+change during a run (content-hashed names, as in production): the next test loads the app's scripts and WebAssembly from
+the cache, with the code V8 compiled for them. State the list doesn't cover (e.g. Shared Storage, Storage Buckets, other
+CDP domains' settings) survives into the next test; use `NewContext` for tests that change it.
+
+Reusable sessions start Chrome without its back/forward cache (`--disable-features=BackForwardCache`, merged into a
+`--disable-features` of your own), so both strategies behave alike within a test (going back loads a page again), and no
+cached page keeps a renderer process (100 to 250 MB) alive in a reused browser. `SessionReuse::with_back_forward_cache(true)`
+keeps it, e.g. for tests of pages restored from it.
+
+A test that needs a browser no test ran in (e.g. one measuring a first page load, with empty caches) returns `true` from
+`BrowserTest::fresh_session`: the pool gives it a session no test ran in, creating one if none is ready. Afterwards its
+session returns to the pool like any other. A session whose reset fails (e.g. its browser crashed) quits.
+`SessionReuse::with_max_tests_per_session(n)` bounds how many tests one browser runs. `BROWSER_TEST_SESSION_REUSE=0`
+(read by `SessionReuse::from_env`) turns reuse off for a run, e.g. to compare timings.
+
+The run report counts created and reset sessions separately (see "Timing and Progress").
+
+### Memory and Parallelism
+
+Every test that runs at the same time is a browser, and every spare session another one. Their memory adds up fast: a
+browser running a page with a mid-size WASM app takes about 0.5 GB (renderer processes, the network service, the
+browser and GPU processes). Measured with 821 tests of a Leptos app on 32 threads, at parallelism 8 the browsers took
+4.9 GB on average and the run 1m 10s; at 16 they took 7.2 GB and the run 58s, as the CPU was saturated and pages loaded
+slower. Raise the parallelism only while runs get noticeably faster, and keep spares low.
+
+What a test loads matters more than the browser: an app built for release loads and hydrates much faster and needs
+less memory in every test (with Leptos: `leptos-browser-test`'s `BuildProfile::Release`).
+
 ## Timing and Progress
 
-Every test's timing is logged (`tracing`, `info` level) when it finishes: how long creating its session took and how
-long the test waited for it, its body, and the session teardown. At the end of each run, the runner hands a
+Every test's timing is logged (`tracing`, `info` level) when it finishes: how long creating (or resetting) its session
+took and how long the test waited for it, its body, and the session teardown. At the end of each run, the runner hands a
 `BrowserTestRunReport` to every `RunReportConsumer` added with `BrowserTestRunner::with_report_consumer`. It prints or logs
 nothing on its own. `StderrSummary`, `StdoutSummary`, and `TracingSummary` print a summary of the report. Any closure
 taking a `&BrowserTestRunReport` works as a consumer too:
 
 ```rust
-use browser_test::{BrowserTestRunner, StderrSummary};
+use browser_test::{BrowserTestRunner, Cancellation, StderrSummary};
 
-let runner = BrowserTestRunner::new().with_report_consumer(StderrSummary);
+let runner =
+    BrowserTestRunner::new(Cancellation::on_shutdown_signals()).with_report_consumer(StderrSummary);
 ```
 
 The summary looks like this:
@@ -299,7 +418,7 @@ Browser test run: 39 test(s), 39 passed, 0 failed, in 2m 10.4s
        40.05s  menu_tests (session 240ms, body 40.05s, quit 50ms)
   ...
   slowest steps (by total time):
-       52.30s  wait_for_no_selector: 18x, max 3.10s
+       52.30s  wait_for_no_selector: 18x (avg 2.91s), max 3.10s
   ...
 ```
 
@@ -319,12 +438,70 @@ Steps are logged at `debug` level with their duration, steps slower than 2 secon
 `BrowserTestRecord::steps` aggregates them per kind, and the summary lists the kinds that took the most time. Each test
 body also runs in a `browser_test` tracing span carrying the test name, so all logs of a test can be attributed to it.
 
-A watchdog warns when a test is still running after 30 seconds (and every 30 seconds after that), and when creating
-or quitting a session takes longer than 5 seconds. Such slowness often points at an overloaded machine or a test waiting
+A watchdog warns when a test is still running after 30 seconds (and every 30 seconds after that), and when creating,
+resetting or quitting a session takes longer than 5 seconds. Such slowness often points at an overloaded machine or a test waiting
 for something that never happens. Configure or disable the thresholds with `BrowserTestRunner::with_progress_warnings`.
 
-The runner converts test panics into `BrowserTestError::Panic` reports and still shuts down chromedriver after errors
-or panics.
+The runner still shuts down chromedriver after errors or panics.
+
+## Failure Reports
+
+A failing test's report says what went wrong, at which line of your test code, and what the test did before. Without
+anything in your test code:
+
+```text
+ ● Browser test 'checkbox' failed.
+ ├ Last steps (time since the test started):
+ │   +0ms      navigate /atoms/checkbox (355ms)
+ │   +364ms    find #value (4ms)
+ │   +744ms    wait_for_text "checked" (10.00s)
+ │
+ ● the text of <span id="value"> did not become "checked" within 10s; it is "false"
+ ╰ Test code:
+     tests/pages/element.rs:281  ElementExt::wait_for_text
+     tests/checkbox.rs:102       checkbox::selected_state
+```
+
+- **Where**: every error gets the frames of your test code that led to it ("Test code"), innermost first, ending at the
+  test's `run`. An error from a helper (a lookup, a wait in a page object) points at the test line that called it. A
+  panic (a failed `assert!`/`assertr` assertion, an `unwrap`, an index out of bounds) shows where it panicked and its
+  frames. Test code is the code of the package whose tests run (`CARGO_MANIFEST_DIR`); dependencies are left out.
+- **When**: the test's last steps ("Last steps"), with how far into the test each started and how long it took. Steps
+  are the futures you mark with `StepExt::step` (see above).
+- **What**: the error and the context added on its way up. `thirtyfour` errors show their `WebDriver` message, without
+  chromedriver's native stack trace; messages print without quotes and escapes.
+
+The runner installs the [`rootcause`](https://docs.rs/rootcause) hooks behind this with its first run. If your
+application installs `rootcause` hooks of its own, add browser-test's to them and disable the runner's installation:
+
+```rust,no_run
+use browser_test::{BrowserTestRunner, Cancellation, failure_report};
+use rootcause::hooks::Hooks;
+
+failure_report::hooks(Hooks::new())
+    // ... your own hooks ...
+    .install()
+    .expect("hooks are installed once");
+let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals())
+    .with_failure_report_hooks(false);
+```
+
+### Getting the most out of failure reports
+
+- **Return errors with `?`.** Write test code and helpers as `async fn ... -> Result<_, Report>` and propagate with
+  `?`: an error converted by `?` is located at that line, and nothing is lost on the way up. Assertions may panic
+  (`assert!`, `assertr`); the runner locates panics as well.
+- **Say what was expected and what was seen.** A helper that waits or checks should fail with a message naming the
+  element, the expected value and the value it ended with (`rootcause::bail!("... did not become {expected:?}; it is
+  {actual:?}")`). The location is added for you; the values are not.
+- **Mark steps.** Wrap navigations, lookups and waits (best inside your page-object helpers) and, if you like, each case
+  of a test in `.step(kind).detail(..)`. They make up "Last steps", so a report shows what the test was doing and for how
+  long, e.g. a lookup that waited 10 seconds.
+- **Add context where a loop or a shared helper hides what was going on**:
+  `.context_with(|| format!("after pressing {key:?}"))` adds a line above the error, `.attach(..)` adds any value that
+  implements `Display` (a URL, a form's values) below it.
+- **Keep debug info.** Test frames need line tables, which the default `dev` and `test` profiles have. With
+  `debug = false` in your profile, keep at least `debug = "line-tables-only"`.
 
 ## Examples
 

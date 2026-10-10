@@ -58,8 +58,9 @@ pub struct BrowserTestRecord {
     /// The name of the innermost named group containing the test (see [`GroupRecord::name`]).
     pub group: Option<String>,
 
-    /// How long creating the test's session took, and how long the test waited for it. `None` if
-    /// no session was requested (e.g. one of the test's metadata methods panicked).
+    /// How the test's session was prepared (created, or reset after an earlier test), and how long
+    /// the test waited for it. `None` if no session was requested (e.g. one of the test's metadata
+    /// methods panicked).
     pub session: Option<SessionTiming>,
 
     /// Time spent in [`crate::BrowserTest::run`]. `None` if the body never ran (e.g. the session
@@ -67,7 +68,9 @@ pub struct BrowserTestRecord {
     pub body: Option<Duration>,
 
     /// Time spent quitting the session after the test. Quitting runs in the background, while the
-    /// next test already runs. `None` if the session could not be created or set up.
+    /// next test already runs. `None` if the session was kept to run another test (see
+    /// [`crate::SessionReuse`]; resetting it counts towards that test's
+    /// [`SessionPreparation::Reset`]), or if it could not be created or set up.
     pub teardown: Option<Duration>,
 
     /// Time spent in [`crate::Step`]s of this test, per step kind.
@@ -100,18 +103,39 @@ pub enum TestOutcome {
 
 /// Timing of the `WebDriver` session of one test.
 ///
-/// The runner creates sessions ahead of the tests that use them (see
-/// [`crate::BrowserTestRunner::with_spare_sessions`]), so creation usually overlaps earlier tests
-/// and only [`Self::wait`] delays the test itself.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+/// The runner prepares sessions ahead of the tests that use them (see
+/// [`crate::BrowserTestRunner::with_spare_sessions`]), so preparing them usually overlaps earlier
+/// tests and only [`Self::wait`] delays the test itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct SessionTiming {
-    /// Time to create the session and apply its timeouts (successful or not).
-    pub creation: Duration,
+    /// How the session was prepared for the test, and how long that took.
+    pub preparation: SessionPreparation,
 
     /// Time the test waited for its session once it was its turn to run. Zero if the session was
     /// ready in time.
     pub wait: Duration,
+}
+
+/// How the session of a test was prepared, and how long that took (successful or not).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SessionPreparation {
+    /// The session was created: a new browser started, and its page brought to the front.
+    Created(Duration),
+
+    /// The session ran earlier tests and was reset after the last of them (see
+    /// [`crate::SessionReuse`]).
+    Reset(Duration),
+}
+
+impl SessionPreparation {
+    /// How long preparing the session took.
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        match self {
+            Self::Created(duration) | Self::Reset(duration) => duration,
+        }
+    }
 }
 
 /// Aggregated timing of one kind of [`crate::Step`].
@@ -149,20 +173,44 @@ impl BrowserTestRunReport {
     /// Number of sessions created for the tests of this report.
     #[must_use]
     pub fn sessions_created(&self) -> usize {
-        self.tests
-            .iter()
-            .filter(|test| test.session.is_some())
-            .count()
+        self.created().count()
     }
 
     /// Total time spent creating sessions. Mostly overlaps earlier tests.
     #[must_use]
     pub fn session_creation_time(&self) -> Duration {
+        self.created().sum()
+    }
+
+    /// Number of tests that ran in the reset session of an earlier test (see
+    /// [`crate::SessionReuse`]).
+    #[must_use]
+    pub fn session_resets(&self) -> usize {
+        self.resets().count()
+    }
+
+    /// Total time spent resetting sessions for further tests. Mostly overlaps earlier tests.
+    #[must_use]
+    pub fn session_reset_time(&self) -> Duration {
+        self.resets().sum()
+    }
+
+    fn created(&self) -> impl Iterator<Item = Duration> {
         self.tests
             .iter()
-            .filter_map(|test| test.session)
-            .map(|session| session.creation)
-            .sum()
+            .filter_map(|test| match test.session?.preparation {
+                SessionPreparation::Created(duration) => Some(duration),
+                SessionPreparation::Reset(_) => None,
+            })
+    }
+
+    fn resets(&self) -> impl Iterator<Item = Duration> {
+        self.tests
+            .iter()
+            .filter_map(|test| match test.session?.preparation {
+                SessionPreparation::Reset(duration) => Some(duration),
+                SessionPreparation::Created(_) => None,
+            })
     }
 
     /// Total time tests waited for their sessions, i.e. the part of session creation that did not
@@ -235,11 +283,24 @@ impl Display for BrowserTestRunReport {
             FormatDuration(self.webdriver_shutdown),
         )?;
         let created = self.sessions_created();
-        writeln!(
+        write!(
             f,
-            "  sessions:       {created} created in {}{}, tests waited {} for them, quit in {}",
+            "  sessions:       {created} created in {}{}",
             FormatDuration(self.session_creation_time()),
             Average(self.session_creation_time(), created),
+        )?;
+        let resets = self.session_resets();
+        if resets > 0 {
+            write!(
+                f,
+                ", reset {resets}x in {}{}",
+                FormatDuration(self.session_reset_time()),
+                Average(self.session_reset_time(), resets),
+            )?;
+        }
+        writeln!(
+            f,
+            ", tests waited {} for them, quit in {}",
             FormatDuration(self.session_wait_time()),
             FormatDuration(self.session_teardown_time()),
         )?;
@@ -275,9 +336,10 @@ impl Display for BrowserTestRunReport {
             for (kind, stats) in steps.into_iter().take(SUMMARY_LIST_LEN) {
                 writeln!(
                     f,
-                    "    {:>9}  {kind}: {}x, max {}",
+                    "    {:>9}  {kind}: {}x{}, max {}",
                     FormatDuration(stats.total),
                     stats.count,
+                    Average(stats.total, stats.count as usize),
                     FormatDuration(stats.max),
                 )?;
             }
@@ -304,12 +366,20 @@ impl Display for Describe<'_> {
     }
 }
 
-/// How a test's time splits up, e.g. `session 812ms, waited 120ms, body 3.20s, quit 40ms`.
+/// How a test's time splits up, e.g. `session 812ms, waited 120ms, body 3.20s, quit 40ms`, or
+/// `reset 60ms, body 1.10s` in a reused session.
 pub(crate) fn timing_breakdown(test: &BrowserTestRecord) -> String {
     let mut out = String::new();
     match test.session {
         Some(session) => {
-            let _ = write!(out, "session {}", FormatDuration(session.creation));
+            let _ = match session.preparation {
+                SessionPreparation::Created(duration) => {
+                    write!(out, "session {}", FormatDuration(duration))
+                }
+                SessionPreparation::Reset(duration) => {
+                    write!(out, "reset {}", FormatDuration(duration))
+                }
+            };
             if !session.wait.is_zero() {
                 let _ = write!(out, ", waited {}", FormatDuration(session.wait));
             }
@@ -376,7 +446,14 @@ mod tests {
 
     fn session(creation_ms: u64, wait_ms: u64) -> SessionTiming {
         SessionTiming {
-            creation: Duration::from_millis(creation_ms),
+            preparation: SessionPreparation::Created(Duration::from_millis(creation_ms)),
+            wait: Duration::from_millis(wait_ms),
+        }
+    }
+
+    fn reset(reset_ms: u64, wait_ms: u64) -> SessionTiming {
+        SessionTiming {
+            preparation: SessionPreparation::Reset(Duration::from_millis(reset_ms)),
             wait: Duration::from_millis(wait_ms),
         }
     }
@@ -417,6 +494,31 @@ mod tests {
             .map(|test| test.name.as_str())
             .collect();
         assert_that!(slowest).is_equal_to(vec!["slow", "waiting", "fast", "broken"]);
+    }
+
+    #[test]
+    fn report_tells_created_from_reset_sessions() {
+        let mut quit = record(2, "quit", reset(40, 0), 200);
+        quit.teardown = Some(Duration::from_millis(30));
+        let report = BrowserTestRunReport {
+            total: Duration::from_secs(1),
+            tests: vec![
+                record(0, "first", session(800, 0), 100),
+                record(1, "second", reset(60, 10), 300),
+                quit,
+            ],
+            ..BrowserTestRunReport::default()
+        };
+
+        assert_that!(report.sessions_created()).is_equal_to(1);
+        assert_that!(report.session_creation_time()).is_equal_to(Duration::from_millis(800));
+        assert_that!(report.session_resets()).is_equal_to(2);
+        assert_that!(report.session_reset_time()).is_equal_to(Duration::from_millis(100));
+        let summary = report.to_string();
+        assert_that!(summary.as_str()).contains(
+            "1 created in 800ms (avg 800ms), reset 2x in 100ms (avg 50ms), tests waited 10ms for them, quit in 30ms",
+        );
+        assert_that!(summary.as_str()).contains("second (reset 60ms, waited 10ms, body 300ms)");
     }
 
     #[test]

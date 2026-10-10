@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
 
+use crate::failure_report::{PanicDetails, RecentSteps, StepEvent, StepLog};
 use crate::report::{FormatDuration, StepStats};
 
 /// Default for [`crate::ProgressWarnings`]'s slow step threshold, also used for steps outside of
@@ -23,6 +24,12 @@ tokio::task_local! {
 pub(crate) struct StepRecorder {
     slow_step: Option<Duration>,
     steps: Mutex<BTreeMap<String, StepStats>>,
+    /// When the test started, for [`StepEvent::started`].
+    started: Instant,
+    /// The last steps, for failure reports.
+    log: StepLog,
+    /// Where the test panicked, recorded by the panic hook.
+    panic: Mutex<Option<PanicDetails>>,
 }
 
 impl StepRecorder {
@@ -30,7 +37,23 @@ impl StepRecorder {
         Arc::new(Self {
             slow_step,
             steps: Mutex::new(BTreeMap::new()),
+            started: Instant::now(),
+            log: StepLog::default(),
+            panic: Mutex::new(None),
         })
+    }
+
+    /// The test's last steps.
+    pub(crate) fn recent_steps(&self) -> Option<RecentSteps> {
+        self.log.recent()
+    }
+
+    /// Where the test panicked, if it did.
+    pub(crate) fn take_panic(&self) -> Option<PanicDetails> {
+        self.panic
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
     }
 
     /// Run `future` (a test body) so that [`Step`]s inside it record into this recorder.
@@ -128,13 +151,30 @@ impl<F: Future> Future for Step<F> {
         let this = self.get_mut();
         let start = *this.start.get_or_insert_with(Instant::now);
         let output = ready!(this.future.as_mut().poll(cx));
-        record_step(this.kind, this.detail.as_deref(), start.elapsed());
+        record_step(this.kind, this.detail.as_deref(), start, start.elapsed());
         Poll::Ready(output)
     }
 }
 
 /// Log a finished step and add it to the current test's record, if any.
-fn record_step(kind: &str, detail: Option<&str>, duration: Duration) {
+/// Whether this code runs in a test's body.
+pub(crate) fn in_test() -> bool {
+    CURRENT_TEST.try_with(|_| ()).is_ok()
+}
+
+/// Record where the running test panicked (called by the panic hook; outside a test, it does
+/// nothing). The first panic of a test counts.
+pub(crate) fn record_panic(details: PanicDetails) {
+    let _ = CURRENT_TEST.try_with(|recorder| {
+        recorder
+            .panic
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_or_insert(details);
+    });
+}
+
+fn record_step(kind: &'static str, detail: Option<&str>, start: Instant, duration: Duration) {
     let recorder = CURRENT_TEST.try_with(Arc::clone).ok();
     let slow_step = match &recorder {
         Some(recorder) => recorder.slow_step,
@@ -142,6 +182,12 @@ fn record_step(kind: &str, detail: Option<&str>, duration: Duration) {
     };
     if let Some(recorder) = &recorder {
         recorder.record(kind, duration);
+        recorder.log.push(StepEvent {
+            kind,
+            detail: detail.map(str::to_owned),
+            started: start.saturating_duration_since(recorder.started),
+            duration,
+        });
     }
     let detail = detail
         .map(|detail| format!(" {detail}"))

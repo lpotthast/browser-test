@@ -1,21 +1,24 @@
 use std::{fmt, path::PathBuf, sync::Arc, time::Instant};
 
 use chrome_for_testing_manager::{
-    Channel, ChromeBinary, ChromeForTesting, ChromeForTestingConfig, VersionRequest,
+    CancellationToken, Channel, ChromeBinary, ChromeForTesting, ChromeForTestingConfig,
+    VersionRequest,
 };
 use rootcause::Report;
 use rootcause::prelude::ResultExt;
 use thirtyfour::{ChromeCapabilities, error::WebDriverResult};
 
+use crate::cancellation::cancelled_result;
 use crate::driver_output::{DriverOutputCapture, attach_browser_driver_output_to_result};
 use crate::env::{InvalidEnvVar, env_flag};
 use crate::execution::{ChromeCapabilitiesSetup, Execution, ExecutionConfig, execute_tests};
 use crate::pause::{self, PauseDecision};
+use crate::profile::{ChromeProfilesDir, RunProfiles};
 use crate::report::BrowserTestRunReport;
 use crate::report_consumer::RunReportConsumer;
 use crate::{
-    BrowserTestError, BrowserTests, DriverOutput, ElementQueryWait, FailurePolicy, Pause,
-    ProgressWarnings, Timeouts,
+    BrowserTestError, BrowserTests, Cancellation, DriverOutput, ElementQueryWait, FailurePolicy,
+    Pause, ProgressWarnings, SessionReuse, Timeouts,
 };
 
 pub(crate) const DEFAULT_VISIBLE_ENV: &str = "BROWSER_TEST_VISIBLE";
@@ -80,30 +83,14 @@ pub struct BrowserTestRunner {
     chrome_capabilities_setups: Vec<Arc<ChromeCapabilitiesSetup>>,
     driver_output: DriverOutput,
     chrome_for_testing_cache_dir: Option<PathBuf>,
+    chrome_profiles_dir: ChromeProfilesDir,
+    failure_report_hooks: bool,
     headless_chrome_binary: ChromeBinary,
     spare_sessions: Option<usize>,
+    session_reuse: SessionReuse,
     progress_warnings: ProgressWarnings,
     report_consumers: Vec<Arc<dyn RunReportConsumer>>,
-}
-
-impl Default for BrowserTestRunner {
-    fn default() -> Self {
-        Self {
-            channel: Channel::Stable,
-            visibility: Visibility::Headless,
-            pause: Pause::disabled(),
-            failure_policy: FailurePolicy::FailFast,
-            timeouts: None,
-            element_query_wait: None,
-            chrome_capabilities_setups: Vec::new(),
-            driver_output: DriverOutput::disabled(),
-            chrome_for_testing_cache_dir: None,
-            headless_chrome_binary: ChromeBinary::Chrome,
-            spare_sessions: None,
-            progress_warnings: ProgressWarnings::default(),
-            report_consumers: Vec::new(),
-        }
-    }
+    cancellation: Cancellation,
 }
 
 impl fmt::Debug for BrowserTestRunner {
@@ -124,19 +111,43 @@ impl fmt::Debug for BrowserTestRunner {
                 "chrome_for_testing_cache_dir",
                 &self.chrome_for_testing_cache_dir,
             )
+            .field("chrome_profiles_dir", &self.chrome_profiles_dir)
+            .field("failure_report_hooks", &self.failure_report_hooks)
             .field("headless_chrome_binary", &self.headless_chrome_binary)
             .field("spare_sessions", &self.spare_sessions)
+            .field("session_reuse", &self.session_reuse)
             .field("progress_warnings", &self.progress_warnings)
             .field("report_consumer_count", &self.report_consumers.len())
+            .field("cancellation", &self.cancellation)
             .finish()
     }
 }
 
 impl BrowserTestRunner {
     /// Create a runner using stable Chrome in headless mode.
+    ///
+    /// `cancellation` decides how runs are cancelled, e.g. on Ctrl-C. See [`Cancellation`].
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(cancellation: Cancellation) -> Self {
+        Self {
+            channel: Channel::Stable,
+            visibility: Visibility::Headless,
+            pause: Pause::disabled(),
+            failure_policy: FailurePolicy::FailFast,
+            timeouts: None,
+            element_query_wait: None,
+            chrome_capabilities_setups: Vec::new(),
+            driver_output: DriverOutput::disabled(),
+            chrome_for_testing_cache_dir: None,
+            chrome_profiles_dir: ChromeProfilesDir::in_temp_dir(),
+            failure_report_hooks: true,
+            headless_chrome_binary: ChromeBinary::Chrome,
+            spare_sessions: None,
+            session_reuse: SessionReuse::disabled(),
+            progress_warnings: ProgressWarnings::default(),
+            report_consumers: Vec::new(),
+            cancellation,
+        }
     }
 
     /// Select the Chrome release channel. Defaults to [`Channel::Stable`].
@@ -169,6 +180,9 @@ impl BrowserTestRunner {
     /// The runner applies its own visible/headless configuration first, then applies custom setup
     /// functions in the order they were added. The setup function must be thread-safe because
     /// parallel browser tests can create multiple sessions at the same time.
+    ///
+    /// Setups must not set `--user-data-dir`, or sessions fail to start. The runner gives every
+    /// session a profile of its own. Choose where with [`Self::with_chrome_profiles_dir`].
     #[must_use]
     pub fn with_chrome_capabilities(
         mut self,
@@ -225,6 +239,25 @@ impl BrowserTestRunner {
         self
     }
 
+    /// Set where runs keep the Chrome profiles of their sessions. Defaults to
+    /// [`ChromeProfilesDir::in_temp_dir`]. See [`ChromeProfilesDir`] for how profiles are managed.
+    #[must_use]
+    pub fn with_chrome_profiles_dir(mut self, profiles_dir: ChromeProfilesDir) -> Self {
+        self.chrome_profiles_dir = profiles_dir;
+        self
+    }
+
+    /// Whether the first run installs the [`rootcause`] hooks behind failure reports
+    /// ([`failure_report::hooks`](crate::failure_report::hooks): the test code's frames on every
+    /// error, readable `WebDriver` errors). Defaults to `true`. Disable it when the application
+    /// installs hooks of its own, and add browser-test's to them with
+    /// [`failure_report::hooks`](crate::failure_report::hooks). Panics are located either way.
+    #[must_use]
+    pub const fn with_failure_report_hooks(mut self, install: bool) -> Self {
+        self.failure_report_hooks = install;
+        self
+    }
+
     /// Select the browser binary used for headless runs. Defaults to [`ChromeBinary::Chrome`].
     ///
     /// Visible runs always use regular Chrome because Chrome Headless Shell cannot show an
@@ -242,10 +275,16 @@ impl BrowserTestRunner {
     /// session ready when its turn comes. Sessions are quit in the background after their test.
     ///
     /// Defaults to the number of tests that can run at the same time (see
-    /// [`BrowserTests::parallel`]): one spare session per running test. Up to
-    /// `parallel tests + spare sessions` browsers are open at once, so lower this on machines with
-    /// little memory. `0` creates each session only when its test is about to run. In visible
-    /// runs, the spare sessions' browser windows open ahead of their tests.
+    /// [`BrowserTests::parallel`]): one spare session per running test. With
+    /// [`Self::with_session_reuse`], sessions return to the pool reset after their test, which is
+    /// much faster than starting a browser: the default is then one spare session per eight tests
+    /// that can run at the same time (rounded up). Up to `parallel tests + spare sessions`
+    /// browsers are open at once, so lower this on machines with little memory. `0` creates or
+    /// resets each session only when its test is about to run.
+    ///
+    /// Visible runs ([`Visibility::Visible`]) default to `0`: a spare session's browser window
+    /// would open on top of the window of the running test. Set spare sessions explicitly to
+    /// create them in visible runs as well.
     ///
     /// Spare sessions use the runner's element query wait. A test overriding
     /// [`crate::BrowserTest::element_query_wait`] with a different value gets a session created
@@ -253,6 +292,19 @@ impl BrowserTestRunner {
     #[must_use]
     pub const fn with_spare_sessions(mut self, spare_sessions: usize) -> Self {
         self.spare_sessions = Some(spare_sessions);
+        self
+    }
+
+    /// Configure whether sessions are reset after their test and run further tests, instead of
+    /// every test running in a fresh session. Defaults to [`SessionReuse::disabled`].
+    ///
+    /// Reuse makes a run create about as many sessions as tests run at the same time, plus spares,
+    /// however many tests it has: worthwhile when a run has many short tests. See [`SessionReuse`]
+    /// for what the reset restores, and [`crate::BrowserTest::fresh_session`] for tests that need a
+    /// session of their own.
+    #[must_use]
+    pub const fn with_session_reuse(mut self, session_reuse: SessionReuse) -> Self {
+        self.session_reuse = session_reuse;
         self
     }
 
@@ -289,6 +341,8 @@ impl BrowserTestRunner {
     /// [`Self::with_failure_policy`] to run every test and return all failures as child reports on
     /// one aggregate report.
     ///
+    /// A run without tests returns `Ok(())` right away, even if cancelled.
+    ///
     /// Logs each test's timing when it finishes. If tests ran, the run's report is handed to the
     /// consumers added with [`Self::with_report_consumer`].
     ///
@@ -301,8 +355,10 @@ impl BrowserTestRunner {
     ///
     /// # Errors
     ///
-    /// Returns an error if Chrome for Testing cannot be launched or shut down, if a session cannot
-    /// be created, or if any test fails.
+    /// Returns an error if the shutdown signals cannot be listened for (see
+    /// [`Cancellation::on_shutdown_signals`]), if the directory for Chrome profiles cannot be
+    /// created, if Chrome for Testing cannot be launched or shut down, if a session cannot be
+    /// created, if any test fails, or [`BrowserTestError::Cancelled`] if the run is cancelled.
     pub async fn run<Context, TestError>(
         &self,
         context: &Context,
@@ -312,9 +368,23 @@ impl BrowserTestRunner {
         Context: Sync + ?Sized,
         TestError: ?Sized + 'static,
     {
+        // Before listening for shutdown signals, as an empty run has nothing to clean up.
+        if tests.is_empty() {
+            tracing::info!("Skipping browser test run because no tests were provided.");
+            return Ok(());
+        }
+        crate::failure_report::install(self.failure_report_hooks);
+        let cancellation = self.cancellation.run_token()?;
         let start = Instant::now();
         let mut report = BrowserTestRunReport::default();
-        let result = self.run_reporting(context, tests, &mut report).await;
+        let result = self
+            .run_reporting(context, tests, &cancellation, &mut report)
+            .await;
+        let result = if cancellation.is_cancelled() {
+            cancelled_result(result)
+        } else {
+            result
+        };
         report.total = start.elapsed();
         if !report.tests.is_empty() {
             for consumer in &self.report_consumers {
@@ -328,22 +398,25 @@ impl BrowserTestRunner {
         &self,
         context: &Context,
         tests: BrowserTests<Context, TestError>,
+        cancellation: &CancellationToken,
         report: &mut BrowserTestRunReport,
     ) -> Result<(), Report<BrowserTestError>>
     where
         Context: Sync + ?Sized,
         TestError: ?Sized + 'static,
     {
-        if tests.is_empty() {
-            tracing::info!("Skipping browser test run because no tests were provided.");
-            return Ok(());
-        }
-
-        if pause::pause_if_requested(&self.pause).await? == PauseDecision::Abort {
+        let decision = tokio::select! {
+            biased;
+            // `run` reports the cancellation.
+            () = cancellation.cancelled() => return Ok(()),
+            decision = pause::pause_if_requested(&self.pause) => decision?,
+        };
+        if decision == PauseDecision::Abort {
             tracing::info!("Browser test run aborted at manual pause.");
             return Ok(());
         }
 
+        let profiles = RunProfiles::create(&self.chrome_profiles_dir).await?;
         tracing::info!("Launching Chrome for Testing...");
         let startup_start = Instant::now();
         // A launch failure carries the driver's recent output itself.
@@ -352,6 +425,7 @@ impl BrowserTestRunner {
                 .version(VersionRequest::LatestIn(self.channel.clone()))
                 .chrome_binary(self.chrome_binary_for_run())
                 .cache_dir_opt(self.chrome_for_testing_cache_dir.clone())
+                .cancellation(cancellation.clone())
                 .build(),
         )
         .await
@@ -362,7 +436,9 @@ impl BrowserTestRunner {
             .as_ref()
             .map(|capture| capture.follow(&chrome));
 
-        let execution = self.run_tests(&chrome, context, tests).await;
+        let execution = self
+            .run_tests(&chrome, &profiles, cancellation, context, tests)
+            .await;
         report.tests = execution.records;
         report.groups = execution.groups;
         let test_result = execution.result;
@@ -374,6 +450,8 @@ impl BrowserTestRunner {
             .map(|_exit_status| ())
             .context(BrowserTestError::ShutDownChromeForTesting);
         report.webdriver_shutdown = shutdown_start.elapsed();
+        // Only now, as Chrome for Testing shut down, no browser uses the profiles anymore.
+        profiles.remove().await;
         if let Some(output_follower) = output_follower {
             output_follower.finish().await;
         }
@@ -393,9 +471,19 @@ impl BrowserTestRunner {
         }
     }
 
+    /// Spare sessions to keep ready. `None`: the execution's default.
+    fn spare_sessions_for_run(&self) -> Option<usize> {
+        match self.spare_sessions {
+            None if self.visibility.is_visible() => Some(0),
+            spare_sessions => spare_sessions,
+        }
+    }
+
     async fn run_tests<Context, TestError>(
         &self,
         chrome: &ChromeForTesting,
+        profiles: &RunProfiles,
+        cancellation: &CancellationToken,
         context: &Context,
         tests: BrowserTests<Context, TestError>,
     ) -> Execution
@@ -409,9 +497,12 @@ impl BrowserTestRunner {
             timeouts: self.timeouts.as_ref(),
             element_query_wait: self.element_query_wait.as_ref(),
             chrome_capabilities_setups: &self.chrome_capabilities_setups,
+            profiles,
+            cancellation,
             failure_policy: self.failure_policy,
             progress_warnings: self.progress_warnings,
-            spare_sessions: self.spare_sessions,
+            spare_sessions: self.spare_sessions_for_run(),
+            session_reuse: self.session_reuse,
         };
         execute_tests(&config, context, tests).await
     }
@@ -453,12 +544,13 @@ mod tests {
 
     #[test]
     fn runner_defaults_to_sequential_fail_fast_headless_execution() {
-        let runner = BrowserTestRunner::new();
+        let runner = BrowserTestRunner::new(Cancellation::disabled());
 
         assert_that!(runner.failure_policy).is_equal_to(FailurePolicy::FailFast);
         assert_that!(runner.visibility).is_equal_to(Visibility::Headless);
         assert_that!(runner.pause.is_enabled()).is_false();
         assert_that!(runner.driver_output_capture_for_run().is_none()).is_true();
+        assert_that!(runner.chrome_profiles_dir).is_equal_to(ChromeProfilesDir::in_temp_dir());
     }
 
     #[test]
@@ -469,14 +561,15 @@ mod tests {
         let wait = ElementQueryWait::new(Duration::from_secs(10), Duration::from_millis(500))
             .expect("non-zero interval is valid");
 
-        let runner = BrowserTestRunner::new()
+        let runner = BrowserTestRunner::new(Cancellation::disabled())
             .with_failure_policy(FailurePolicy::RunAll)
             .with_visibility(Visibility::Visible)
             .with_pause(Pause::enabled())
             .with_timeouts(timeouts)
             .with_element_query_wait(wait)
             .with_chrome_capabilities(|caps| caps.add_arg("--no-sandbox"))
-            .with_chrome_for_testing_cache_dir("/tmp/browser-test-cft-cache");
+            .with_chrome_for_testing_cache_dir("/tmp/browser-test-cft-cache")
+            .with_chrome_profiles_dir(ChromeProfilesDir::new("target/profiles"));
 
         assert_that!(runner.failure_policy).is_equal_to(FailurePolicy::RunAll);
         assert_that!(runner.visibility).is_equal_to(Visibility::Visible);
@@ -486,6 +579,8 @@ mod tests {
         assert_that!(runner.chrome_capabilities_setups.len()).is_equal_to(1);
         assert_that!(runner.chrome_for_testing_cache_dir)
             .is_equal_to(Some(PathBuf::from("/tmp/browser-test-cft-cache")));
+        assert_that!(runner.chrome_profiles_dir)
+            .is_equal_to(ChromeProfilesDir::new("target/profiles"));
     }
 
     #[test]
@@ -515,8 +610,8 @@ mod tests {
 
     #[test]
     fn headless_chrome_binary_is_used_only_in_headless_runs() {
-        let runner =
-            BrowserTestRunner::new().with_headless_chrome_binary(ChromeBinary::ChromeHeadlessShell);
+        let runner = BrowserTestRunner::new(Cancellation::disabled())
+            .with_headless_chrome_binary(ChromeBinary::ChromeHeadlessShell);
         assert_that!(runner.chrome_binary_for_run()).is_equal_to(ChromeBinary::ChromeHeadlessShell);
 
         let runner = runner.with_visibility(Visibility::Visible);
@@ -524,8 +619,21 @@ mod tests {
     }
 
     #[test]
+    fn visible_runs_default_to_no_spare_sessions() {
+        let runner = BrowserTestRunner::new(Cancellation::disabled());
+        assert_that!(runner.spare_sessions_for_run()).is_none();
+
+        let runner = runner.with_visibility(Visibility::Visible);
+        assert_that!(runner.spare_sessions_for_run()).is_equal_to(Some(0));
+
+        let runner = runner.with_spare_sessions(2);
+        assert_that!(runner.spare_sessions_for_run()).is_equal_to(Some(2));
+    }
+
+    #[test]
     fn driver_output_creates_a_fresh_capture_per_run() {
-        let runner = BrowserTestRunner::new().with_driver_output(DriverOutput::tail_lines(1));
+        let runner = BrowserTestRunner::new(Cancellation::disabled())
+            .with_driver_output(DriverOutput::tail_lines(1));
 
         let first = runner
             .driver_output_capture_for_run()
@@ -544,7 +652,8 @@ mod tests {
 
     #[test]
     fn driver_output_of_zero_lines_creates_no_capture() {
-        let runner = BrowserTestRunner::new().with_driver_output(DriverOutput::tail_lines(0));
+        let runner = BrowserTestRunner::new(Cancellation::disabled())
+            .with_driver_output(DriverOutput::tail_lines(0));
 
         assert_that!(runner.driver_output_capture_for_run().is_none()).is_true();
     }
@@ -553,10 +662,11 @@ mod tests {
     async fn report_consumers_are_not_called_for_runs_without_tests() {
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&calls);
-        let runner =
-            BrowserTestRunner::new().with_report_consumer(move |_report: &BrowserTestRunReport| {
+        let runner = BrowserTestRunner::new(Cancellation::disabled()).with_report_consumer(
+            move |_report: &BrowserTestRunReport| {
                 counter.fetch_add(1, Ordering::SeqCst);
-            });
+            },
+        );
 
         let result = runner.run(&(), BrowserTests::<()>::sequential()).await;
 

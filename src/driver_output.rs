@@ -1,20 +1,27 @@
-use std::collections::VecDeque;
-use std::fmt;
-use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{
+    collections::VecDeque,
+    fmt,
+    num::NonZeroUsize,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use chrome_for_testing_manager::{
     ChromeForTesting, DriverOutputLine, DriverOutputSource, DriverOutputSubscriptionError,
 };
-use rootcause::Report;
-use rootcause::handlers::{
-    AttachmentFormattingPlacement, AttachmentFormattingStyle, AttachmentHandler, FormattingFunction,
+use rootcause::{
+    Report,
+    handlers::{
+        AttachmentFormattingPlacement, AttachmentFormattingStyle, AttachmentHandler,
+        FormattingFunction,
+    },
+    report_attachment::ReportAttachment,
 };
-use rootcause::report_attachment::ReportAttachment;
 
-use crate::BrowserTestError;
-use crate::env::{InvalidEnvVar, env_flag, env_number};
+use crate::{
+    BrowserTestError,
+    env::{InvalidEnvVar, env_flag, env_number},
+};
 
 /// Default environment variable enabling browser driver output capture.
 pub(crate) const DEFAULT_BROWSER_DRIVER_OUTPUT_ENV: &str = "BROWSER_TEST_DRIVER_OUTPUT";
@@ -332,9 +339,10 @@ fn source_label(source: DriverOutputSource) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use assertr::prelude::*;
+
     use super::*;
     use crate::test_support::EnvVarGuard;
-    use assertr::prelude::*;
 
     #[test]
     fn tail_lines_of_zero_disables_capture() {

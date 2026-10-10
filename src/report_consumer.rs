@@ -15,9 +15,9 @@ use crate::BrowserTestRunReport;
 /// # Examples
 ///
 /// ```rust
-/// use browser_test::{BrowserTestRunReport, BrowserTestRunner, StderrSummary};
+/// use browser_test::{BrowserTestRunReport, BrowserTestRunner, Cancellation, StderrSummary};
 ///
-/// let runner = BrowserTestRunner::new()
+/// let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals())
 ///     .with_report_consumer(StderrSummary)
 ///     .with_report_consumer(|report: &BrowserTestRunReport| {
 ///         assert!(report.body_time() < std::time::Duration::from_secs(600));

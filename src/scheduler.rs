@@ -133,7 +133,9 @@ impl BrowserTestFailures {
             failure_collection.push(failure.into_cloneable());
         }
 
-        Err(failure_collection.context(BrowserTestError::RunTests { failed_tests }))
+        Err(crate::failure_report::without_own_location(
+            failure_collection.context(BrowserTestError::RunTests { failed_tests }),
+        ))
     }
 }
 

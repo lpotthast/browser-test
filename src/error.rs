@@ -32,6 +32,22 @@ pub enum BrowserTestError {
         failed_tests: usize,
     },
 
+    /// The directory holding the run's Chrome profiles could not be created.
+    #[error("Failed to create the directory for Chrome profiles.")]
+    CreateChromeProfiles,
+
+    /// The run's cancellation token was cancelled, so the run stopped early. Errors of the run, if
+    /// any, are child reports.
+    ///
+    /// See [`crate::Cancellation`].
+    #[error("The browser test run was cancelled.")]
+    Cancelled,
+
+    /// The shutdown signals requested with [`crate::Cancellation::on_shutdown_signals`] could not
+    /// be listened for.
+    #[error("Failed to listen for shutdown signals.")]
+    ListenForShutdownSignals,
+
     /// Chrome for Testing could not be shut down cleanly.
     #[error("Failed to shut down Chrome for Testing.")]
     ShutDownChromeForTesting,

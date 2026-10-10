@@ -61,8 +61,9 @@ impl ElementQueryWait {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assertr::prelude::*;
+
+    use super::*;
 
     #[test]
     fn new_accepts_non_zero_interval() {

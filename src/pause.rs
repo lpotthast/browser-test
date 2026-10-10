@@ -1,13 +1,12 @@
-use std::borrow::Cow;
-use std::fmt::Display;
-use std::io::ErrorKind;
+use std::{borrow::Cow, fmt::Display, io::ErrorKind};
 
-use rootcause::Report;
-use rootcause::prelude::ResultExt;
+use rootcause::{Report, prelude::ResultExt};
 use tokio::io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::BrowserTestError;
-use crate::env::{InvalidEnvVar, env_flag};
+use crate::{
+    BrowserTestError,
+    env::{InvalidEnvVar, env_flag},
+};
 
 pub(crate) const DEFAULT_PAUSE_ENV: &str = "BROWSER_TEST_PAUSE";
 
@@ -208,10 +207,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_support::EnvVarGuard;
     use assertr::prelude::*;
     use tokio::io::BufReader;
+
+    use super::*;
+    use crate::test_support::EnvVarGuard;
 
     mod pause_config {
         use super::*;

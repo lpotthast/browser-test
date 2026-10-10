@@ -2,7 +2,8 @@ use std::borrow::Cow;
 
 use browser_test::thirtyfour::WebDriver;
 use browser_test::{
-    BrowserTest, BrowserTestError, BrowserTestRunner, BrowserTests, Visibility, async_trait,
+    BrowserTest, BrowserTestError, BrowserTestRunner, BrowserTests, Cancellation, Visibility,
+    async_trait,
 };
 use rootcause::{Report, report};
 
@@ -39,7 +40,7 @@ async fn main() -> Result<(), Report<BrowserTestError>> {
         base_url: "https://www.wikipedia.org".into(),
     };
 
-    BrowserTestRunner::new()
+    BrowserTestRunner::new(Cancellation::on_shutdown_signals())
         .with_visibility(Visibility::Visible)
         .run(&context, BrowserTests::sequential().with(PageTitleTest))
         .await

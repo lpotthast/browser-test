@@ -40,6 +40,17 @@ where
         None
     }
 
+    /// Whether this test needs a session no other test ran in.
+    ///
+    /// Only matters with [`crate::SessionReuse::enabled`], where sessions are reset after their
+    /// test and run further tests. Return `true` for a test that needs a browser no test ran in,
+    /// e.g. one measuring a first page load, with empty caches: the pool gives it a fresh session,
+    /// creating one if none is ready. Afterwards its session returns to the pool like any other.
+    /// Defaults to `false`.
+    fn fresh_session(&self) -> bool {
+        false
+    }
+
     /// Execute the test body.
     async fn run(&self, driver: &WebDriver, context: &Context) -> Result<(), Report<TestError>>;
 }

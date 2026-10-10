@@ -1,16 +1,18 @@
 //! Executes a tree of browser tests.
 //!
 //! Groups run recursively: a group starts its entries in order, at most its parallelism at once.
-//! Every test runs in a fresh browser session taken from the [`SessionPool`], which keeps spare
+//! Every test runs in a browser session taken from the [`SessionPool`], which keeps spare
 //! sessions ready so that a starting test rarely waits for a browser to start. A session's
 //! lifetime is bound to `chrome-for-testing-manager`'s scoped session API, so each session is
 //! owned by a worker future that creates it, offers it to the pool, runs the test it is assigned,
-//! and quits it. Worker futures are driven by [`drive_workers`]. Everything crossing between them
-//! and the executor is plain data (test indices, channels), never a borrow of the run's state.
+//! and quits it. With [`SessionReuse`] enabled, a worker resets its session after the test and
+//! offers it to the pool again instead, as long as upcoming tests need sessions. Worker futures are
+//! driven by [`drive_workers`]. Everything crossing between them and the executor is plain data
+//! (test indices, channels), never a borrow of the run's state.
 
 use std::{
     any::Any,
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     future::Future,
     panic::AssertUnwindSafe,
     pin::{Pin, pin},
@@ -21,24 +23,27 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrome_for_testing_manager::{ChromeForTesting, Session};
+use chrome_for_testing_manager::{CancellationToken, ChromeForTesting, Session};
 use futures_util::{FutureExt as _, StreamExt as _, stream::FuturesUnordered};
 use rootcause::Report;
 use thirtyfour::{ChromeCapabilities, ChromiumLikeCapabilities, error::WebDriverResult};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::Instrument as _;
 
+use crate::failure_report::{PanicDetails, PanicLocation, RecentSteps, without_own_location};
+use crate::profile::RunProfiles;
 use crate::progress::{Activity, Phase, ProgressBoard};
 use crate::report::{
-    BrowserTestRecord, FormatDuration, GroupRecord, SessionTiming, StepStats, TestOutcome,
-    timing_breakdown,
+    BrowserTestRecord, FormatDuration, GroupRecord, SessionPreparation, SessionTiming, StepStats,
+    TestOutcome, timing_breakdown,
 };
 use crate::scheduler::BrowserTestFailures;
+use crate::session_reuse::{SessionBaseline, configure_reusable_session};
 use crate::step::StepRecorder;
 use crate::test_case::BrowserTestEntry;
 use crate::{
     BrowserTest, BrowserTestError, BrowserTests, ElementQueryWait, FailurePolicy, Parallelism,
-    ProgressWarnings, Timeouts,
+    ProgressWarnings, SessionReuse, Timeouts,
 };
 
 pub(crate) type ChromeCapabilitiesSetup =
@@ -51,10 +56,15 @@ pub(crate) struct ExecutionConfig<'a> {
     pub(crate) timeouts: Option<&'a Timeouts>,
     pub(crate) element_query_wait: Option<&'a ElementQueryWait>,
     pub(crate) chrome_capabilities_setups: &'a [Arc<ChromeCapabilitiesSetup>],
+    /// Where sessions get their profiles.
+    pub(crate) profiles: &'a RunProfiles,
+    /// Cancelled when the run is cancelled: no further tests start, and running ones are cancelled.
+    pub(crate) cancellation: &'a CancellationToken,
     pub(crate) failure_policy: FailurePolicy,
     pub(crate) progress_warnings: ProgressWarnings,
-    /// Spare sessions kept ready. `None`: one per test that can run at the same time.
+    /// Spare sessions kept ready. `None`: [`default_spare_sessions`].
     pub(crate) spare_sessions: Option<usize>,
+    pub(crate) session_reuse: SessionReuse,
 }
 
 /// What executing a test tree produced.
@@ -81,10 +91,19 @@ where
     let root = prepare_group(tests, None, &mut prepared, &mut next_group, config);
     let max_concurrency = root.max_concurrency();
     let default_wait = config.element_query_wait.copied();
-    let pooled_tests = prepared
-        .iter()
-        .filter(|test| matches!(test, QueuedTest::Ready(test) if test.element_query_wait == default_wait))
-        .count();
+    let pooled = |fresh: bool| {
+        prepared
+            .iter()
+            .filter(|test| {
+                matches!(test, QueuedTest::Ready(test)
+                    if test.uses_pool(default_wait) && test.fresh_session == fresh)
+            })
+            .count()
+    };
+    let upcoming = Upcoming {
+        any: pooled(false),
+        fresh: pooled(true),
+    };
     let (requests_tx, requests_rx) = mpsc::unbounded_channel();
     let env = Env {
         config,
@@ -96,8 +115,11 @@ where
         groups: Mutex::default(),
         board: ProgressBoard::default(),
         pool: SessionPool::new(
-            config.spare_sessions.unwrap_or(max_concurrency),
-            pooled_tests,
+            max_concurrency,
+            config
+                .spare_sessions
+                .unwrap_or_else(|| default_spare_sessions(max_concurrency, config.session_reuse)),
+            upcoming,
             default_wait,
             requests_tx,
         ),
@@ -138,6 +160,18 @@ where
     }
 }
 
+/// Spare sessions when the runner sets none: one per test that can run at the same time, as a
+/// new session starts a browser. Reused sessions only need resetting (about 0.1s), so then one per
+/// eight tests suffices to keep tests from waiting: measured with 821 tests at parallelism 8, one
+/// spare ran as fast as eight, with seven browsers less.
+fn default_spare_sessions(max_concurrency: usize, session_reuse: SessionReuse) -> usize {
+    if session_reuse.is_enabled() {
+        max_concurrency.div_ceil(8)
+    } else {
+        max_concurrency
+    }
+}
+
 /// A test whose metadata (name, session settings) was read successfully.
 struct PreparedTest<Context, TestError>
 where
@@ -149,7 +183,21 @@ where
     group: Option<String>,
     timeouts: Option<Timeouts>,
     element_query_wait: Option<ElementQueryWait>,
+    /// Whether the test needs a session no test ran in (see [`BrowserTest::fresh_session`]).
+    fresh_session: bool,
     test: Box<dyn BrowserTest<Context, TestError>>,
+}
+
+impl<Context, TestError> PreparedTest<Context, TestError>
+where
+    Context: Sync + ?Sized,
+    TestError: ?Sized,
+{
+    /// Whether the test takes its session from the pool, rather than getting one created with
+    /// its own settings.
+    fn uses_pool(&self, default_wait: Option<ElementQueryWait>) -> bool {
+        self.element_query_wait == default_wait
+    }
 }
 
 enum QueuedTest<Context, TestError>
@@ -267,15 +315,17 @@ where
         (
             resolve_webdriver_timeouts(test.as_ref(), config.timeouts),
             resolve_element_query_wait(test.as_ref(), config.element_query_wait),
+            test.fresh_session(),
         )
     }));
     match metadata {
-        Ok((timeouts, element_query_wait)) => QueuedTest::Ready(PreparedTest {
+        Ok((timeouts, element_query_wait, fresh_session)) => QueuedTest::Ready(PreparedTest {
             index,
             name,
             group,
             timeouts,
             element_query_wait,
+            fresh_session,
             test,
         }),
         Err(payload) => {
@@ -313,8 +363,13 @@ where
     Context: Sync + ?Sized,
     TestError: ?Sized,
 {
+    /// Whether further tests start: the run neither stopped on a failure nor was cancelled.
     fn keep_starting(&self) -> bool {
-        self.keep_starting.load(Ordering::SeqCst)
+        self.keep_starting.load(Ordering::SeqCst) && !self.is_cancelled()
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.config.cancellation.is_cancelled()
     }
 
     /// With [`FailurePolicy::FailFast`], start no further tests (after a failure).
@@ -353,6 +408,43 @@ where
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(record);
+    }
+
+    /// Record the finished test of `run`, whose session ended with `session_result` after
+    /// `teardown` (`None`: the session runs further tests).
+    fn finish_job(
+        &self,
+        mut run: JobRun,
+        session_result: Result<(), Report<chrome_for_testing_manager::ChromeForTestingError>>,
+        teardown: Option<Duration>,
+    ) {
+        let QueuedTest::Ready(test) = &self.tests[run.index] else {
+            unreachable!("only ready tests are assigned to sessions");
+        };
+        let (outcome, result) = test_outcome(&test.name, &mut run, session_result);
+        let record = BrowserTestRecord {
+            index: run.index,
+            name: test.name.clone(),
+            outcome,
+            group: test.group.clone(),
+            session: Some(SessionTiming {
+                preparation: run.preparation,
+                wait: run.wait,
+            }),
+            body: run.body,
+            teardown,
+            steps: run.steps,
+        };
+        self.finish(record, result);
+    }
+
+    /// Tell the test waiting for the session of `delivery` that it could not be created.
+    fn fail_creation(&self, delivery: Delivery, report: Report, creation_start: Instant) {
+        let failure = CreationFailure {
+            report,
+            preparation: SessionPreparation::Created(creation_start.elapsed()),
+        };
+        self.pool.deliver(delivery, Err(failure));
     }
 
     fn warn_if_slow_session(&self, what: &str, duration: Duration) {
@@ -415,15 +507,17 @@ async fn run_node<Context, TestError>(
     TestError: ?Sized + 'static,
 {
     match node {
-        // Tests not started because of fail-fast are not recorded.
-        Node::Test(index) if run_always || env.keep_starting() => run_test(env, *index).await,
+        // Tests not started because of fail-fast or a cancellation are not recorded.
+        Node::Test(index) if env.keep_starting() || (run_always && !env.is_cancelled()) => {
+            run_test(env, *index).await;
+        }
         Node::Test(_) => {}
         Node::Group(group) => run_group(env, group, run_always).await,
     }
 }
 
-/// Run the test at `index` in a fresh session and return once its body finished. Its session
-/// quits, and its record is completed, in the background.
+/// Run the test at `index` in a session of the pool (or one created for it) and return once its
+/// body finished. Its session quits or is reset, and its record is completed, in the background.
 async fn run_test<Context, TestError>(env: &Env<'_, Context, TestError>, index: usize)
 where
     Context: Sync + ?Sized,
@@ -457,8 +551,8 @@ where
     };
 
     let requested = Instant::now();
-    let ticket = if test.element_query_wait == env.pool.default_wait {
-        env.pool.take(env.keep_starting()).await
+    let ticket = if test.uses_pool(env.pool.default_wait) {
+        env.pool.take(test.fresh_session, env.keep_starting()).await
     } else {
         env.pool.dedicated(test.element_query_wait).await
     };
@@ -480,7 +574,7 @@ where
                 }
                 Err(_) => CreationFailure {
                     report: rootcause::report!("the browser session ended before the test started"),
-                    creation: ticket.creation,
+                    preparation: ticket.preparation,
                 },
             }
         }
@@ -493,7 +587,7 @@ where
         outcome: TestOutcome::Failed,
         group: test.group.clone(),
         session: Some(SessionTiming {
-            creation: failure.creation,
+            preparation: failure.preparation,
             wait,
         }),
         body: None,
@@ -511,21 +605,21 @@ struct Job {
     test: usize,
     /// How long the test waited for its session.
     wait: Duration,
-    /// Completed once the test body finished, before the session quits.
+    /// Completed once the test body finished, before the session quits or is reset.
     body_done: oneshot::Sender<()>,
 }
 
 /// A session ready to run a test.
 struct Ticket {
     job: oneshot::Sender<Job>,
-    /// How long creating the session took.
-    creation: Duration,
+    /// How the session was prepared: created, or reset after an earlier test.
+    preparation: SessionPreparation,
 }
 
-/// A session that could not be created.
+/// A session that could not be created, or ended before its test started.
 struct CreationFailure {
     report: Report,
-    creation: Duration,
+    preparation: SessionPreparation,
 }
 
 type TicketResult = Result<Ticket, CreationFailure>;
@@ -543,10 +637,15 @@ struct WorkerRequest {
     delivery: Delivery,
 }
 
-/// Keeps fresh sessions with the runner's default settings ready for starting tests.
+/// Keeps sessions with the runner's default settings ready for starting tests: fresh ones, and,
+/// with [`SessionReuse`], those of finished tests after resetting them. Creates sessions while
+/// starting tests need more than it has (counting spares), and takes back reset sessions only
+/// while upcoming tests need them, so that the others quit.
 struct SessionPool {
     state: Mutex<PoolState>,
     available: Notify,
+    /// How many tests can run at the same time.
+    max_concurrency: usize,
     /// Sessions to keep ready beyond those requested.
     spare: usize,
     default_wait: Option<ElementQueryWait>,
@@ -554,22 +653,83 @@ struct SessionPool {
 }
 
 struct PoolState {
-    /// Created sessions not yet taken by a test.
+    /// Sessions ready for a test, not yet taken.
     idle: VecDeque<TicketResult>,
     /// Sessions being created for the pool.
     creating: usize,
+    /// Sessions of finished tests being reset for the pool.
+    resetting: usize,
+    /// Pool sessions running a test.
+    running: usize,
     /// Tests waiting for a pool session.
-    waiting: usize,
+    waiting: Upcoming,
     /// Pool tests that have not requested a session yet.
-    upcoming: usize,
+    upcoming: Upcoming,
     next_session: usize,
     closed: bool,
 }
 
+/// A number of tests: those taking any session, and those needing a fresh one.
+#[derive(Debug, Clone, Copy, Default)]
+struct Upcoming {
+    any: usize,
+    fresh: usize,
+}
+
+impl Upcoming {
+    fn total(self) -> usize {
+        self.any + self.fresh
+    }
+
+    fn count(&mut self, fresh: bool) -> &mut usize {
+        if fresh {
+            &mut self.fresh
+        } else {
+            &mut self.any
+        }
+    }
+}
+
+impl PoolState {
+    /// Sessions ready or on their way to the pool.
+    fn supply(&self) -> usize {
+        self.idle.len() + self.creating + self.resetting
+    }
+
+    /// Fresh sessions ready or on their way to the pool.
+    fn fresh_supply(&self) -> usize {
+        self.idle.iter().filter(|ticket| is_fresh(ticket)).count() + self.creating
+    }
+
+    /// The idle session a test takes: a fresh one if it needs one, otherwise preferably a reset
+    /// one, which keeps the fresh ones for tests that need them.
+    fn take_idle(&mut self, fresh: bool) -> Option<TicketResult> {
+        let position = if fresh {
+            self.idle.iter().position(is_fresh)
+        } else {
+            self.idle
+                .iter()
+                .position(|ticket| !is_fresh(ticket))
+                .or_else(|| (!self.idle.is_empty()).then_some(0))
+        }?;
+        self.idle.remove(position)
+    }
+}
+
+/// Whether no test ran in the session of `ticket` yet. A session that could not be created counts
+/// as fresh: its failure goes to whichever test takes it.
+fn is_fresh(ticket: &TicketResult) -> bool {
+    match ticket {
+        Ok(ticket) => matches!(ticket.preparation, SessionPreparation::Created(_)),
+        Err(_) => true,
+    }
+}
+
 impl SessionPool {
     fn new(
+        max_concurrency: usize,
         spare: usize,
-        upcoming: usize,
+        upcoming: Upcoming,
         default_wait: Option<ElementQueryWait>,
         requests: mpsc::UnboundedSender<Option<WorkerRequest>>,
     ) -> Self {
@@ -577,12 +737,15 @@ impl SessionPool {
             state: Mutex::new(PoolState {
                 idle: VecDeque::new(),
                 creating: 0,
-                waiting: 0,
+                resetting: 0,
+                running: 0,
+                waiting: Upcoming::default(),
                 upcoming,
                 next_session: 0,
                 closed: false,
             }),
             available: Notify::new(),
+            max_concurrency,
             spare,
             default_wait,
             requests,
@@ -593,19 +756,22 @@ impl SessionPool {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Create sessions for waiting tests and, unless tests stopped starting, spares for upcoming
-    /// ones.
+    /// Create sessions for waiting tests (fresh ones for tests that need them) and, unless tests
+    /// stopped starting, spares for upcoming ones.
     fn replenish(&self, keep_starting: bool) {
         self.replenish_locked(&mut self.lock(), keep_starting);
     }
 
     fn replenish_locked(&self, state: &mut PoolState, keep_starting: bool) {
         let spares = if keep_starting {
-            self.spare.min(state.upcoming)
+            self.spare.min(state.upcoming.total())
         } else {
             0
         };
-        while !state.closed && state.idle.len() + state.creating < state.waiting + spares {
+        while !state.closed
+            && (state.supply() < state.waiting.total() + spares
+                || state.fresh_supply() < state.waiting.fresh)
+        {
             state.creating += 1;
             let session = state.next_session;
             state.next_session += 1;
@@ -617,12 +783,14 @@ impl SessionPool {
         }
     }
 
-    /// Take a session for a starting test, waiting until one is ready.
-    async fn take(&self, keep_starting: bool) -> TicketResult {
+    /// Take a session for a starting test, a `fresh` one if it needs one, waiting until one is
+    /// ready.
+    async fn take(&self, fresh: bool, keep_starting: bool) -> TicketResult {
         {
             let mut state = self.lock();
-            state.upcoming = state.upcoming.saturating_sub(1);
-            state.waiting += 1;
+            let upcoming = state.upcoming.count(fresh);
+            *upcoming = upcoming.saturating_sub(1);
+            *state.waiting.count(fresh) += 1;
             self.replenish_locked(&mut state, keep_starting);
         }
         loop {
@@ -630,8 +798,11 @@ impl SessionPool {
             available.as_mut().enable();
             {
                 let mut state = self.lock();
-                if let Some(ticket) = state.idle.pop_front() {
-                    state.waiting -= 1;
+                if let Some(ticket) = state.take_idle(fresh) {
+                    *state.waiting.count(fresh) -= 1;
+                    if ticket.is_ok() {
+                        state.running += 1;
+                    }
                     self.replenish_locked(&mut state, keep_starting);
                     return ticket;
                 }
@@ -658,7 +829,7 @@ impl SessionPool {
         ticket_rx.await.unwrap_or_else(|_| {
             Err(CreationFailure {
                 report: rootcause::report!("the browser session could not be created"),
-                creation: creation_start.elapsed(),
+                preparation: SessionPreparation::Created(creation_start.elapsed()),
             })
         })
     }
@@ -679,6 +850,54 @@ impl SessionPool {
                 let _ = ticket_tx.send(ticket);
             }
         }
+    }
+
+    /// The test of a pool session finished.
+    fn test_finished(&self) {
+        self.lock().running -= 1;
+    }
+
+    /// Whether the session of a finished test should be reset: while tests (not needing a fresh
+    /// session) are still to run, otherwise it quits. If so, it counts as a session on its way to
+    /// the pool until [`Self::deliver_reset`] or [`Self::reset_failed`]. Claimed before the next
+    /// test starts, so that the pool doesn't create a session for that test in the meantime.
+    fn claim_reset(&self, keep_starting: bool) -> bool {
+        let mut state = self.lock();
+        let wanted = keep_starting && !state.closed && state.waiting.any + state.upcoming.any > 0;
+        if wanted {
+            state.resetting += 1;
+        }
+        wanted
+    }
+
+    /// Offer a session reset after its test. The pool keeps it only while it has fewer sessions
+    /// (running a test, ready or on their way) than tests that can run at the same time and
+    /// spares need: otherwise it drops the ticket, and the session quits.
+    fn deliver_reset(&self, ticket: Ticket, keep_starting: bool) {
+        {
+            let mut state = self.lock();
+            state.resetting -= 1;
+            let spares = if keep_starting {
+                self.spare.min(state.upcoming.total())
+            } else {
+                0
+            };
+            let running_at_once = self
+                .max_concurrency
+                .min(state.running + state.waiting.total() + state.upcoming.total());
+            if state.closed || state.running + state.supply() >= running_at_once + spares {
+                return;
+            }
+            state.idle.push_back(Ok(ticket));
+        }
+        self.available.notify_waiters();
+    }
+
+    /// A claimed reset failed, so the session quits: create another one if tests need it.
+    fn reset_failed(&self, keep_starting: bool) {
+        let mut state = self.lock();
+        state.resetting -= 1;
+        self.replenish_locked(&mut state, keep_starting);
     }
 
     /// Create no further sessions and let idle ones quit.
@@ -719,16 +938,23 @@ async fn drive_workers<Context, TestError>(
 /// What happened while a session ran its test.
 struct JobRun {
     index: usize,
-    creation: Duration,
+    preparation: SessionPreparation,
     wait: Duration,
     body: Option<Duration>,
     steps: BTreeMap<String, StepStats>,
+    /// The error the test returned.
+    test_error: Option<Report>,
     /// Set if the test body panicked.
     panic_message: Option<String>,
+    /// Where the test panicked, if the panic hook saw it.
+    panic: Option<PanicDetails>,
+    /// The test's last steps, for its failure report.
+    recent_steps: Option<RecentSteps>,
     quit_start: Option<Instant>,
 }
 
-/// Create a session, offer it, run the test it is assigned, and quit it.
+/// Create a session, offer it, run the test it is assigned, and quit it. With [`SessionReuse`],
+/// reset the session after its test and offer it again, as long as upcoming tests need sessions.
 async fn session_worker<Context, TestError>(
     env: &Env<'_, Context, TestError>,
     request: WorkerRequest,
@@ -741,39 +967,55 @@ async fn session_worker<Context, TestError>(
     env.board
         .enter(activity, "a browser session", Phase::CreatingSession);
     let creation_start = Instant::now();
+    let profile = match config.profiles.create_session_profile() {
+        Ok(profile) => profile,
+        Err(error) => {
+            env.board.clear(activity);
+            let report = Report::<rootcause::markers::Dynamic>::from(error)
+                .context("the Chrome profile of the session could not be created")
+                .into_dynamic();
+            env.fail_creation(request.delivery, report, creation_start);
+            return;
+        }
+    };
+    let pooled = matches!(request.delivery, Delivery::Pool);
+    // Only pool sessions are reused: a dedicated session has settings of its own.
+    let reusable = config.session_reuse.is_enabled() && pooled;
     let mut delivery = Some(request.delivery);
-    let mut job_run = None;
+    // The run of the session's last test, recorded once the session quit.
+    let mut last_run = None;
     let session_result = config
         .chrome
         .session()
         .with_caps(|caps: &mut ChromeCapabilities| {
-            configure_chrome_capabilities(caps, config.visible, config.chrome_capabilities_setups)
+            configure_chrome_capabilities(caps, config.visible, config.chrome_capabilities_setups)?;
+            if reusable {
+                configure_reusable_session(caps, config.session_reuse)?;
+            }
+            profile.configure(caps)
         })
+        .with_cancellation(config.cancellation.clone())
         .with_config(|builder| match request.element_query_wait {
             Some(wait) => builder.poller(Arc::new(wait.into_thirtyfour_poller())),
             None => builder,
         })
         .run(async |session: &Session| {
-            let creation = creation_start.elapsed();
-            env.board.clear(activity);
-            env.warn_if_slow_session("Creating a browser session", creation);
-            let (job_tx, job_rx) = oneshot::channel();
-            if let Some(delivery) = delivery.take() {
-                env.pool.deliver(
-                    delivery,
-                    Ok(Ticket {
-                        job: job_tx,
-                        creation,
-                    }),
-                );
-            }
-            // An error means no test needs this session anymore.
-            let Ok(job) = job_rx.await else {
-                return Ok(());
-            };
-            run_job(env, session, job, creation, &mut job_run).await
+            serve_tests(
+                env,
+                session,
+                SessionStart {
+                    activity,
+                    creation_start,
+                    pooled,
+                    reusable,
+                },
+                &mut delivery,
+                &mut last_run,
+            )
+            .await
         })
         .await;
+    profile.remove().await;
     env.board.clear(activity);
 
     if let Some(delivery) = delivery {
@@ -782,55 +1024,166 @@ async fn session_worker<Context, TestError>(
             Err(error) => error.into_dynamic(),
             Ok(()) => rootcause::report!("the browser session ended before it could be used"),
         };
-        env.pool.deliver(
-            delivery,
-            Err(CreationFailure {
-                report,
-                creation: creation_start.elapsed(),
-            }),
-        );
+        env.fail_creation(delivery, report, creation_start);
         return;
     }
-    let Some(job_run) = job_run else {
+    let Some(last_run) = last_run else {
         return;
     };
 
-    let QueuedTest::Ready(test) = &env.tests[job_run.index] else {
-        unreachable!("only ready tests are assigned to sessions");
-    };
-    let teardown = job_run.quit_start.map(|quit_start| quit_start.elapsed());
-    env.board.clear(Activity::Test(job_run.index));
-    if let Some(teardown) = teardown {
+    let teardown = last_run.quit_start.map(|quit_start| quit_start.elapsed());
+    env.board.clear(Activity::Test(last_run.index));
+    if let Some(teardown) = teardown
+        && let QueuedTest::Ready(test) = &env.tests[last_run.index]
+    {
         env.warn_if_slow_session(
             &format!("Quitting the session of browser test '{}'", test.name),
             teardown,
         );
     }
-    let (outcome, result) = test_outcome(&test.name, job_run.panic_message, session_result);
-    let record = BrowserTestRecord {
-        index: job_run.index,
-        name: test.name.clone(),
-        outcome,
-        group: test.group.clone(),
-        session: Some(SessionTiming {
-            creation: job_run.creation,
-            wait: job_run.wait,
-        }),
-        body: job_run.body,
-        teardown,
-        steps: job_run.steps,
-    };
-    env.finish(record, result);
+    env.finish_job(last_run, session_result, teardown);
 }
 
-/// Run the assigned test in `session`, then report that its body finished.
+/// How a worker's session started.
+struct SessionStart {
+    /// The pool session's activity on the progress board.
+    activity: Activity,
+    creation_start: Instant,
+    /// Whether the session belongs to the pool (rather than to one test with settings of its own).
+    pooled: bool,
+    /// Whether the session may run further tests after its first one.
+    reusable: bool,
+}
+
+/// Offer `session` through `delivery` (or, once it ran a test, to the pool), and run the tests it
+/// is assigned: one, or with [`SessionReuse`] several, resetting the session in between. The run
+/// of the last test is left in `last_run`, to be recorded once the session quit.
+async fn serve_tests<Context, TestError>(
+    env: &Env<'_, Context, TestError>,
+    session: &Session,
+    start: SessionStart,
+    delivery: &mut Option<Delivery>,
+    last_run: &mut Option<JobRun>,
+) -> Result<(), Report>
+where
+    Context: Sync + ?Sized,
+    TestError: ?Sized + 'static,
+{
+    let config = env.config;
+    let SessionStart {
+        activity,
+        creation_start,
+        pooled,
+        reusable,
+    } = start;
+    if let Err(error) = focus_page(session).await {
+        return Err(Report::<rootcause::markers::Dynamic>::from(error)
+            .context("the page of the session could not be brought to the front")
+            .into_dynamic());
+    }
+    let mut baseline = if reusable {
+        match SessionBaseline::prepare(session, config.session_reuse.reset()).await {
+            Ok(baseline) => Some(baseline),
+            Err(error) => {
+                tracing::warn!("A browser session can't be reused, it runs one test only: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let creation = creation_start.elapsed();
+    env.board.clear(activity);
+    env.warn_if_slow_session("Creating a browser session", creation);
+
+    let mut preparation = SessionPreparation::Created(creation);
+    let mut tests_run = 0;
+    loop {
+        let (job_tx, job_rx) = oneshot::channel();
+        let ticket = Ticket {
+            job: job_tx,
+            preparation,
+        };
+        match delivery.take() {
+            Some(delivery) => env.pool.deliver(delivery, Ok(ticket)),
+            // Dropped if the pool has enough sessions: the job channel closes, and the session
+            // quits below.
+            None => env.pool.deliver_reset(ticket, env.keep_starting()),
+        }
+        // An error means no test needs this session anymore.
+        let Ok(job) = job_rx.await else {
+            return Ok(());
+        };
+        tests_run += 1;
+        let mut run = run_job(env, session, &job, preparation).await;
+        if pooled {
+            env.pool.test_finished();
+        }
+        let reuse = baseline.is_some()
+            && config.session_reuse.allows_another_test(tests_run)
+            && env.pool.claim_reset(env.keep_starting());
+        // Let the next test start while this session quits or is reset.
+        let _ = job.body_done.send(());
+        let QueuedTest::Ready(test) = &env.tests[run.index] else {
+            unreachable!("only ready tests are assigned to sessions");
+        };
+        let subject = format!("browser test '{}'", test.name);
+        let Some(baseline) = baseline.as_mut().filter(|_| reuse) else {
+            env.board
+                .enter(Activity::Test(run.index), subject, Phase::QuittingSession);
+            run.quit_start = Some(Instant::now());
+            *last_run = Some(run);
+            // The test's own failure is kept in `run`, so that its report doesn't pass
+            // through the session.
+            return Ok(());
+        };
+
+        let index = run.index;
+        env.finish_job(run, Ok(()), None);
+        env.board
+            .enter(Activity::Test(index), subject, Phase::ResettingSession);
+        let reset_start = Instant::now();
+        let reset = baseline.reset(session).await;
+        let reset_duration = reset_start.elapsed();
+        env.board.clear(Activity::Test(index));
+        env.warn_if_slow_session(
+            &format!("Resetting the session of browser test '{}'", test.name),
+            reset_duration,
+        );
+        if let Err(error) = reset {
+            tracing::warn!(
+                "Resetting the session of browser test '{}' failed, so it quits: {error}",
+                test.name,
+            );
+            env.pool.reset_failed(env.keep_starting());
+            return Ok(());
+        }
+        preparation = SessionPreparation::Reset(reset_duration);
+    }
+}
+
+/// Bring the page of a new session to the front.
+///
+/// `ChromeDriver` starts a session on a profile it did not create itself (browser-test names every
+/// session's profile, see [`RunProfiles`]) with a page that lacks focus: `document.hasFocus()` is
+/// `false`, and focusing an element from script moves `document.activeElement` without firing
+/// `focus` or `focusin` events. Sessions on `ChromeDriver`'s own profiles start with a focused
+/// page. This restores that behavior.
+async fn focus_page(session: &Session) -> WebDriverResult<()> {
+    session
+        .cdp()
+        .send_raw("Page.bringToFront", HashMap::<String, String>::new())
+        .await?;
+    Ok(())
+}
+
+/// Run the test of `job` in `session`, prepared as `preparation`.
 async fn run_job<Context, TestError>(
     env: &Env<'_, Context, TestError>,
     session: &Session,
-    job: Job,
-    creation: Duration,
-    job_run: &mut Option<JobRun>,
-) -> Result<(), Report>
+    job: &Job,
+    preparation: SessionPreparation,
+) -> JobRun
 where
     Context: Sync + ?Sized,
     TestError: ?Sized + 'static,
@@ -838,15 +1191,18 @@ where
     let QueuedTest::Ready(test) = &env.tests[job.test] else {
         unreachable!("only ready tests are assigned to sessions");
     };
-    let run = job_run.insert(JobRun {
+    let mut run = JobRun {
         index: job.test,
-        creation,
+        preparation,
         wait: job.wait,
         body: None,
         steps: BTreeMap::new(),
+        test_error: None,
         panic_message: None,
+        panic: None,
+        recent_steps: None,
         quit_start: None,
-    });
+    };
     let result = match test.timeouts {
         Some(timeouts) => session
             .update_timeouts(timeouts.into_thirtyfour_timeout_configuration())
@@ -854,58 +1210,74 @@ where
             .map_err(Report::<rootcause::markers::Dynamic>::from),
         None => Ok(()),
     };
-    let result = match result {
-        Ok(()) => run_body(env, session, test, run).await,
+    match result {
+        Ok(()) => run_body(env, session, test, &mut run).await,
         Err(error) => {
             env.stop_starting_on_fail_fast();
-            Err(error)
+            run.test_error = Some(error);
         }
-    };
-    // Let the next test start while this session quits.
-    let _ = job.body_done.send(());
-    env.board.enter(
-        Activity::Test(test.index),
-        format!("browser test '{}'", test.name),
-        Phase::QuittingSession,
-    );
-    run.quit_start = Some(Instant::now());
-    result
+    }
+    run
 }
 
-/// The outcome of a test whose session ended with `session_result`.
+/// The outcome of the test of `run`, whose session ended with `session_result`. A failure's report
+/// says where the test failed ([`TestCodeFrames`](crate::failure_report::TestCodeFrames)) and what
+/// it did before ([`RecentSteps`]).
 fn test_outcome(
     name: &str,
-    panic_message: Option<String>,
+    run: &mut JobRun,
     session_result: Result<(), Report<chrome_for_testing_manager::ChromeForTestingError>>,
 ) -> (TestOutcome, Result<(), Report<BrowserTestError>>) {
-    if let Some(message) = panic_message {
-        let report = Report::new(BrowserTestError::Panic {
-            test_name: name.to_owned(),
-            message,
-        });
-        return (TestOutcome::Panicked, Err(report));
-    }
-    match session_result {
-        Ok(()) => (TestOutcome::Passed, Ok(())),
-        Err(err) => (
-            TestOutcome::Failed,
-            Err(err.context(BrowserTestError::RunTest {
+    let recent_steps = run.recent_steps.take();
+    if let Some(message) = run.panic_message.take() {
+        let mut report: Report<BrowserTestError> =
+            without_own_location(Report::new(BrowserTestError::Panic {
                 test_name: name.to_owned(),
-            })),
-        ),
+                message,
+            }));
+        if let Some(panic) = run.panic.take() {
+            if let Some(location) = panic.location {
+                report = report
+                    .attach_custom::<rootcause::handlers::Display, _>(PanicLocation(location));
+            }
+            if let Some(frames) = panic.frames {
+                report = report.attach_custom::<rootcause::handlers::Display, _>(frames);
+            }
+        }
+        return (TestOutcome::Panicked, Err(with_steps(report, recent_steps)));
+    }
+    let error = match (run.test_error.take(), session_result) {
+        (Some(error), _) => error,
+        (None, Err(error)) => error.into_dynamic(),
+        (None, Ok(())) => return (TestOutcome::Passed, Ok(())),
+    };
+    let report = without_own_location(error.context(BrowserTestError::RunTest {
+        test_name: name.to_owned(),
+    }));
+    (TestOutcome::Failed, Err(with_steps(report, recent_steps)))
+}
+
+/// `report` with the test's last steps attached.
+fn with_steps(
+    report: Report<BrowserTestError>,
+    recent_steps: Option<RecentSteps>,
+) -> Report<BrowserTestError> {
+    match recent_steps {
+        Some(steps) => report.attach_custom::<rootcause::handlers::Display, _>(steps),
+        None => report,
     }
 }
 
 /// Run the body of `test`, recording its duration and steps into `run`.
 ///
-/// Returns an error if the test failed or panicked (then `run.panic_message` is set).
+/// A failure is kept in `run`: the test's error in `run.test_error`, a panic in `run.panic_message`
+/// and `run.panic`.
 async fn run_body<Context, TestError>(
     env: &Env<'_, Context, TestError>,
     session: &Session,
     test: &PreparedTest<Context, TestError>,
     run: &mut JobRun,
-) -> Result<(), Report>
-where
+) where
     Context: Sync + ?Sized,
     TestError: ?Sized + 'static,
 {
@@ -929,19 +1301,20 @@ where
         .await;
     run.body = Some(start.elapsed());
     run.steps = recorder.take();
+    run.recent_steps = recorder.recent_steps();
+    run.panic = recorder.take_panic();
     if !matches!(result, Ok(Ok(()))) {
         // Don't let further tests start while this session quits.
         env.stop_starting_on_fail_fast();
     }
 
     match result {
-        Ok(result) => result.map_err(Report::into_dynamic),
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => run.test_error = Some(error.into_dynamic()),
         Err(payload) => {
             let message = panic_payload_message(payload.as_ref());
             tracing::error!("Browser test '{name}' panicked: {message}");
             run.panic_message = Some(message);
-            // Only ends the session. The runner reports the panic itself.
-            Err(rootcause::report!("browser test '{name}' panicked"))
         }
     }
 }
@@ -1156,6 +1529,18 @@ mod tests {
             assert_that!(custom_setup_called.load(Ordering::SeqCst)).is_equal_to(1);
             assert_that!(caps.is_headless()).is_false();
             assert_that!(caps.has_arg("--window-size=800,600")).is_true();
+        }
+    }
+
+    mod default_spare_sessions {
+        use super::*;
+
+        #[test]
+        fn one_per_running_test_or_per_eight_with_reuse() {
+            assert_that!(default_spare_sessions(8, SessionReuse::disabled())).is_equal_to(8);
+            assert_that!(default_spare_sessions(8, SessionReuse::enabled())).is_equal_to(1);
+            assert_that!(default_spare_sessions(9, SessionReuse::enabled())).is_equal_to(2);
+            assert_that!(default_spare_sessions(1, SessionReuse::enabled())).is_equal_to(1);
         }
     }
 
