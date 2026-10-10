@@ -1,0 +1,15 @@
+error: future cannot be sent between threads safely
+ --> tests/ui/not_send.rs:7:10
+  |
+7 | async fn holds_rc_across_await() -> Result<(), Report> {
+  |          ^^^^^^^^^^^^^^^^^^^^^ future returned by `holds_rc_across_await` is not `Send`
+  |
+  = help: within `impl Future<Output = Result<(), rootcause::Report>>`, the trait `Send` is not implemented for `Rc<()>`
+note: future is not `Send` as this value is used across an await
+ --> tests/ui/not_send.rs:9:28
+  |
+8 |     let shared = Rc::new(());
+  |         ------ has type `Rc<()>` which is not `Send`
+9 |     std::future::ready(()).await;
+  |                            ^^^^^ await occurs here, with `shared` maybe used later
+  = note: required for the cast from `Pin<Box<impl Future<Output = Result<(), rootcause::Report>>>>` to `Pin<Box<(dyn Future<Output = Result<(), rootcause::Report>> + Send + '__future)>>`

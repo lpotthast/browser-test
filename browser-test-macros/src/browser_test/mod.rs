@@ -108,6 +108,10 @@ pub(crate) fn expand(args: Arguments, mut function: ItemFn) -> manyhow::Result<T
         Inputs::Context => quote!(__browser_test_context),
         Inputs::DriverAndContext => quote!(__browser_test_driver, __browser_test_context),
     };
+    // Spanned at the function's name, where a future that is not `Send` is reported.
+    let boxed_body = quote_spanned! {body.span()=>
+        ::std::boxed::Box::pin(#body(#call_args))
+    };
     Ok(quote! {
         #(#docs)*
         #(#cfgs)*
@@ -151,7 +155,7 @@ pub(crate) fn expand(args: Arguments, mut function: ItemFn) -> manyhow::Result<T
                 '__context: '__future,
                 Self: '__future,
             {
-                ::std::boxed::Box::pin(#body(#call_args))
+                #boxed_body
             }
         }
     })

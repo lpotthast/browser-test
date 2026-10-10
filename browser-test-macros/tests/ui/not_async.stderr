@@ -1,0 +1,5 @@
+error: browser tests must be async functions
+ --> tests/ui/not_async.rs:4:1
+  |
+4 | fn synchronous(_context: &()) -> Result<(), rootcause::Report> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

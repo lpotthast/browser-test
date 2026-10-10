@@ -24,6 +24,7 @@ syn = { version = "3", features = ["full", "visit-mut"] }
 # dependency is left out when publishing.
 browser-test = { path = "../browser-test" }
 rootcause.workspace = true
+trybuild = "1.0.114"
 
 [lints]
 workspace = true

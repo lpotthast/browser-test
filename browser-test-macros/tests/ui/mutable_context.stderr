@@ -1,0 +1,5 @@
+error: browser test arguments must be shared references
+ --> tests/ui/mutable_context.rs:4:36
+  |
+4 | async fn mutable_context(_context: &mut ()) -> Result<(), rootcause::Report> {
+  |                                    ^^^^^^^

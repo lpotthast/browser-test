@@ -1,0 +1,11 @@
+error: function `forgotten` is never used
+ --> tests/ui/unregistered.rs:7:10
+  |
+7 | async fn forgotten() -> Result<(), Report> {
+  |          ^^^^^^^^^
+  |
+note: the lint level is defined here
+ --> tests/ui/unregistered.rs:1:9
+  |
+1 | #![deny(dead_code)]
+  |         ^^^^^^^^^

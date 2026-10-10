@@ -1,0 +1,46 @@
+error[E0053]: method `run` has an incompatible type for trait
+ --> tests/ui/wrong_result.rs:3:1
+  |
+3 | #[browser_test]
+  | ^^^^^^^^^^^^^^^ expected `Report<_>`, found `String`
+  |
+  = note: expected signature `fn(&'__self ReturnsStringErrors, &'__driver WebDriver, &'__context ()) -> Pin<Box<(dyn Future<Output = Result<(), rootcause::report::owned::limit_field_access::Report<_>>> + Send + '__future)>>`
+             found signature `fn(&'__self ReturnsStringErrors, &'__driver WebDriver, &'__context ()) -> Pin<Box<(dyn Future<Output = Result<(), String>> + Send + '__future)>>`
+  = note: this error originates in the attribute macro `browser_test` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: change the output type to match the trait
+  |
+3 - #[browser_test]
+3 + Pin<Box<(dyn Future<Output = Result<(), rootcause::report::owned::limit_field_access::Report<_>>> + Send + '__future)>>
+  |
+
+error[E0277]: the trait bound `ReturnsStringErrors: BrowserTest<(), _>` is not satisfied
+ --> tests/ui/wrong_result.rs:4:10
+  |
+4 | async fn returns_string_errors() -> Result<(), String> {
+  |          ^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `BrowserTest<(), _>` is not implemented for `ReturnsStringErrors`
+ --> tests/ui/wrong_result.rs:3:1
+  |
+3 | #[browser_test]
+  | ^^^^^^^^^^^^^^^
+help: the trait `BrowserTest<(), <Result<(), String> as browser_test::__private::TestResult>::Error>` is implemented for `ReturnsStringErrors`
+ --> tests/ui/wrong_result.rs:3:1
+  |
+3 | #[browser_test]
+  | ^^^^^^^^^^^^^^^
+  = note: this error originates in the attribute macro `browser_test` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: browser tests must return `Result<(), rootcause::Report<E>>`, not `Result<(), String>`
+ --> tests/ui/wrong_result.rs:4:37
+  |
+4 | async fn returns_string_errors() -> Result<(), String> {
+  |                                     ^^^^^^ the return type of this browser test
+  |
+  = help: the trait `browser_test::__private::TestResult` is not implemented for `Result<(), String>`
+  = note: `rootcause::Report` without a type parameter is `Report<Dynamic>`, which any error converts into with `?`
+help: the trait `browser_test::__private::TestResult` is implemented for `Result<(), rootcause::report::owned::limit_field_access::Report<E>>`
+ --> $WORKSPACE/browser-test/src/lib.rs
+  |
+  |     impl<E: ?Sized + 'static> TestResult for Result<(), rootcause::Report<E>> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,5 @@
+error: browser tests cannot have type or const parameters
+ --> tests/ui/type_parameter.rs:4:18
+  |
+4 | async fn generic<T: Sync>(_context: &T) -> Result<(), rootcause::Report> {
+  |                  ^^^^^^^

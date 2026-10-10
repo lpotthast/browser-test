@@ -51,6 +51,7 @@ jobs:
       - run: cargo test --workspace --lib --locked
       - run: cargo test --workspace --doc --locked
       - run: cargo test --workspace --test macros --locked
+      - run: cargo test --package browser-test-macros --test ui --locked
 
   test-integration:
     runs-on: ubuntu-latest

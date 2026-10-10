@@ -8,9 +8,11 @@
       <sourceFolder url="file://$MODULE_DIR$/browser-test/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/browser-test/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/browser-test-macros/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/browser-test-macros/tests" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/examples/advanced/target" />
       <excludeFolder url="file://$MODULE_DIR$/examples/minimal/target" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
+      <excludeFolder url="file://$MODULE_DIR$/browser-test/target" />
     </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />

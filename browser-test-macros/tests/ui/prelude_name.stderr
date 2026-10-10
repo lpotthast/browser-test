@@ -1,0 +1,8 @@
+error: a browser test named `result` would define `struct Result;`, shadowing the prelude's `Result`
+
+         = help: rename the function, and keep the test's name with `#[browser_test(name = "...")]`
+
+ --> tests/ui/prelude_name.rs:4:10
+  |
+4 | async fn result() -> Result<(), rootcause::Report> {
+  |          ^^^^^^
