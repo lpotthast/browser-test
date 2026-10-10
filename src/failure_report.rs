@@ -475,9 +475,13 @@ pub struct RecentSteps {
 }
 
 impl RecentSteps {
+    /// The last `steps` of `total`, recorded as they ended, listed as they started: a step
+    /// enclosing others ends after them, but is listed before them.
     pub(crate) fn new(steps: &VecDeque<StepEvent>, total: usize) -> Option<Self> {
-        (!steps.is_empty()).then(|| Self {
-            steps: steps.iter().cloned().collect(),
+        let mut listed: Vec<_> = steps.iter().cloned().collect();
+        listed.sort_by_key(|step| step.started);
+        (!listed.is_empty()).then(|| Self {
+            steps: listed,
             omitted: total.saturating_sub(steps.len()),
         })
     }
@@ -681,6 +685,22 @@ mod tests {
         ] {
             assert_that!(dependencies.contains(&root.join(dependency), root)).is_true();
         }
+    }
+
+    #[test]
+    fn recent_steps_are_listed_as_they_started() {
+        let step = |kind, started| StepEvent {
+            kind,
+            detail: None,
+            started: Duration::from_millis(started),
+            duration: Duration::from_millis(1),
+            finished: true,
+        };
+        // `login` encloses `find`, which ends first.
+        let steps = VecDeque::from([step("goto", 0), step("find", 364), step("login", 200)]);
+        let recent = RecentSteps::new(&steps, 3).expect("steps were recorded");
+        let kinds: Vec<_> = recent.steps.iter().map(|step| step.kind).collect();
+        assert_that!(kinds).is_equal_to(vec!["goto", "login", "find"]);
     }
 
     #[test]
