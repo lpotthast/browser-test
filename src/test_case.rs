@@ -156,6 +156,10 @@ where
     ///
     /// A returned error or a panic fails the test. Wrap the test's navigations, lookups and waits
     /// in [`Step`](crate::Step)s, and failure reports list the last of them.
+    ///
+    /// The runner polls the tests of a run on one task, as they borrow its context. Don't block
+    /// the thread (`std::thread::sleep`, blocking I/O, heavy computation): that stalls every other
+    /// test running at the same time. Await instead, or use `tokio::task::spawn_blocking`.
     async fn run(&self, driver: &WebDriver, context: &Context) -> Result<(), Report<TestError>>;
 }
 

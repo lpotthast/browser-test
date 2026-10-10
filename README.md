@@ -354,6 +354,11 @@ whose browser is still starting. Only run tests in parallel that can safely shar
 chromedriver process is shared for the run, so captured driver output can contain interleaved lines from different
 sessions.
 
+Tests borrow the run's context, so the runner polls all of them on the task that runs it, rather than spawning a task per
+test. A test that blocks its thread (`std::thread::sleep`, blocking I/O, heavy computation) stalls every other test of
+the run, and the warnings about slow tests. Await instead (`tokio::time::sleep`), or move such work to
+`tokio::task::spawn_blocking`.
+
 By default, the runner stops starting tests after the first failure (`FailurePolicy::FailFast`). Tests in groups marked
 `run_always()` still run, e.g. checks that must see the whole run. With `FailurePolicy::RunAll`, every test of every
 group runs, and all failures are returned as child reports on one aggregate `Report<BrowserTestError>`. A sequential
