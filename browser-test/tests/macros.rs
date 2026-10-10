@@ -112,6 +112,31 @@ async fn higher_ranked(callbacks: &Callbacks<'_>) -> Result<(), Report> {
     Ok(())
 }
 
+/// Macros of the names the generated code uses don't change the test's name.
+mod shadowed_macros {
+    use super::*;
+
+    #[allow(unused_macros)]
+    macro_rules! concat {
+        ($($tt:tt)*) => {
+            "shadowed"
+        };
+    }
+
+    #[allow(unused_macros)]
+    macro_rules! module_path {
+        () => {
+            "shadowed"
+        };
+    }
+
+    #[browser_test]
+    pub(super) async fn named_by_its_path() -> Result<(), Report> {
+        tokio::task::yield_now().await;
+        Ok(())
+    }
+}
+
 mod other {
     use super::*;
 
@@ -134,6 +159,10 @@ fn generated_tests_implement_the_trait_with_distinct_module_qualified_names() {
     assert_eq!(BorrowedPage.name(), "macros::borrowed_page");
     assert_eq!(Type.name(), "macros::type");
     assert_eq!(other::BorrowedPage.name(), "macros::other::borrowed_page");
+    assert_eq!(
+        shadowed_macros::NamedByItsPath.name(),
+        "macros::shadowed_macros::named_by_its_path"
+    );
     let _: BrowserTests = BrowserTests::sequential().with(FunctionAttributes);
     let _: BrowserTests<str> = BrowserTests::sequential().with(RawDriver);
     let _: BrowserTests<(), CustomError> = BrowserTests::sequential().with(TypedError);

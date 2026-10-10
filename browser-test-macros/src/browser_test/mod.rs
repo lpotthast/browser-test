@@ -74,7 +74,8 @@ pub(crate) fn expand(args: Arguments, mut function: ItemFn) -> manyhow::Result<T
     let function_name = function.sig.ident.unraw().to_string();
     let name = struct_name(&function.sig.ident, &function_name)?;
     let test_name = args.name.map_or_else(
-        || quote!(concat!(module_path!(), "::", #function_name)),
+        // Qualified, as the caller's module may define macros of these names.
+        || quote!(::core::concat!(::core::module_path!(), "::", #function_name)),
         |name| quote!(#name),
     );
     // The struct documents the test. The body keeps every other attribute: one meant for the
