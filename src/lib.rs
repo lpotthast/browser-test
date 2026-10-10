@@ -22,6 +22,7 @@ mod report_consumer;
 mod runner;
 mod scheduler;
 mod session_reuse;
+mod session_settings;
 mod step;
 mod test_case;
 #[cfg(test)]
@@ -35,8 +36,7 @@ pub use env::InvalidEnvVar;
 pub use error::BrowserTestError;
 pub use filter::TestFilter;
 pub use pause::Pause;
-pub use profile::ChromeProfilesDir;
-pub use progress::{ProgressWarnings, ProgressWarningsBuilder};
+pub use progress::ProgressWarnings;
 pub use report::{
     BrowserTestRecord, BrowserTestRunReport, GroupRecord, SessionPreparation, SessionTiming,
     StepStats, TestOutcome,
@@ -45,10 +45,11 @@ pub use report_consumer::{RunReportConsumer, StderrSummary, StdoutSummary, Traci
 pub use runner::{BrowserTestRunner, Visibility};
 pub use scheduler::{FailurePolicy, Parallelism};
 pub use session_reuse::{CachedData, KeptCaches, SessionReset, SessionReuse};
+pub use session_settings::SessionSettings;
 pub use step::{Step, StepExt};
 pub use test_case::{BrowserTest, BrowserTests, NamedTest, TestGroup};
-pub use timeout::{Timeouts, TimeoutsBuilder};
-pub use wait::{ElementQueryWait, ElementQueryWaitError};
+pub use timeout::Timeouts;
+pub use wait::ElementQueryWait;
 
 /// Implementation details used by generated browser tests.
 #[doc(hidden)]

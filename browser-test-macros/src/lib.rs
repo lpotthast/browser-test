@@ -52,8 +52,9 @@ use syn::ItemFn;
 ///   one that stays the same when the function moves to another module.
 /// - **Description**: `BrowserTest::description` returns the doc comments, as written, without the
 ///   space after each `///`. Paragraphs and indentation are kept. `None` without doc comments.
-/// - **Session settings**: the trait's defaults. Implement `BrowserTest` yourself for tests that
-///   need their own timeouts, element query wait, or a fresh session.
+/// - **Session settings**: the runner's. Implement `BrowserTest` yourself, with
+///   `BrowserTest::session_settings`, for tests that need their own timeouts, element query wait,
+///   or a fresh session.
 ///
 /// # Signature
 ///

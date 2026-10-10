@@ -1,98 +1,114 @@
 use std::time::Duration;
 
-use typed_builder::TypedBuilder;
-
-/// `WebDriver` timeout configuration applied before running a browser test.
+/// `WebDriver` timeouts applied to a session before a test runs.
 ///
-/// The builder setters accept `Duration` values. Use each setter's `_opt` fallback for
-/// `Option<Duration>` values. Leaving a timeout unset means the runner does not update that
-/// timeout on the `WebDriver` session.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, TypedBuilder)]
-#[allow(clippy::struct_field_names)]
+/// Every timeout is optional. A timeout left unset is not updated, so the session keeps the
+/// runner's value (see [`BrowserTestRunner::with_timeouts`](crate::BrowserTestRunner::with_timeouts)),
+/// or else `ChromeDriver`'s default. A test's [`SessionSettings::with_timeouts`](crate::SessionSettings::with_timeouts)
+/// overrides the runner's timeouts one by one: those it sets replace the runner's, the others stay.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use browser_test::Timeouts;
+///
+/// let timeouts = Timeouts::new()
+///     .with_page_load(Duration::from_secs(10))
+///     .with_implicit_wait(Duration::ZERO);
+///
+/// assert_eq!(timeouts.page_load(), Some(Duration::from_secs(10)));
+/// assert_eq!(timeouts.script(), None);
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Timeouts {
-    /// Maximum time `WebDriver` waits for asynchronous script execution.
-    ///
-    /// This timeout applies to browser-side scripts that explicitly wait for completion, such as
-    /// `execute_async` / async JavaScript calls. It does not control page navigation, element
-    /// lookup, or ordinary Rust futures in the test body.
-    ///
-    /// In browser tests this usually matters when helpers inject JavaScript that calls back later,
-    /// waits for browser APIs, or bridges to application state from inside the page. If the script
-    /// does not finish before this duration, the script command fails even if the page itself is
-    /// otherwise healthy.
-    ///
-    /// Use the builder's `script_timeout(...)` to update the timeout. Use `script_timeout_opt(None)`
-    /// to leave the session's current script timeout unchanged.
-    #[builder(default, setter(strip_option(fallback_suffix = "_opt")))]
-    script_timeout: Option<Duration>,
-
-    /// Maximum time `WebDriver` waits for page navigation to finish loading.
-    ///
-    /// This timeout applies to navigation commands such as opening a URL, refreshing, or moving
-    /// through browser history. It covers the browser's page-load lifecycle, not arbitrary
-    /// application readiness after the document has loaded.
-    ///
-    /// In browser tests this can fail a `driver.goto(...)` call when the target page, redirects,
-    /// or blocking resources take too long. It is not a replacement for explicit waits after
-    /// navigation: single-page app hydration, background requests, animations, and delayed DOM
-    /// updates should still be handled with element-query waits or test-specific polling.
-    ///
-    /// Use the builder's `page_load_timeout(...)` to update the timeout. Use
-    /// `page_load_timeout_opt(None)` to leave the session's current page-load timeout unchanged.
-    #[builder(default, setter(strip_option(fallback_suffix = "_opt")))]
-    page_load_timeout: Option<Duration>,
-
-    /// Maximum time `WebDriver` waits while locating elements through raw element lookup commands.
-    ///
-    /// This timeout affects implicit waiting in the browser driver itself. When it is non-zero,
-    /// element lookup commands can block until a matching element appears or the duration expires.
-    /// That can make missing-element assertions slower and can compound with explicit polling.
-    ///
-    /// For tests using `thirtyfour` element queries, `WebElement::wait_until`, or this crate's
-    /// [`ElementQueryWait`](crate::ElementQueryWait), prefer keeping this at
-    /// `Duration::ZERO` and using explicit waits instead. Explicit waits make the waiting behavior
-    /// local to the assertion or action that needs it, while a non-zero implicit wait affects every
-    /// element lookup in the session.
-    ///
-    /// Use the builder's `implicit_wait_timeout(...)` to update the timeout. Passing
-    /// `Duration::ZERO` explicitly disables implicit waiting for the session. Use
-    /// `implicit_wait_timeout_opt(None)` to leave the session's current implicit wait timeout
-    /// unchanged.
-    #[builder(default, setter(strip_option(fallback_suffix = "_opt")))]
-    implicit_wait_timeout: Option<Duration>,
+    script: Option<Duration>,
+    page_load: Option<Duration>,
+    implicit_wait: Option<Duration>,
 }
 
 impl Timeouts {
-    /// Maximum time `WebDriver` waits for asynchronous script execution.
-    ///
-    /// Returning `None` means this timeout is not updated.
+    /// Timeouts updating nothing. Set them with the `with_*` methods.
     #[must_use]
-    pub const fn script_timeout(self) -> Option<Duration> {
-        self.script_timeout
+    pub const fn new() -> Self {
+        Self {
+            script: None,
+            page_load: None,
+            implicit_wait: None,
+        }
     }
 
-    /// Maximum time `WebDriver` waits for page navigation to finish loading.
+    /// Set how long `WebDriver` waits for a script to finish.
     ///
-    /// Returning `None` means this timeout is not updated.
+    /// This applies to browser-side scripts that explicitly wait for completion, such as
+    /// `execute_async` calls, which fail when the script does not finish in time. It does not
+    /// control page navigation, element lookups, or the Rust futures of the test body.
     #[must_use]
-    pub const fn page_load_timeout(self) -> Option<Duration> {
-        self.page_load_timeout
+    pub const fn with_script(mut self, timeout: Duration) -> Self {
+        self.script = Some(timeout);
+        self
     }
 
-    /// Maximum time `WebDriver` waits while locating elements through raw element lookup commands.
+    /// Set how long `WebDriver` waits for a navigation to finish loading the page.
     ///
-    /// Returning `None` means this timeout is not updated.
+    /// This applies to navigation commands such as opening a URL, refreshing, or going back. It
+    /// covers the browser's page-load lifecycle, not the readiness of the application after the
+    /// document has loaded: wait for hydration, background requests, and delayed DOM updates with
+    /// element-query waits or polling of your own.
     #[must_use]
-    pub const fn implicit_wait_timeout(self) -> Option<Duration> {
-        self.implicit_wait_timeout
+    pub const fn with_page_load(mut self, timeout: Duration) -> Self {
+        self.page_load = Some(timeout);
+        self
+    }
+
+    /// Set how long `WebDriver` element lookups wait for a matching element to appear.
+    ///
+    /// A non-zero implicit wait makes every lookup of a missing element block until it expires,
+    /// slowing down checks that an element is absent, and compounds with explicit polling. When
+    /// waiting with `thirtyfour`'s element queries and [`ElementQueryWait`](crate::ElementQueryWait),
+    /// prefer `Duration::ZERO`, keeping waits explicit and local to the step that needs them.
+    #[must_use]
+    pub const fn with_implicit_wait(mut self, timeout: Duration) -> Self {
+        self.implicit_wait = Some(timeout);
+        self
+    }
+
+    /// The script timeout, if set. See [`Self::with_script`].
+    #[must_use]
+    pub const fn script(self) -> Option<Duration> {
+        self.script
+    }
+
+    /// The page-load timeout, if set. See [`Self::with_page_load`].
+    #[must_use]
+    pub const fn page_load(self) -> Option<Duration> {
+        self.page_load
+    }
+
+    /// The implicit wait timeout, if set. See [`Self::with_implicit_wait`].
+    #[must_use]
+    pub const fn implicit_wait(self) -> Option<Duration> {
+        self.implicit_wait
+    }
+
+    /// These timeouts, with the unset ones taken from `fallback`.
+    #[must_use]
+    pub(crate) fn or(self, fallback: Self) -> Self {
+        Self {
+            script: self.script.or(fallback.script),
+            page_load: self.page_load.or(fallback.page_load),
+            implicit_wait: self.implicit_wait.or(fallback.implicit_wait),
+        }
+    }
+
+    /// Whether no timeout is set.
+    pub(crate) const fn is_empty(self) -> bool {
+        self.script.is_none() && self.page_load.is_none() && self.implicit_wait.is_none()
     }
 
     pub(crate) fn into_thirtyfour_timeout_configuration(self) -> thirtyfour::TimeoutConfiguration {
-        thirtyfour::TimeoutConfiguration::new(
-            self.script_timeout,
-            self.page_load_timeout,
-            self.implicit_wait_timeout,
-        )
+        thirtyfour::TimeoutConfiguration::new(self.script, self.page_load, self.implicit_wait)
     }
 }
 
@@ -103,45 +119,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builder_preserves_all_timeout_fields() {
-        let timeouts = Timeouts::builder()
-            .script_timeout(Duration::from_secs(5))
-            .page_load_timeout(Duration::from_secs(10))
-            .implicit_wait_timeout(Duration::from_secs(20))
-            .build();
+    fn setters_set_their_timeout_only() {
+        let timeouts = Timeouts::new()
+            .with_script(Duration::from_secs(5))
+            .with_implicit_wait(Duration::ZERO);
 
-        assert_that!(timeouts.script_timeout()).is_equal_to(Some(Duration::from_secs(5)));
-        assert_that!(timeouts.page_load_timeout()).is_equal_to(Some(Duration::from_secs(10)));
-        assert_that!(timeouts.implicit_wait_timeout()).is_equal_to(Some(Duration::from_secs(20)));
+        assert_that!(timeouts.script()).is_equal_to(Some(Duration::from_secs(5)));
+        assert_that!(timeouts.page_load()).is_none();
+        assert_that!(timeouts.implicit_wait()).is_equal_to(Some(Duration::ZERO));
+        assert_that!(Timeouts::new()).is_equal_to(Timeouts::default());
+        assert_that!(Timeouts::new().is_empty()).is_true();
     }
 
     #[test]
-    fn builder_leaves_unset_fields_unconfigured() {
-        let timeouts = Timeouts::builder().build();
+    fn unset_timeouts_fall_back_one_by_one() {
+        let runner = Timeouts::new()
+            .with_script(Duration::from_secs(10))
+            .with_implicit_wait(Duration::ZERO);
+        let test = Timeouts::new()
+            .with_script(Duration::from_secs(1))
+            .with_page_load(Duration::from_secs(5));
 
-        assert_that!(timeouts.script_timeout()).is_none();
-        assert_that!(timeouts.page_load_timeout()).is_none();
-        assert_that!(timeouts.implicit_wait_timeout()).is_none();
-    }
-
-    #[test]
-    fn builder_accepts_wrapped_option_values() {
-        let timeouts = Timeouts::builder()
-            .script_timeout_opt(Some(Duration::from_secs(5)))
-            .page_load_timeout_opt(None)
-            .implicit_wait_timeout_opt(Some(Duration::ZERO))
-            .build();
-
-        assert_that!(timeouts.script_timeout()).is_equal_to(Some(Duration::from_secs(5)));
-        assert_that!(timeouts.page_load_timeout()).is_none();
-        assert_that!(timeouts.implicit_wait_timeout()).is_equal_to(Some(Duration::ZERO));
+        assert_that!(test.or(runner)).is_equal_to(
+            Timeouts::new()
+                .with_script(Duration::from_secs(1))
+                .with_page_load(Duration::from_secs(5))
+                .with_implicit_wait(Duration::ZERO),
+        );
     }
 
     #[test]
     fn conversion_preserves_unset_fields() {
-        let timeouts = Timeouts::builder()
-            .script_timeout(Duration::from_secs(5))
-            .build()
+        let timeouts = Timeouts::new()
+            .with_script(Duration::from_secs(5))
             .into_thirtyfour_timeout_configuration();
 
         assert_that!(timeouts.script()).is_equal_to(Some(Duration::from_secs(5)));

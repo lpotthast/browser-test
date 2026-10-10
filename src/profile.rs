@@ -60,40 +60,28 @@ const USER_DATA_DIR_SWITCH: &str = "user-data-dir";
 /// Tells apart the runs one process starts.
 static NEXT_RUN: AtomicUsize = AtomicUsize::new(0);
 
-/// Where runs keep the Chrome profiles of their sessions.
-///
-/// Every session gets a fresh profile, removed when the session ends. When a run starts, it also
-/// removes the profiles that killed runs left behind. Only entries created by browser-test are
-/// removed.
-///
-/// The directory is created when a run starts, unless it exists. The run fails if the directory
-///
-/// - is a symlink or not a directory,
-/// - has an absolute path that is not valid UTF-8,
-/// - is accessible by other users (Unix only), as profiles hold cookies and other browser data, or
-/// - is on a file system without file locks.
+/// Where runs keep the Chrome profiles of their sessions, see
+/// [`BrowserTestRunner::with_chrome_profiles_dir`](crate::BrowserTestRunner::with_chrome_profiles_dir).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChromeProfilesDir {
+pub(crate) struct ChromeProfilesDir {
     path: PathBuf,
 }
 
 impl ChromeProfilesDir {
     /// Keep profiles in `path`. A relative path is resolved against the current directory when a
     /// run starts.
-    #[must_use]
-    pub fn new(path: impl Into<PathBuf>) -> Self {
+    pub(crate) fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
 
     /// Keep profiles in `browser-test-profiles` in [`std::env::temp_dir`]. The runner's default.
-    #[must_use]
-    pub fn in_temp_dir() -> Self {
+    pub(crate) fn in_temp_dir() -> Self {
         Self::new(std::env::temp_dir().join(DEFAULT_DIR_NAME))
     }
 
     /// The path as configured, which may be relative.
-    #[must_use]
-    pub fn path(&self) -> &Path {
+    #[cfg(test)]
+    fn path(&self) -> &Path {
         &self.path
     }
 

@@ -126,7 +126,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
- "typed-builder",
  "url",
 ]
 

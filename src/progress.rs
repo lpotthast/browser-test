@@ -6,8 +6,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use typed_builder::TypedBuilder;
-
 use crate::{report::FormatDuration, step::DEFAULT_SLOW_STEP};
 
 /// When [`crate::BrowserTestRunner`] warns that a test run seems not to progress fast enough.
@@ -15,7 +13,7 @@ use crate::{report::FormatDuration, step::DEFAULT_SLOW_STEP};
 /// Slow progress often hints at a slowed-down system (e.g. a busy CI machine) or at a test waiting
 /// for something that never happens. Warnings are logged through `tracing` at `warn` level.
 ///
-/// Set a threshold to `None` (through the builder's `_opt` setters) to disable its warnings.
+/// Every threshold is optional: `None` disables its warnings.
 ///
 /// # Examples
 ///
@@ -25,41 +23,27 @@ use crate::{report::FormatDuration, step::DEFAULT_SLOW_STEP};
 /// use browser_test::{BrowserTestRunner, Cancellation, ProgressWarnings};
 ///
 /// let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals()).with_progress_warnings(
-///     ProgressWarnings::builder()
-///         .test_running(Duration::from_secs(60))
-///         .slow_step_opt(None)
-///         .build(),
+///     ProgressWarnings::default()
+///         .with_test_running(Some(Duration::from_secs(60)))
+///         .with_slow_step(None),
 /// );
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, TypedBuilder)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProgressWarnings {
-    /// Warn when a test body is still running after this duration, and again every time this
-    /// duration passes. Defaults to 30 seconds.
-    #[builder(
-        default = Some(Duration::from_secs(30)),
-        setter(strip_option(fallback_suffix = "_opt"))
-    )]
     test_running: Option<Duration>,
-
-    /// Warn when creating, resetting or quitting a session takes longer than this. Defaults to 5
-    /// seconds.
-    #[builder(
-        default = Some(Duration::from_secs(5)),
-        setter(strip_option(fallback_suffix = "_opt"))
-    )]
     session: Option<Duration>,
-
-    /// Warn when a [`crate::Step`] takes longer than this. Defaults to 2 seconds.
-    #[builder(
-        default = Some(DEFAULT_SLOW_STEP),
-        setter(strip_option(fallback_suffix = "_opt"))
-    )]
     slow_step: Option<Duration>,
 }
 
 impl Default for ProgressWarnings {
+    /// Warn about tests running for 30 seconds, sessions taking 5 seconds to create, reset or
+    /// quit, and steps taking 2 seconds.
     fn default() -> Self {
-        Self::builder().build()
+        Self {
+            test_running: Some(Duration::from_secs(30)),
+            session: Some(Duration::from_secs(5)),
+            slow_step: Some(DEFAULT_SLOW_STEP),
+        }
     }
 }
 
@@ -72,6 +56,30 @@ impl ProgressWarnings {
             session: None,
             slow_step: None,
         }
+    }
+
+    /// Warn when a test body is still running after `threshold`, and again every time
+    /// `threshold` passes. `None` disables these warnings. Defaults to 30 seconds.
+    #[must_use]
+    pub const fn with_test_running(mut self, threshold: Option<Duration>) -> Self {
+        self.test_running = threshold;
+        self
+    }
+
+    /// Warn when creating, resetting or quitting a session takes longer than `threshold`. `None`
+    /// disables these warnings. Defaults to 5 seconds.
+    #[must_use]
+    pub const fn with_session(mut self, threshold: Option<Duration>) -> Self {
+        self.session = threshold;
+        self
+    }
+
+    /// Warn when a [`crate::Step`] takes longer than `threshold`. `None` disables these warnings.
+    /// Defaults to 2 seconds.
+    #[must_use]
+    pub const fn with_slow_step(mut self, threshold: Option<Duration>) -> Self {
+        self.slow_step = threshold;
+        self
     }
 
     /// Threshold for test bodies that are still running.
@@ -241,10 +249,9 @@ mod tests {
 
     #[test]
     fn tick_follows_the_smallest_threshold() {
-        let warnings = ProgressWarnings::builder()
-            .test_running(Duration::from_millis(400))
-            .session_opt(None)
-            .build();
+        let warnings = ProgressWarnings::default()
+            .with_test_running(Some(Duration::from_millis(400)))
+            .with_session(None);
 
         assert_that!(warnings.tick()).is_equal_to(Some(Duration::from_millis(100)));
     }

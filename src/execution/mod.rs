@@ -35,7 +35,7 @@ mod session_pool;
 use self::session_pool::{CreationFailure, Delivery, SessionPool, Ticket, Upcoming, WorkerRequest};
 use crate::{
     BrowserTest, BrowserTestError, BrowserTests, ElementQueryWait, FailurePolicy, Parallelism,
-    ProgressWarnings, SessionReuse, Timeouts,
+    ProgressWarnings, SessionReuse, SessionSettings, Timeouts,
     failure_report::{PanicDetails, PanicLocation, RecentSteps, without_own_location},
     profile::RunProfiles,
     progress::{Activity, Phase, ProgressBoard},
@@ -56,8 +56,8 @@ pub(crate) type ChromeCapabilitiesSetup =
 pub(crate) struct ExecutionConfig<'a> {
     pub(crate) chrome: &'a ChromeForTesting,
     pub(crate) visible: bool,
-    pub(crate) timeouts: Option<&'a Timeouts>,
-    pub(crate) element_query_wait: Option<&'a ElementQueryWait>,
+    /// The runner's timeouts and element query wait, which tests override.
+    pub(crate) session_defaults: SessionSettings,
     pub(crate) chrome_capabilities_setups: &'a [Arc<ChromeCapabilitiesSetup>],
     /// Where sessions get their profiles.
     pub(crate) profiles: &'a RunProfiles,
@@ -96,11 +96,10 @@ where
         None,
         &mut prepared,
         &mut next_group,
-        config.timeouts,
-        config.element_query_wait,
+        config.session_defaults,
     );
     let max_concurrency = root.max_concurrency();
-    let default_wait = config.element_query_wait.copied();
+    let default_wait = config.session_defaults.element_query_wait();
     let pooled = |fresh: bool| {
         prepared
             .iter()
@@ -191,9 +190,10 @@ where
     index: usize,
     name: String,
     group: Option<String>,
-    timeouts: Option<Timeouts>,
+    /// The test's timeouts, completed with the runner's.
+    timeouts: Timeouts,
     element_query_wait: Option<ElementQueryWait>,
-    /// Whether the test needs a session no test ran in (see [`BrowserTest::fresh_session`]).
+    /// Whether the test needs a session no test ran in (see [`SessionSettings::fresh_session`]).
     fresh_session: bool,
     test: Box<dyn BrowserTest<Context, TestError>>,
 }
@@ -267,14 +267,18 @@ fn prepare_group<Context, TestError>(
     parent_path: Option<&str>,
     prepared: &mut Vec<QueuedTest<Context, TestError>>,
     next_group: &mut usize,
-    default_timeouts: Option<&Timeouts>,
-    default_wait: Option<&ElementQueryWait>,
+    session_defaults: SessionSettings,
 ) -> Group
 where
     Context: Sync + ?Sized,
     TestError: ?Sized + 'static,
 {
-    let (parallelism, name, run_always, entries) = tests.into_parts();
+    let BrowserTests {
+        parallelism,
+        name,
+        run_always,
+        entries,
+    } = tests;
     let named = name.is_some();
     let path = match (parent_path, name) {
         (Some(parent), Some(name)) => Some(format!("{parent} / {name}")),
@@ -288,13 +292,7 @@ where
         match entry {
             BrowserTestEntry::Test(test) => {
                 let index = prepared.len();
-                prepared.push(prepare_test(
-                    index,
-                    test,
-                    path.clone(),
-                    default_timeouts,
-                    default_wait,
-                ));
+                prepared.push(prepare_test(index, test, path.clone(), session_defaults));
                 children.push(Node::Test(index));
             }
             BrowserTestEntry::Group(group) => children.push(Node::Group(prepare_group(
@@ -302,8 +300,7 @@ where
                 path.as_deref(),
                 prepared,
                 next_group,
-                default_timeouts,
-                default_wait,
+                session_defaults,
             ))),
             BrowserTestEntry::TestGroup(group) => {
                 let group_path = match path.as_deref() {
@@ -316,8 +313,7 @@ where
                         index,
                         test,
                         Some(group_path.clone()),
-                        default_timeouts,
-                        default_wait,
+                        session_defaults,
                     ));
                     children.push(Node::Test(index));
                 }
@@ -337,8 +333,7 @@ fn prepare_test<Context, TestError>(
     index: usize,
     test: Box<dyn BrowserTest<Context, TestError>>,
     group: Option<String>,
-    default_timeouts: Option<&Timeouts>,
-    default_wait: Option<&ElementQueryWait>,
+    session_defaults: SessionSettings,
 ) -> QueuedTest<Context, TestError>
 where
     Context: Sync + ?Sized,
@@ -348,10 +343,13 @@ where
     let mut name = format!("unnamed test at index {index}");
     let metadata = std::panic::catch_unwind(AssertUnwindSafe(|| {
         name = test.name().into_owned();
+        let settings = test.session_settings();
         (
-            resolve_webdriver_timeouts(test.as_ref(), default_timeouts),
-            resolve_element_query_wait(test.as_ref(), default_wait),
-            test.fresh_session(),
+            settings.timeouts().or(session_defaults.timeouts()),
+            settings
+                .element_query_wait()
+                .or(session_defaults.element_query_wait()),
+            settings.fresh_session(),
         )
     }));
     match metadata {
@@ -938,12 +936,13 @@ where
         recent_steps: None,
         quit_start: None,
     };
-    let result = match test.timeouts {
-        Some(timeouts) => session
-            .update_timeouts(timeouts.into_thirtyfour_timeout_configuration())
+    let result = if test.timeouts.is_empty() {
+        Ok(())
+    } else {
+        session
+            .update_timeouts(test.timeouts.into_thirtyfour_timeout_configuration())
             .await
-            .map_err(Report::<rootcause::markers::Dynamic>::from),
-        None => Ok(()),
+            .map_err(Report::<rootcause::markers::Dynamic>::from)
     };
     match result {
         Ok(()) => run_body(env, session, test, &mut run).await,
@@ -1060,28 +1059,6 @@ async fn run_body<Context, TestError>(
     }
 }
 
-fn resolve_webdriver_timeouts<Context, TestError>(
-    test: &dyn BrowserTest<Context, TestError>,
-    runner_timeouts: Option<&Timeouts>,
-) -> Option<Timeouts>
-where
-    Context: Sync + ?Sized,
-    TestError: ?Sized,
-{
-    test.timeouts().or_else(|| runner_timeouts.copied())
-}
-
-fn resolve_element_query_wait<Context, TestError>(
-    test: &dyn BrowserTest<Context, TestError>,
-    runner_wait: Option<&ElementQueryWait>,
-) -> Option<ElementQueryWait>
-where
-    Context: Sync + ?Sized,
-    TestError: ?Sized,
-{
-    test.element_query_wait().or_else(|| runner_wait.copied())
-}
-
 fn configure_chrome_capabilities(
     caps: &mut ChromeCapabilities,
     visible: bool,
@@ -1109,13 +1086,12 @@ fn panic_payload_message(payload: &(dyn Any + Send + 'static)) -> String {
 #[cfg(test)]
 mod tests {
     use std::{
-        borrow::Cow,
         sync::atomic::{AtomicUsize, Ordering},
         time::Duration,
     };
 
     use assertr::prelude::*;
-    use rootcause::Report;
+    use rootcause::{Report, markers::Dynamic};
     use thirtyfour::{BrowserCapabilitiesHelper, WebDriver};
 
     use super::*;
@@ -1138,7 +1114,7 @@ mod tests {
                     .with(passes.named("d")),
             );
         let mut prepared = Vec::new();
-        let root = prepare_group(tests, None, &mut prepared, &mut 0, None, None);
+        let root = prepare_group(tests, None, &mut prepared, &mut 0, SessionSettings::new());
         assert_eq!(root.max_concurrency(), 2);
         assert_eq!(root.children.len(), 4);
         assert!(
@@ -1164,21 +1140,15 @@ mod tests {
         );
     }
 
-    mod resolve_webdriver_timeouts {
+    mod prepare_test {
         use super::*;
 
-        struct TimeoutOverrideTest {
-            timeouts: Option<Timeouts>,
-        }
+        struct SettingsTest(SessionSettings);
 
         #[async_trait::async_trait]
-        impl BrowserTest for TimeoutOverrideTest {
-            fn name(&self) -> Cow<'_, str> {
-                Cow::Borrowed("timeout override")
-            }
-
-            fn timeouts(&self) -> Option<Timeouts> {
-                self.timeouts
+        impl BrowserTest for SettingsTest {
+            fn session_settings(&self) -> SessionSettings {
+                self.0
             }
 
             async fn run(&self, _driver: &WebDriver, _context: &()) -> Result<(), Report> {
@@ -1186,109 +1156,67 @@ mod tests {
             }
         }
 
-        #[test]
-        fn uses_test_override_before_runner_default() {
-            let runner_timeouts = Timeouts::builder()
-                .script_timeout(Duration::from_secs(10))
-                .page_load_timeout(Duration::from_secs(10))
-                .implicit_wait_timeout(Duration::from_secs(10))
-                .build();
-            let test_timeouts = Timeouts::builder()
-                .script_timeout(Duration::from_secs(5))
-                .page_load_timeout(Duration::from_secs(5))
-                .implicit_wait_timeout(Duration::from_secs(5))
-                .build();
-            let test = TimeoutOverrideTest {
-                timeouts: Some(test_timeouts),
-            };
-
-            let resolved = resolve_webdriver_timeouts(&test, Some(&runner_timeouts));
-
-            assert_that!(resolved).is_equal_to(Some(test_timeouts));
-        }
-
-        #[test]
-        fn falls_back_to_runner_default() {
-            let runner_timeouts = Timeouts::builder()
-                .script_timeout(Duration::from_secs(10))
-                .page_load_timeout(Duration::from_secs(10))
-                .implicit_wait_timeout(Duration::from_secs(10))
-                .build();
-            let test = TimeoutOverrideTest { timeouts: None };
-
-            let resolved = resolve_webdriver_timeouts(&test, Some(&runner_timeouts));
-
-            assert_that!(resolved).is_equal_to(Some(runner_timeouts));
-        }
-
-        #[test]
-        fn preserves_unconfigured_default() {
-            let test = TimeoutOverrideTest { timeouts: None };
-
-            let resolved = resolve_webdriver_timeouts(&test, None);
-
-            assert_that!(resolved).is_none();
-        }
-    }
-
-    mod resolve_element_query_wait {
-        use super::*;
-
-        struct ElementQueryWaitOverrideTest {
-            wait: Option<ElementQueryWait>,
-        }
-
-        #[async_trait::async_trait]
-        impl BrowserTest for ElementQueryWaitOverrideTest {
-            fn name(&self) -> Cow<'_, str> {
-                Cow::Borrowed("element query wait override")
-            }
-
-            fn element_query_wait(&self) -> Option<ElementQueryWait> {
-                self.wait
-            }
-
-            async fn run(&self, _driver: &WebDriver, _context: &()) -> Result<(), Report> {
-                Ok(())
+        fn prepared(test: SessionSettings, runner: SessionSettings) -> PreparedTest<(), Dynamic> {
+            match prepare_test(0, Box::new(SettingsTest(test)), None, runner) {
+                QueuedTest::Ready(test) => test,
+                QueuedTest::Broken { .. } => panic!("the settings are readable"),
             }
         }
 
         #[test]
-        fn uses_test_override_before_runner_default() {
+        fn test_timeouts_override_the_runners_one_by_one() {
+            let runner = SessionSettings::new().with_timeouts(
+                Timeouts::new()
+                    .with_script(Duration::from_secs(10))
+                    .with_implicit_wait(Duration::ZERO),
+            );
+            let test = SessionSettings::new()
+                .with_timeouts(Timeouts::new().with_script(Duration::from_secs(5)));
+
+            assert_that!(prepared(test, runner).timeouts).is_equal_to(
+                Timeouts::new()
+                    .with_script(Duration::from_secs(5))
+                    .with_implicit_wait(Duration::ZERO),
+            );
+            assert_that!(prepared(SessionSettings::new(), SessionSettings::new()).timeouts)
+                .is_equal_to(Timeouts::new());
+        }
+
+        #[test]
+        fn test_element_query_wait_overrides_the_runners() {
             let runner_wait =
-                ElementQueryWait::new(Duration::from_secs(10), Duration::from_secs(1))
-                    .expect("non-zero interval is valid");
+                ElementQueryWait::new(Duration::from_secs(10), Duration::from_secs(1));
             let test_wait =
-                ElementQueryWait::new(Duration::from_secs(5), Duration::from_millis(500))
-                    .expect("non-zero interval is valid");
-            let test = ElementQueryWaitOverrideTest {
-                wait: Some(test_wait),
-            };
+                ElementQueryWait::new(Duration::from_secs(5), Duration::from_millis(500));
+            let runner = SessionSettings::new().with_element_query_wait(runner_wait);
 
-            let resolved = resolve_element_query_wait(&test, Some(&runner_wait));
+            let overriding = prepared(
+                SessionSettings::new().with_element_query_wait(test_wait),
+                runner,
+            );
+            assert_that!(overriding.element_query_wait).is_equal_to(Some(test_wait));
+            assert_that!(overriding.uses_pool(Some(runner_wait))).is_false();
 
-            assert_that!(resolved).is_equal_to(Some(test_wait));
+            let inheriting = prepared(SessionSettings::new(), runner);
+            assert_that!(inheriting.element_query_wait).is_equal_to(Some(runner_wait));
+            assert_that!(inheriting.uses_pool(Some(runner_wait))).is_true();
+
+            assert_that!(
+                prepared(SessionSettings::new(), SessionSettings::new()).element_query_wait
+            )
+            .is_none();
         }
 
         #[test]
-        fn falls_back_to_runner_default() {
-            let runner_wait =
-                ElementQueryWait::new(Duration::from_secs(10), Duration::from_millis(500))
-                    .expect("non-zero interval is valid");
-            let test = ElementQueryWaitOverrideTest { wait: None };
-
-            let resolved = resolve_element_query_wait(&test, Some(&runner_wait));
-
-            assert_that!(resolved).is_equal_to(Some(runner_wait));
-        }
-
-        #[test]
-        fn preserves_unconfigured_default() {
-            let test = ElementQueryWaitOverrideTest { wait: None };
-
-            let resolved = resolve_element_query_wait(&test, None);
-
-            assert_that!(resolved).is_none();
+        fn fresh_session_is_the_tests_own() {
+            assert_that!(
+                prepared(
+                    SessionSettings::new().with_fresh_session(true),
+                    SessionSettings::new()
+                )
+                .fresh_session
+            )
+            .is_true();
         }
     }
 

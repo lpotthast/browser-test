@@ -53,8 +53,8 @@ pub enum BrowserTestError {
     ShutDownChromeForTesting,
 
     /// The pause message or prompt could not be written to stdout.
-    #[error("Failed to flush pause prompt.")]
-    FlushPausePrompt,
+    #[error("Failed to write the pause prompt.")]
+    WritePausePrompt,
 
     /// The pause response could not be read from stdin.
     #[error("Failed to read pause response from stdin.")]

@@ -148,22 +148,22 @@ where
     stdout
         .write_all(config.message.as_bytes())
         .await
-        .context(BrowserTestError::FlushPausePrompt)?;
+        .context(BrowserTestError::WritePausePrompt)?;
     stdout
         .write_all(b"\n")
         .await
-        .context(BrowserTestError::FlushPausePrompt)?;
+        .context(BrowserTestError::WritePausePrompt)?;
     tracing::info!("{}", config.message);
 
     if let Some(hint) = config.hint.as_deref().filter(|hint| !hint.is_empty()) {
         stdout
             .write_all(hint.as_bytes())
             .await
-            .context(BrowserTestError::FlushPausePrompt)?;
+            .context(BrowserTestError::WritePausePrompt)?;
         stdout
             .write_all(b"\n")
             .await
-            .context(BrowserTestError::FlushPausePrompt)?;
+            .context(BrowserTestError::WritePausePrompt)?;
         tracing::info!("{hint}");
     }
 
@@ -172,11 +172,11 @@ where
         stdout
             .write_all(config.prompt.as_bytes())
             .await
-            .context(BrowserTestError::FlushPausePrompt)?;
+            .context(BrowserTestError::WritePausePrompt)?;
         stdout
             .flush()
             .await
-            .context(BrowserTestError::FlushPausePrompt)?;
+            .context(BrowserTestError::WritePausePrompt)?;
 
         buf.clear();
         let bytes_read = stdin
@@ -199,7 +199,7 @@ where
                 stdout
                     .write_all(b"Enter 'y' to continue or 'n' to abort.\n")
                     .await
-                    .context(BrowserTestError::FlushPausePrompt)?;
+                    .context(BrowserTestError::WritePausePrompt)?;
             }
         }
     }

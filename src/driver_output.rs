@@ -20,18 +20,28 @@ use rootcause::{
 
 use crate::{
     BrowserTestError,
-    env::{InvalidEnvVar, env_flag, env_number},
+    env::{InvalidEnvVar, env_flag, env_positive_number},
 };
 
 /// Default environment variable enabling browser driver output capture.
 pub(crate) const DEFAULT_BROWSER_DRIVER_OUTPUT_ENV: &str = "BROWSER_TEST_DRIVER_OUTPUT";
 
 /// Default number of browser driver output lines retained when env capture is enabled.
-pub(crate) const DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES: usize = 200;
+pub(crate) const DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES: NonZeroUsize =
+    NonZeroUsize::new(200).expect("the default is non-zero");
 
 /// Capture of recent browser-driver output, attached to the errors of failed runs and tests.
 ///
 /// Disabled by default.
+///
+/// # Examples
+///
+/// ```
+/// use browser_test::{BrowserTestRunner, Cancellation, DriverOutput};
+///
+/// let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals())
+///     .with_driver_output(DriverOutput::tail_lines(100));
+/// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct DriverOutput {
     tail_lines: Option<NonZeroUsize>,
@@ -44,11 +54,21 @@ impl DriverOutput {
         Self { tail_lines: None }
     }
 
-    /// Capture the last `tail_lines` browser-driver output lines. `0` disables capture.
+    /// Capture the last `tail_lines` lines of browser-driver output.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `tail_lines` is zero. Use [`Self::disabled`] to capture nothing.
     #[must_use]
+    #[track_caller]
     pub const fn tail_lines(tail_lines: usize) -> Self {
-        Self {
-            tail_lines: NonZeroUsize::new(tail_lines),
+        match NonZeroUsize::new(tail_lines) {
+            Some(tail_lines) => Self {
+                tail_lines: Some(tail_lines),
+            },
+            None => panic!(
+                "capturing zero lines of driver output captures nothing, use `DriverOutput::disabled()`"
+            ),
         }
     }
 
@@ -70,22 +90,24 @@ impl DriverOutput {
     /// Returns `None` if `env_var` is unset or empty, so the caller picks the default:
     /// `DriverOutput::from_env()?.unwrap_or_default()`. `1`, `true`, `yes`, `on`, and `enabled`
     /// enable capture, `0`, `false`, `no`, `off`, and `disabled` disable it (ignoring case). An
-    /// enabled capture retains `<env_var>_TAIL_LINES` lines, or 200 if that variable is unset or
-    /// empty. `0` lines disable capture. Both variables are read when this function is called.
+    /// enabled capture retains `<env_var>_TAIL_LINES` lines, a positive number, or 200 if that
+    /// variable is unset or empty. Both variables are read when this function is called.
     ///
     /// # Errors
     ///
     /// Returns [`InvalidEnvVar`] if `env_var` is not a boolean flag or `<env_var>_TAIL_LINES` is
-    /// not a number.
+    /// not a positive number.
     pub fn from_env_var(env_var: impl AsRef<str>) -> Result<Option<Self>, InvalidEnvVar> {
         let env_var = env_var.as_ref();
         match env_flag(env_var)? {
             None => Ok(None),
             Some(false) => Ok(Some(Self::disabled())),
             Some(true) => {
-                let tail_lines = env_number(&format!("{env_var}_TAIL_LINES"))?
+                let tail_lines = env_positive_number(&format!("{env_var}_TAIL_LINES"))?
                     .unwrap_or(DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES);
-                Ok(Some(Self::tail_lines(tail_lines)))
+                Ok(Some(Self {
+                    tail_lines: Some(tail_lines),
+                }))
             }
         }
     }
@@ -345,9 +367,14 @@ mod tests {
     use crate::test_support::EnvVarGuard;
 
     #[test]
-    fn tail_lines_of_zero_disables_capture() {
+    #[should_panic(expected = "captures nothing")]
+    fn tail_lines_rejects_zero() {
+        let _ = DriverOutput::tail_lines(0);
+    }
+
+    #[test]
+    fn tail_lines_enables_capture() {
         assert_that!(DriverOutput::default()).is_equal_to(DriverOutput::disabled());
-        assert_that!(DriverOutput::tail_lines(0)).is_equal_to(DriverOutput::disabled());
         assert_that!(
             DriverOutput::tail_lines(3)
                 .tail_line_count()
@@ -367,10 +394,12 @@ mod tests {
 
         tail_lines.remove();
         assert_that!(DriverOutput::from_env()).is_equal_to(Ok(Some(DriverOutput::tail_lines(
-            DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES,
+            DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES.get(),
         ))));
 
         tail_lines.set("lots");
+        assert_that!(DriverOutput::from_env().is_err()).is_true();
+        tail_lines.set("0");
         assert_that!(DriverOutput::from_env().is_err()).is_true();
 
         env.set("0");

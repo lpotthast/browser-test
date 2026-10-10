@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use browser_test::{
     BrowserTestRunner, BrowserTests, Cancellation, DriverOutput, ElementQueryWait, Parallelism,
-    Pause, StderrSummary, Visibility,
+    Pause, StderrSummary, Timeouts, Visibility,
 };
 use rootcause::Report;
 use rootcause::hooks::Hooks;
@@ -61,16 +61,15 @@ async fn main() -> Result<(), Report> {
                 .with_hint(format!("Wikipedia is available at {}", context.base_url)),
         )
         .with_timeouts(
-            browser_test::Timeouts::builder()
-                .script_timeout(Duration::from_secs(5))
-                .page_load_timeout(Duration::from_secs(10))
-                .implicit_wait_timeout(Duration::from_secs(0))
-                .build(),
+            Timeouts::new()
+                .with_script(Duration::from_secs(5))
+                .with_page_load(Duration::from_secs(10))
+                .with_implicit_wait(Duration::ZERO),
         )
-        .with_element_query_wait(
-            ElementQueryWait::new(Duration::from_secs(10), Duration::from_millis(500))
-                .context("Configuring element query waits")?,
-        )
+        .with_element_query_wait(ElementQueryWait::new(
+            Duration::from_secs(10),
+            Duration::from_millis(500),
+        ))
         .with_driver_output(DriverOutput::tail_lines(100))
         .with_report_consumer(StderrSummary)
         .run(&context, tests)

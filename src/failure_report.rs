@@ -46,10 +46,12 @@ const RUNNER_SOURCE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/execution/
 /// How many steps [`RecentSteps`] keeps.
 pub(crate) const RECENT_STEP_COUNT: usize = 8;
 
-/// The hooks behind failure reports, added to `hooks`: [`TestCodeFramesHook`], the formatter of
-/// [`WebDriverError`], and [`DisplayFormatter`] for [`BrowserTestError`] and message contexts
-/// (`String`, `&str`). For applications that install
-/// [`rootcause`] hooks of their own:
+/// `hooks` with the hooks behind failure reports added: a report creation hook attaching
+/// [`TestCodeFrames`] to the errors of running tests, a formatter printing [`WebDriverError`]s as
+/// their `WebDriver` message, and formatters printing [`BrowserTestError`]s and message contexts
+/// (`String`, `&str`) with `Display` also where a report is printed with `Debug`.
+///
+/// For applications that install [`rootcause`] hooks of their own:
 ///
 /// ```no_run
 /// browser_test::failure_report::hooks(rootcause::hooks::Hooks::new())
@@ -147,8 +149,7 @@ struct Frame {
 
 impl TestCodeFrames {
     /// The test code's frames of the current stack, if any.
-    #[must_use]
-    pub fn capture() -> Option<Self> {
+    pub(crate) fn capture() -> Option<Self> {
         let root = test_root();
         let backtrace = backtrace::Backtrace::new();
         let mut frames: Vec<Frame> = Vec::new();
@@ -343,7 +344,7 @@ pub(crate) fn without_own_location<C: ?Sized>(
 /// Attaches [`TestCodeFrames`] to every report created in a running test that has no children:
 /// errors where they arise, not the context added on their way up.
 #[derive(Debug, Clone, Copy)]
-pub struct TestCodeFramesHook;
+struct TestCodeFramesHook;
 
 impl ReportCreationHook for TestCodeFramesHook {
     fn on_local_creation(&self, mut report: ReportMut<'_, Dynamic, Local>) {
@@ -452,7 +453,7 @@ impl StepLog {
 /// Prints a thirtyfour error as its `WebDriver` message, without chromedriver's native stack trace
 /// and session info.
 #[derive(Debug, Clone, Copy)]
-pub struct WebDriverErrorFormatter;
+struct WebDriverErrorFormatter;
 
 impl ContextFormatterHook<WebDriverError> for WebDriverErrorFormatter {
     fn display(
@@ -497,7 +498,7 @@ impl ContextFormatterHook<WebDriverError> for WebDriverErrorFormatter {
 /// Prints a context with `Display` also where a report is printed with `Debug` (as a `main` or
 /// test returning `Err` does): messages without quotes and escapes, errors with their message.
 #[derive(Debug, Clone, Copy)]
-pub struct DisplayFormatter;
+struct DisplayFormatter;
 
 impl<C: fmt::Display + 'static> ContextFormatterHook<C> for DisplayFormatter {
     fn preferred_context_formatting_style(

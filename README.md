@@ -201,21 +201,20 @@ let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals())
     .with_failure_policy(FailurePolicy::RunAll)
     .with_report_consumer(StderrSummary)
     .with_timeouts(
-        Timeouts::builder()
-            .script_timeout(Duration::from_secs(5))
-            .page_load_timeout(Duration::from_secs(10))
-            .implicit_wait_timeout(Duration::ZERO)
-            .build(),
+        Timeouts::new()
+            .with_script(Duration::from_secs(5))
+            .with_page_load(Duration::from_secs(10))
+            .with_implicit_wait(Duration::ZERO),
     )
-    .with_element_query_wait(
-        ElementQueryWait::new(Duration::from_secs(10), Duration::from_millis(500))
-            .expect("the poll interval is non-zero"),
-    );
+    .with_element_query_wait(ElementQueryWait::new(
+        Duration::from_secs(10),
+        Duration::from_millis(500),
+    ));
 # Ok::<(), browser_test::InvalidEnvVar>(())
 ```
 
-A `BrowserTest` can override runner-level timeouts and element-query waits for one test by implementing `timeouts()` or
-`element_query_wait()`.
+A `BrowserTest` can override the runner's timeouts and element-query wait for one test by implementing
+`session_settings()`. Timeouts it sets replace the runner's one by one, the others stay.
 
 ### Chrome
 
@@ -239,8 +238,8 @@ every session, after the runner's own headless or visible arguments.
 
 Every session gets a fresh Chrome profile, removed when the session ends. When a run starts, it also removes the
 profiles that killed runs left behind. Profiles are kept in `browser-test-profiles` in the system's temporary directory.
-Choose another place with `.with_chrome_profiles_dir(ChromeProfilesDir::new("target/browser-test-profiles"))`.
-Capability setups must not set `--user-data-dir`.
+Choose another place with `.with_chrome_profiles_dir("target/browser-test-profiles")`. Capability setups must not set
+`--user-data-dir`.
 
 ## Defining Tests
 
@@ -303,16 +302,17 @@ use rootcause::Report;
 async fn mutable_context(_context: &mut ()) -> Result<(), Report> { Ok(()) }
 ```
 
-An `async fn` taking `&Context` is a `BrowserTest` without the attribute too, named by its Rust path;
+An `async fn` taking `&Context` is a `BrowserTest` without the attribute too, named by its Rust path.
 `BrowserTest::named` gives any test another name. Implement `BrowserTest` yourself for tests with session settings of
-their own (timeouts, element-query wait, a fresh session), tests with parameters, and wrappers around other tests.
+their own (`session_settings()`: timeouts, element-query wait, a fresh session), tests with parameters, and wrappers
+around other tests. A wrapper forwards `name()`, `description()` and `session_settings()` to the test it wraps.
 
 ## Execution Model
 
 `BrowserTests` says which tests run one after another and which at the same time. A group runs its entries either
 sequentially (`BrowserTests::sequential()`) or up to a number at once (`BrowserTests::parallel(Parallelism::parallel(4))`,
 or `Parallelism::from_env()?.unwrap_or(...)` to read `BROWSER_TEST_PARALLELISM`). Entries are tests (`with`) and nested groups
-(`with_group`), so stages, tests that must not overlap, and run-wide checks can all be expressed:
+(`with_nested`), so stages, tests that must not overlap, and run-wide checks can all be expressed:
 
 ```rust,no_run
 # use std::borrow::Cow;
@@ -331,14 +331,14 @@ or `Parallelism::from_env()?.unwrap_or(...)` to read `BROWSER_TEST_PARALLELISM`)
 # }
 # test!(Buttons); test!(Tables); test!(CreateUser); test!(DeleteUser); test!(ServerDidNotPanic);
 let tests = BrowserTests::sequential()
-    .with_group(
+    .with_nested(
         BrowserTests::parallel(Parallelism::from_env()?.unwrap_or(Parallelism::parallel(4)))
             .with(Buttons)
             .with(Tables)
             // These two share server state, so they must not run at the same time.
-            .with_group(BrowserTests::sequential().with(CreateUser).with(DeleteUser)),
+            .with_nested(BrowserTests::sequential().with(CreateUser).with(DeleteUser)),
     )
-    .with_group(
+    .with_nested(
         BrowserTests::sequential()
             .named("after all")
             .run_always()
@@ -412,8 +412,8 @@ Visible runs keep no spare sessions by default, because a spare session's browse
 window of the running test. Each test then waits for its browser to start. Set `with_spare_sessions(n)` explicitly to
 create spare sessions in visible runs as well.
 
-Spare sessions use the runner's element-query wait. A test that overrides `element_query_wait()` with a different value
-gets a session created when its turn comes, so it waits for its browser to start.
+Spare sessions use the runner's element-query wait. A test that sets an element-query wait of its own in
+`session_settings()` gets a session created when its turn comes, so it waits for its browser to start.
 
 ### Session Reuse
 
@@ -468,9 +468,10 @@ Reusable sessions start Chrome without its back/forward cache (`--disable-featur
 cached page keeps a renderer process (100 to 250 MB) alive in a reused browser. `SessionReuse::with_back_forward_cache(true)`
 keeps it, e.g. for tests of pages restored from it.
 
-A test that needs a browser no test ran in (e.g. one measuring a first page load, with empty caches) returns `true` from
-`BrowserTest::fresh_session`: the pool gives it a session no test ran in, creating one if none is ready. Afterwards its
-session returns to the pool like any other. A session whose reset fails (e.g. its browser crashed) quits.
+A test that needs a browser no test ran in (e.g. one measuring a first page load, with empty caches) says so with
+`SessionSettings::with_fresh_session(true)`: the pool gives it a session no test ran in, creating one if none is
+ready. Afterwards its session returns to the pool like any other. A session whose reset fails (e.g. its browser
+crashed) quits.
 `SessionReuse::with_max_tests_per_session(n)` bounds how many tests one browser runs. `BROWSER_TEST_SESSION_REUSE=0`
 (read by `SessionReuse::from_env`) turns reuse off for a run, e.g. to compare timings.
 

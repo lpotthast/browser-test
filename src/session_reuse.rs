@@ -27,8 +27,8 @@ pub(crate) const DEFAULT_SESSION_REUSE_ENV: &str = "BROWSER_TEST_SESSION_REUSE";
 /// [`SessionReset`].
 ///
 /// A test that needs a browser no test ran in (e.g. one measuring a first page load, with empty
-/// caches) returns `true` from [`crate::BrowserTest::fresh_session`]: the pool gives it a session
-/// no test ran in, creating one if none is ready. Afterwards its session returns to the pool like
+/// caches) says so with [`SessionSettings::with_fresh_session`](crate::SessionSettings::with_fresh_session):
+/// the pool gives it a session no test ran in, creating one if none is ready. Afterwards its session returns to the pool like
 /// any other. A session whose reset fails (e.g. its browser crashed) quits.
 ///
 /// Reusable sessions start Chrome without its back/forward cache

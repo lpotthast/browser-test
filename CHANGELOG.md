@@ -17,9 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run. Applications with hooks of their own add them with `failure_report::hooks`, and runners then leave the
   installation to them. `BrowserTestRunner::with_failure_report_hooks(false)` goes without the hooks. See the README's
   "Failure Reports".
-- `BrowserTestRunner::with_chrome_profiles_dir(ChromeProfilesDir)` sets where runs keep the Chrome profiles of their
-  sessions. Defaults to `ChromeProfilesDir::in_temp_dir()`, which is `"browser-test-profiles"` in the system's temporary
-  directory.
+- `BrowserTestRunner::with_chrome_profiles_dir(path)` sets where runs keep the Chrome profiles of their sessions.
+  Defaults to `"browser-test-profiles"` in the system's temporary directory.
 - Cancellation of runs, e.g. on Ctrl-C. A cancelled run starts no further tests, cancels running ones, and shuts down
   `ChromeDriver` and its browsers, then `run` returns the new `BrowserTestError::Cancelled`. Without it, an interrupted
   run can leave `ChromeDriver` and its browsers running. See the breaking change below. `CancellationToken` is
@@ -37,9 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SessionReset::manual([CachedData::Http])` resets the session's one tab item by item and keeps only the listed
   cached data, e.g. the HTTP cache with V8's compiled code. Both release pressed keys and buttons and restore the window
   rect and timeouts. Reusable sessions run without Chrome's back/forward cache unless
-  `SessionReuse::with_back_forward_cache(true)`. `BrowserTest::fresh_session` asks the pool for a session no test ran in,
-  `SessionReuse::with_max_tests_per_session` bounds how many tests a browser runs, and `SessionReuse::from_env` reads
-  `BROWSER_TEST_SESSION_REUSE`. Disabled by default. See the README's "Session Reuse".
+  `SessionReuse::with_back_forward_cache(true)`. `SessionSettings::with_fresh_session(true)` asks the pool for a
+  session no test ran in, `SessionReuse::with_max_tests_per_session` bounds how many tests a browser runs, and
+  `SessionReuse::from_env` reads `BROWSER_TEST_SESSION_REUSE`. Disabled by default. See the README's "Session Reuse".
 - The run report counts reset sessions (`BrowserTestRunReport::session_resets`, `session_reset_time`), and the summary
   shows the average duration of every step kind.
 - `#[browser_test]`, re-exported from the new `browser-test-macros` crate, turns an async function into a test: a unit
@@ -55,6 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BrowserTests::filter_tests` and `filter_groups` select by predicate.
 - Async functions taking a context reference implement `BrowserTest`. `BrowserTest::named` gives any test another name,
   keeping its settings. The trait's default name is the Rust type name.
+- `SessionSettings`, returned by the new `BrowserTest::session_settings`, holds what a test needs of its session: timeouts,
+  element-query wait, and whether it needs a fresh session.
+- `TestOutcome::is_passed` and `is_failed`, `BrowserTestRunReport::passed` and `failed`.
+- `Parallelism::max_parallel_tests` is public.
 
 ### Changed
 
@@ -69,6 +72,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cancels runs once your own token is cancelled. `Cancellation::disabled()` keeps the previous behavior. Replace
   `BrowserTestRunner::new()` with `BrowserTestRunner::new(Cancellation::on_shutdown_signals())`.
 - **Breaking:** `BrowserTestRunner` no longer implements `Default`, as it has no default `Cancellation`.
+- **Breaking:** `BrowserTest::timeouts` and `element_query_wait` were replaced by `BrowserTest::session_settings`,
+  returning a `SessionSettings`. A wrapper around another test now forwards `name`, `description` and
+  `session_settings`, and future settings reach the wrapped test without changes to the wrapper. Replace
+  `fn timeouts(&self) -> Option<Timeouts> { Some(t) }` with
+  `fn session_settings(&self) -> SessionSettings { SessionSettings::new().with_timeouts(t) }`.
+- **Breaking:** A test's timeouts override the runner's one by one. Timeouts the test leaves unset keep the runner's
+  values, where they previously stayed at `ChromeDriver`'s defaults.
+- **Breaking:** `Timeouts` and `ProgressWarnings` are built with `with_*` methods like every other setting.
+  `Timeouts::builder().script_timeout(d).build()` became `Timeouts::new().with_script(d)` (also `with_page_load` and
+  `with_implicit_wait`), and the getters lost their `_timeout` suffix. `ProgressWarnings::builder().test_running(d)
+  .build()` became `ProgressWarnings::default().with_test_running(Some(d))`, where `None` disables a warning.
+- **Breaking:** `ElementQueryWait::new` returns the wait itself and panics on a zero poll interval, like
+  `tokio::time::interval`. Drop the `.expect(..)` or `?` after it.
+- **Breaking:** `Parallelism::parallel(0)` and `DriverOutput::tail_lines(0)` panic instead of meaning sequential or
+  disabled. Use `Parallelism::sequential()` and `DriverOutput::disabled()`. `BROWSER_TEST_PARALLELISM` and
+  `BROWSER_TEST_DRIVER_OUTPUT_TAIL_LINES` must be positive.
+- **Breaking:** `BrowserTests::with_group` was renamed to `with_nested`, so that "group" no longer names both nested
+  `BrowserTests` and logical `TestGroup`s.
+- **Breaking:** `BrowserTestError::FlushPausePrompt` was renamed to `WritePausePrompt`.
 - **Breaking:** Updated `chrome-for-testing-manager` to 0.14.
 - **Breaking:** The re-exported `thirtyfour` no longer has its `component` feature enabled. Enable this crate's
   `component` feature to keep using `#[derive(Component)]`.
@@ -82,13 +104,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Browser runs no longer leak Chrome profiles into the temporary directory. `ChromeDriver` removes the profile it
   creates for a session (`org.chromium.Chromium.scoped_dir.*`, tens of megabytes each) only when the session is quit
   cleanly. Killed runs could leak them until the disk filled up. The runner now manages profiles itself: every session
-  gets a fresh profile in the `ChromeProfilesDir`, removed when the session ends, and a starting run removes the
+  gets a fresh profile in the profiles directory, removed when the session ends, and a starting run removes the
   profiles that killed runs left behind. A run whose profiles cannot be set up fails with the new
   `BrowserTestError::CreateChromeProfiles`.
 - Sessions on these profiles start with a focused page, as before. On a profile it did not create itself, `ChromeDriver`
   starts the page without focus: `document.hasFocus()` is `false`, and focusing an element from script fires no
   `focus`/`focusin` events. The runner brings every new session's page to the front (CDP `Page.bringToFront`); the
   re-exported `thirtyfour` has its `cdp` feature enabled for that.
+
+### Removed
+
+- **Breaking:** `TimeoutsBuilder`, `ProgressWarningsBuilder`, `ElementQueryWaitError`, and the `typed-builder`
+  dependency.
 
 ## [0.5.0] - 2026-10-06
 

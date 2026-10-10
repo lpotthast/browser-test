@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, num::NonZeroUsize};
 
 /// An environment variable whose value cannot be interpreted, returned by the `from_env` and
 /// `from_env_var` constructors.
@@ -42,17 +42,17 @@ pub(crate) fn env_flag(name: &str) -> Result<Option<bool>, InvalidEnvVar> {
     }
 }
 
-/// Read a non-negative number. `None` if the variable is unset or empty.
-pub(crate) fn env_number(name: &str) -> Result<Option<usize>, InvalidEnvVar> {
+/// Read a positive number. `None` if the variable is unset or empty.
+pub(crate) fn env_positive_number(name: &str) -> Result<Option<NonZeroUsize>, InvalidEnvVar> {
     let Some(value) = env_value(name) else {
         return Ok(None);
     };
-    match value.parse::<usize>() {
+    match value.parse::<NonZeroUsize>() {
         Ok(number) => Ok(Some(number)),
         Err(_) => Err(InvalidEnvVar {
             name: name.to_owned(),
             value,
-            expected: "a non-negative number",
+            expected: "a positive number",
         }),
     }
 }
@@ -71,11 +71,11 @@ mod tests {
         let env = EnvVarGuard::new(TEST_VAR);
         env.remove();
         assert_that!(env_flag(TEST_VAR)).is_equal_to(Ok(None));
-        assert_that!(env_number(TEST_VAR)).is_equal_to(Ok(None));
+        assert_that!(env_positive_number(TEST_VAR)).is_equal_to(Ok(None));
 
         env.set(" ");
         assert_that!(env_flag(TEST_VAR)).is_equal_to(Ok(None));
-        assert_that!(env_number(TEST_VAR)).is_equal_to(Ok(None));
+        assert_that!(env_positive_number(TEST_VAR)).is_equal_to(Ok(None));
     }
 
     #[test]
@@ -103,8 +103,10 @@ mod tests {
         assert_that!(error.to_string()).contains("BROWSER_TEST_ENV_TEST is set to \"ture\"");
 
         env.set("four");
-        assert_that!(env_number(TEST_VAR).is_err()).is_true();
+        assert_that!(env_positive_number(TEST_VAR).is_err()).is_true();
+        env.set("0");
+        assert_that!(env_positive_number(TEST_VAR).is_err()).is_true();
         env.set(" 4 ");
-        assert_that!(env_number(TEST_VAR)).is_equal_to(Ok(Some(4)));
+        assert_that!(env_positive_number(TEST_VAR)).is_equal_to(Ok(NonZeroUsize::new(4)));
     }
 }

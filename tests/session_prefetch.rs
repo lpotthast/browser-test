@@ -14,7 +14,7 @@ use assertr::prelude::*;
 use browser_test::{
     BrowserTest, BrowserTestError, BrowserTestRunReport, BrowserTestRunner, BrowserTests,
     CachedData, Cancellation, FailurePolicy, Parallelism, SessionPreparation, SessionReset,
-    SessionReuse, StepExt, TestOutcome, TracingSummary, async_trait,
+    SessionReuse, SessionSettings, StepExt, TestOutcome, TracingSummary, async_trait,
     thirtyfour::{ChromiumLikeCapabilities, WebDriver},
 };
 use rootcause::{Report, report};
@@ -100,8 +100,8 @@ impl BrowserTest<str> for Visit {
         format!("visit {}", self.index).into()
     }
 
-    fn fresh_session(&self) -> bool {
-        self.fresh_session
+    fn session_settings(&self) -> SessionSettings {
+        SessionSettings::new().with_fresh_session(self.fresh_session)
     }
 
     async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
@@ -364,7 +364,7 @@ async fn nested_groups_limit_what_runs_at_the_same_time() {
     let tests = BrowserTests::parallel(Parallelism::parallel(3))
         .with(Visit::new(0, body, &all))
         .with(Visit::new(1, body, &all))
-        .with_group(
+        .with_nested(
             BrowserTests::sequential()
                 .named("serial")
                 .with(Visit::new(2, body, &serial))
@@ -432,7 +432,7 @@ async fn fail_fast_still_runs_run_always_groups() {
         BrowserTests::sequential()
             .with(failing)
             .with(Visit::new(1, Duration::ZERO, &tracker))
-            .with_group(
+            .with_nested(
                 BrowserTests::sequential()
                     .named("after all")
                     .run_always()

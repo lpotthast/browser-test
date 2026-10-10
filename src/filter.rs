@@ -39,8 +39,8 @@ pub(crate) const DEFAULT_GROUP_FILTER_ENV: &str = "BROWSER_TEST_GROUP";
 /// # fn suite() -> BrowserTests { BrowserTests::sequential() }
 /// # fn checks() -> BrowserTests { BrowserTests::sequential() }
 /// let tests = BrowserTests::sequential()
-///     .with_group(suite().filter(&TestFilter::from_env()?))
-///     .with_group(checks());
+///     .with_nested(suite().filter(&TestFilter::from_env()?))
+///     .with_nested(checks());
 /// # Ok::<(), browser_test::InvalidEnvVar>(())
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

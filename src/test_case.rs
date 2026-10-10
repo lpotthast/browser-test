@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use rootcause::Report;
 use thirtyfour::WebDriver;
 
-use crate::{ElementQueryWait, Parallelism, Timeouts};
+use crate::{Parallelism, SessionSettings, TestFilter};
 
 /// A browser test: a named async body run in a `WebDriver` session, with the run's context.
 ///
@@ -12,14 +12,14 @@ use crate::{ElementQueryWait, Parallelism, Timeouts};
 /// [`SessionReuse`](crate::SessionReuse), one an earlier test ran in, reset. There are three ways
 /// to define a test:
 ///
-/// - [`#[browser_test]`](crate::browser_test) on an `async fn`, for most tests: it generates a
+/// - [`#[browser_test]`](macro@crate::browser_test) on an `async fn`, for most tests: it generates a
 ///   unit struct implementing this trait, named after the function and documented by its doc
 ///   comments.
 /// - An `async fn` taking `&Context` is a test as it is, named by its Rust path. Use
 ///   [`Self::named`] to name it.
-/// - Implement the trait, with [`async_trait`](crate::async_trait), for tests with settings of
-///   their own ([`Self::timeouts`], [`Self::element_query_wait`], [`Self::fresh_session`]), tests
-///   with parameters, and wrappers around other tests.
+/// - Implement the trait, with [`async_trait`](crate::async_trait), for tests with session
+///   settings of their own ([`Self::session_settings`]), tests with parameters, and wrappers around
+///   other tests.
 ///
 /// `Context` is what [`BrowserTestRunner::run`](crate::BrowserTestRunner::run) gives every test,
 /// e.g. the app's base URL. `TestError` is the error type of the [`Report`] a failing test
@@ -28,9 +28,9 @@ use crate::{ElementQueryWait, Parallelism, Timeouts};
 /// # Examples
 ///
 /// ```
-/// use std::time::Duration;
+/// use std::{borrow::Cow, time::Duration};
 ///
-/// use browser_test::{BrowserTest, Timeouts, async_trait, thirtyfour::WebDriver};
+/// use browser_test::{BrowserTest, SessionSettings, Timeouts, async_trait, thirtyfour::WebDriver};
 /// use rootcause::Report;
 ///
 /// /// Loads the first page with empty caches, so that its load time is that of a first visit.
@@ -40,16 +40,14 @@ use crate::{ElementQueryWait, Parallelism, Timeouts};
 ///
 /// #[async_trait]
 /// impl BrowserTest<str> for FirstVisit {
-///     fn name(&self) -> std::borrow::Cow<'_, str> {
+///     fn name(&self) -> Cow<'_, str> {
 ///         format!("first visit of {}", self.path).into()
 ///     }
 ///
-///     fn timeouts(&self) -> Option<Timeouts> {
-///         Some(Timeouts::builder().page_load_timeout(Duration::from_secs(5)).build())
-///     }
-///
-///     fn fresh_session(&self) -> bool {
-///         true
+///     fn session_settings(&self) -> SessionSettings {
+///         SessionSettings::new()
+///             .with_timeouts(Timeouts::new().with_page_load(Duration::from_secs(5)))
+///             .with_fresh_session(true)
 ///     }
 ///
 ///     async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
@@ -59,8 +57,42 @@ use crate::{ElementQueryWait, Parallelism, Timeouts};
 /// }
 /// ```
 ///
-/// A wrapper delegating to another test must forward every method but [`Self::named`], or the
-/// wrapped test's settings are lost.
+/// # Wrapping tests
+///
+/// A test running another one, e.g. to check something after every test, must forward
+/// [`Self::name`], [`Self::description`] and [`Self::session_settings`] to it, or the wrapped
+/// test's are lost:
+///
+/// ```
+/// use std::borrow::Cow;
+///
+/// use browser_test::{BrowserTest, SessionSettings, async_trait, thirtyfour::WebDriver};
+/// use rootcause::Report;
+///
+/// /// Runs a test, then checks that its page logged no error.
+/// struct CheckConsole<T>(T);
+///
+/// #[async_trait]
+/// impl<T: BrowserTest<str>> BrowserTest<str> for CheckConsole<T> {
+///     fn name(&self) -> Cow<'_, str> {
+///         self.0.name()
+///     }
+///
+///     fn description(&self) -> Option<Cow<'_, str>> {
+///         self.0.description()
+///     }
+///
+///     fn session_settings(&self) -> SessionSettings {
+///         self.0.session_settings()
+///     }
+///
+///     async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
+///         self.0.run(driver, base_url).await?;
+///         // ... check the console ...
+///         Ok(())
+///     }
+/// }
+/// ```
 // `async_trait` marks the boxed futures `#[must_use]`, which they are already.
 #[allow(clippy::double_must_use)]
 #[async_trait]
@@ -70,7 +102,7 @@ where
     TestError: ?Sized,
 {
     /// The test's name, used in logs, reports and failures, and matched by
-    /// [`TestFilter`](crate::TestFilter).
+    /// [`TestFilter`].
     ///
     /// Defaults to the Rust type name, e.g. `my_tests::checkout::ShowsTotal`, or the path of an
     /// `async fn`. Names need not be unique, but distinct names keep reports unambiguous. The
@@ -81,10 +113,18 @@ where
 
     /// What the test checks, in prose, if it says.
     ///
-    /// [`#[browser_test]`](crate::browser_test) returns the function's doc comments. Unlike the
+    /// [`#[browser_test]`](macro@crate::browser_test) returns the function's doc comments. Unlike the
     /// name, the description is not matched by filters. Defaults to `None`.
     fn description(&self) -> Option<Cow<'_, str>> {
         None
+    }
+
+    /// What the test needs of its session: timeouts, element query wait, or a session no other
+    /// test ran in. Defaults to [`SessionSettings::new`], the runner's settings.
+    ///
+    /// The runner reads the settings once, before the test runs.
+    fn session_settings(&self) -> SessionSettings {
+        SessionSettings::new()
     }
 
     /// This test under the name `name`, with its behavior, description and session settings.
@@ -112,36 +152,6 @@ where
         }
     }
 
-    /// Optional timeouts for this test.
-    ///
-    /// Returning `None` uses the runner's default timeout configuration, if one is set.
-    fn timeouts(&self) -> Option<Timeouts> {
-        None
-    }
-
-    /// Optional element query wait configuration for this test.
-    ///
-    /// Returning `None` uses the runner's default element query wait configuration, if one is set.
-    ///
-    /// The element query wait is fixed when a session is created. A test returning a value other
-    /// than the runner's does not use the sessions the runner creates ahead of time (see
-    /// [`crate::BrowserTestRunner::with_spare_sessions`]). Its session is created when its turn
-    /// comes.
-    fn element_query_wait(&self) -> Option<ElementQueryWait> {
-        None
-    }
-
-    /// Whether this test needs a session no other test ran in.
-    ///
-    /// Only matters with [`crate::SessionReuse::enabled`], where sessions are reset after their
-    /// test and run further tests. Return `true` for a test that needs a browser no test ran in,
-    /// e.g. one measuring a first page load, with empty caches: the pool gives it a fresh session,
-    /// creating one if none is ready. Afterwards its session returns to the pool like any other.
-    /// Defaults to `false`.
-    fn fresh_session(&self) -> bool {
-        false
-    }
-
     /// Run the test in the session of `driver`, with the run's `context`.
     ///
     /// A returned error or a panic fails the test. Wrap the test's navigations, lookups and waits
@@ -167,7 +177,7 @@ where
 /// `my_tests::checkout::shows_total`.
 ///
 /// [`BrowserTest::named`] names it independently of its module. Use
-/// [`#[browser_test]`](crate::browser_test) for tests that also take the `WebDriver`, or should be
+/// [`#[browser_test]`](macro@crate::browser_test) for tests that also take the `WebDriver`, or should be
 /// described by their doc comments.
 #[async_trait]
 impl<Context, TestError, F> BrowserTest<Context, TestError> for F
@@ -203,16 +213,8 @@ where
         self.test.description()
     }
 
-    fn timeouts(&self) -> Option<Timeouts> {
-        self.test.timeouts()
-    }
-
-    fn element_query_wait(&self) -> Option<ElementQueryWait> {
-        self.test.element_query_wait()
-    }
-
-    fn fresh_session(&self) -> bool {
-        self.test.fresh_session()
+    fn session_settings(&self) -> SessionSettings {
+        self.test.session_settings()
     }
 
     async fn run(&self, driver: &WebDriver, context: &Context) -> Result<(), Report<TestError>> {
@@ -224,7 +226,7 @@ where
 ///
 /// A group runs its entries either one after another ([`Self::sequential`]) or up to a number of
 /// entries at the same time ([`Self::parallel`]). Entries are tests ([`Self::with`]) and nested
-/// groups ([`Self::with_group`]), so any mix of sequential and parallel execution can be expressed:
+/// groups ([`Self::with_nested`]), so any mix of sequential and parallel execution can be expressed:
 /// a sequential group of groups runs stages one after another, and a sequential group inside a
 /// parallel group keeps its tests from running at the same time while other tests run alongside.
 /// The tests of a logical [`TestGroup`] ([`Self::with_test_group`]) are entries of their own.
@@ -254,14 +256,14 @@ where
 /// # }
 /// # test!(Buttons); test!(Tables); test!(CreateUser); test!(DeleteUser); test!(ServerDidNotPanic);
 /// let tests = BrowserTests::sequential()
-///     .with_group(
+///     .with_nested(
 ///         BrowserTests::parallel(Parallelism::from_env()?.unwrap_or(Parallelism::parallel(4)))
 ///             .with(Buttons)
 ///             .with(Tables)
 ///             // These two share server state, so they must not run at the same time.
-///             .with_group(BrowserTests::sequential().with(CreateUser).with(DeleteUser)),
+///             .with_nested(BrowserTests::sequential().with(CreateUser).with(DeleteUser)),
 ///     )
-///     .with_group(
+///     .with_nested(
 ///         BrowserTests::sequential()
 ///             .named("after all")
 ///             .run_always()
@@ -274,10 +276,10 @@ where
     Context: Sync + ?Sized,
     TestError: ?Sized,
 {
-    parallelism: Parallelism,
-    name: Option<String>,
-    run_always: bool,
-    entries: Vec<BrowserTestEntry<Context, TestError>>,
+    pub(crate) parallelism: Parallelism,
+    pub(crate) name: Option<String>,
+    pub(crate) run_always: bool,
+    pub(crate) entries: Vec<BrowserTestEntry<Context, TestError>>,
 }
 
 /// A logical group of tests, e.g. the tests of one component, for selecting them by name.
@@ -416,8 +418,11 @@ where
     }
 
     /// Add a nested group, which runs its entries as it says, as one entry of this group.
+    ///
+    /// Not to be confused with [`Self::with_test_group`], which adds the tests of a logical group
+    /// as entries of this group.
     #[must_use]
-    pub fn with_group(mut self, group: Self) -> Self {
+    pub fn with_nested(mut self, group: Self) -> Self {
         self.entries.push(BrowserTestEntry::Group(group));
         self
     }
@@ -438,7 +443,7 @@ where
     /// e.g. checks of the whole run, after filtering: [`Self::run_always`] does not exempt tests
     /// from filters.
     #[must_use]
-    pub fn filter(self, filter: &crate::TestFilter) -> Self {
+    pub fn filter(self, filter: &TestFilter) -> Self {
         filter.apply(self)
     }
 
@@ -497,17 +502,6 @@ where
             BrowserTestEntry::TestGroup(group) => group.tests.is_empty(),
         })
     }
-
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        Parallelism,
-        Option<String>,
-        bool,
-        Vec<BrowserTestEntry<Context, TestError>>,
-    ) {
-        (self.parallelism, self.name, self.run_always, self.entries)
-    }
 }
 
 impl<Context, TestError> fmt::Debug for BrowserTests<Context, TestError>
@@ -560,7 +554,7 @@ mod tests {
     fn browser_tests_debug_prints_the_tree_with_test_names() {
         let tests = BrowserTests::sequential()
             .with(NamedTest("opens home page"))
-            .with_group(
+            .with_nested(
                 BrowserTests::sequential()
                     .named("nested")
                     .with(NamedTest("search works")),
@@ -569,9 +563,9 @@ mod tests {
         assert_eq!(
             format!("{tests:?}"),
             concat!(
-                r#"BrowserTests { parallelism: Parallelism { max_parallel_tests: None }, name: None, "#,
+                r#"BrowserTests { parallelism: Parallelism { max_parallel_tests: 1 }, name: None, "#,
                 r#"run_always: false, entries: ["opens home page", BrowserTests { parallelism: "#,
-                r#"Parallelism { max_parallel_tests: None }, name: Some("nested"), run_always: false, "#,
+                r#"Parallelism { max_parallel_tests: 1 }, name: Some("nested"), run_always: false, "#,
                 r#"entries: ["search works"] }] }"#,
             )
         );
@@ -579,7 +573,7 @@ mod tests {
 
     #[test]
     fn groups_without_tests_are_empty() {
-        let empty = BrowserTests::<()>::sequential().with_group(BrowserTests::sequential());
+        let empty = BrowserTests::<()>::sequential().with_nested(BrowserTests::sequential());
         assert!(empty.is_empty());
         assert!(!empty.with(NamedTest("test")).is_empty());
         assert!(
@@ -613,7 +607,7 @@ mod tests {
                     .with(NamedTest("atom::hover"))
                     .with(NamedTest("hook::press")),
             )
-            .with_group(
+            .with_nested(
                 BrowserTests::sequential()
                     .named("stage")
                     .run_always()
@@ -626,7 +620,6 @@ mod tests {
 
     #[test]
     fn selection_combines_exact_groups_with_name_substrings_in_registration_order() {
-        use crate::TestFilter;
         assert_eq!(
             test_names(&suite().filter(&TestFilter::new())),
             [
@@ -664,14 +657,18 @@ mod tests {
         );
         assert!(
             suite()
-                .filter(&TestFilter::new().with_group("buttons").with_name_containing("absent"))
+                .filter(
+                    &TestFilter::new()
+                        .with_group("buttons")
+                        .with_name_containing("absent")
+                )
                 .is_empty()
         );
     }
 
     #[test]
     fn selection_preserves_execution_policy_and_allows_unconditional_checks() {
-        let tests = suite().filter(&crate::TestFilter::new().with_group("focus"));
+        let tests = suite().filter(&TestFilter::new().with_group("focus"));
         assert_eq!(tests.parallelism, Parallelism::parallel(2));
         let BrowserTestEntry::Group(stage) = &tests.entries[0] else {
             panic!("expected stage")
@@ -679,7 +676,7 @@ mod tests {
         assert_eq!(stage.name.as_deref(), Some("stage"));
         assert_eq!(stage.parallelism, Parallelism::sequential());
         assert!(stage.run_always);
-        let tests = tests.with_group(
+        let tests = tests.with_nested(
             BrowserTests::sequential()
                 .run_always()
                 .with(NamedTest("after all")),
@@ -702,28 +699,25 @@ mod tests {
     }
 
     #[test]
-    fn naming_preserves_session_settings() {
+    fn naming_preserves_description_and_session_settings() {
+        use std::time::Duration;
+
+        use crate::{ElementQueryWait, Timeouts};
+
         struct Settings;
         #[async_trait]
         impl BrowserTest for Settings {
-            fn timeouts(&self) -> Option<Timeouts> {
-                Some(
-                    Timeouts::builder()
-                        .implicit_wait_timeout(std::time::Duration::ZERO)
-                        .build(),
-                )
+            fn description(&self) -> Option<Cow<'_, str>> {
+                Some("described".into())
             }
-            fn element_query_wait(&self) -> Option<ElementQueryWait> {
-                Some(
-                    ElementQueryWait::new(
-                        std::time::Duration::from_secs(1),
-                        std::time::Duration::from_millis(10),
-                    )
-                    .unwrap(),
-                )
-            }
-            fn fresh_session(&self) -> bool {
-                true
+            fn session_settings(&self) -> SessionSettings {
+                SessionSettings::new()
+                    .with_timeouts(Timeouts::new().with_implicit_wait(Duration::ZERO))
+                    .with_element_query_wait(ElementQueryWait::new(
+                        Duration::from_secs(1),
+                        Duration::from_millis(10),
+                    ))
+                    .with_fresh_session(true)
             }
             async fn run(&self, _: &WebDriver, (): &()) -> Result<(), Report> {
                 Ok(())
@@ -731,8 +725,7 @@ mod tests {
         }
         let test = Settings.named("renamed");
         assert_eq!(test.name(), "renamed");
-        assert_eq!(test.timeouts(), Settings.timeouts());
-        assert_eq!(test.element_query_wait(), Settings.element_query_wait());
-        assert!(test.fresh_session());
+        assert_eq!(test.description(), Settings.description());
+        assert_eq!(test.session_settings(), Settings.session_settings());
     }
 }

@@ -105,6 +105,20 @@ pub enum TestOutcome {
     Panicked,
 }
 
+impl TestOutcome {
+    /// Whether the test passed.
+    #[must_use]
+    pub const fn is_passed(self) -> bool {
+        matches!(self, Self::Passed)
+    }
+
+    /// Whether the test failed or panicked.
+    #[must_use]
+    pub const fn is_failed(self) -> bool {
+        !self.is_passed()
+    }
+}
+
 /// Timing of the `WebDriver` session of one test.
 ///
 /// The runner prepares sessions ahead of the tests that use them (see
@@ -174,6 +188,21 @@ impl StepStats {
 const SUMMARY_LIST_LEN: usize = 10;
 
 impl BrowserTestRunReport {
+    /// Number of tests that passed.
+    #[must_use]
+    pub fn passed(&self) -> usize {
+        self.tests
+            .iter()
+            .filter(|test| test.outcome.is_passed())
+            .count()
+    }
+
+    /// Number of tests that failed or panicked.
+    #[must_use]
+    pub fn failed(&self) -> usize {
+        self.tests.len() - self.passed()
+    }
+
     /// Number of sessions created for the tests of this report.
     #[must_use]
     pub fn sessions_created(&self) -> usize {
@@ -261,23 +290,16 @@ impl BrowserTestRunReport {
         steps.sort_by_key(|(_, stats)| std::cmp::Reverse(stats.total));
         steps
     }
-
-    fn count(&self, outcome: TestOutcome) -> usize {
-        self.tests
-            .iter()
-            .filter(|test| test.outcome == outcome)
-            .count()
-    }
 }
 
 impl Display for BrowserTestRunReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let passed = self.count(TestOutcome::Passed);
-        let failed = self.count(TestOutcome::Failed) + self.count(TestOutcome::Panicked);
         writeln!(
             f,
-            "Browser test run: {} test(s), {passed} passed, {failed} failed, in {}",
+            "Browser test run: {} test(s), {} passed, {} failed, in {}",
             self.tests.len(),
+            self.passed(),
+            self.failed(),
             FormatDuration(self.total),
         )?;
         writeln!(

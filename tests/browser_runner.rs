@@ -13,8 +13,7 @@ use std::{
 use assertr::prelude::*;
 use browser_test::{
     BrowserTest, BrowserTestError, BrowserTestRunner, BrowserTests, Cancellation,
-    CancellationToken, ChromeProfilesDir, ElementQueryWait, FailurePolicy, Parallelism, StepExt,
-    Timeouts, async_trait,
+    CancellationToken, FailurePolicy, Parallelism, SessionSettings, StepExt, async_trait,
     thirtyfour::{By, ChromiumLikeCapabilities, WebDriver, prelude::ElementQueryable},
 };
 use rootcause::{Report, prelude::ResultExt};
@@ -310,8 +309,7 @@ impl BrowserTest<IntegrationContext, IntegrationTestError> for PanicTest {
 #[derive(Clone, Copy)]
 enum MetadataPanicHook {
     Name,
-    WebdriverTimeouts,
-    ElementQueryWait,
+    SessionSettings,
 }
 
 struct MetadataPanicTest {
@@ -328,20 +326,12 @@ impl BrowserTest<IntegrationContext, IntegrationTestError> for MetadataPanicTest
         Cow::Borrowed("metadata panic")
     }
 
-    fn timeouts(&self) -> Option<Timeouts> {
-        if matches!(self.panic_in, MetadataPanicHook::WebdriverTimeouts) {
-            panic!("webdriver timeout hook failed");
+    fn session_settings(&self) -> SessionSettings {
+        if matches!(self.panic_in, MetadataPanicHook::SessionSettings) {
+            panic!("session settings hook failed");
         }
 
-        None
-    }
-
-    fn element_query_wait(&self) -> Option<ElementQueryWait> {
-        if matches!(self.panic_in, MetadataPanicHook::ElementQueryWait) {
-            panic!("element query wait hook failed");
-        }
-
-        None
+        SessionSettings::new()
     }
 
     async fn run(
@@ -539,10 +529,7 @@ async fn run_all_reports_metadata_hook_panics_and_runs_remaining_page_title_test
                     panic_in: MetadataPanicHook::Name,
                 })
                 .with(MetadataPanicTest {
-                    panic_in: MetadataPanicHook::WebdriverTimeouts,
-                })
-                .with(MetadataPanicTest {
-                    panic_in: MetadataPanicHook::ElementQueryWait,
+                    panic_in: MetadataPanicHook::SessionSettings,
                 })
                 .with(page_title_test_with_counter(
                     "page title",
@@ -554,11 +541,10 @@ async fn run_all_reports_metadata_hook_panics_and_runs_remaining_page_title_test
 
     assert_that!(started.load(Ordering::SeqCst)).is_equal_to(1);
     assert_that!(err.to_string())
-        .contains(BrowserTestError::RunTests { failed_tests: 3 }.to_string());
-    assert_that!(err.children().len()).is_equal_to(3);
+        .contains(BrowserTestError::RunTests { failed_tests: 2 }.to_string());
+    assert_that!(err.children().len()).is_equal_to(2);
     assert_that!(format!("{err:?}")).contains("unnamed test at index 0");
-    assert_that!(format!("{err:?}")).contains("webdriver timeout hook failed");
-    assert_that!(format!("{err:?}")).contains("element query wait hook failed");
+    assert_that!(format!("{err:?}")).contains("session settings hook failed");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -627,7 +613,7 @@ async fn run_removes_the_chrome_profiles_of_its_sessions() -> RunnerResult {
     let profiles_dir = ScratchDir::new("removed-profiles");
 
     runner()
-        .with_chrome_profiles_dir(ChromeProfilesDir::new(profiles_dir.path()))
+        .with_chrome_profiles_dir(profiles_dir.path())
         .run(
             &IntegrationContext::default(),
             BrowserTests::parallel(Parallelism::parallel(2))
@@ -671,7 +657,7 @@ async fn unusable_chrome_profiles_dir_fails_the_run() {
         .expect("permissions should be set");
 
     let err = runner()
-        .with_chrome_profiles_dir(ChromeProfilesDir::new(profiles_dir.path()))
+        .with_chrome_profiles_dir(profiles_dir.path())
         .run(
             &IntegrationContext::default(),
             BrowserTests::sequential().with(page_title_test("page title")),
@@ -712,7 +698,7 @@ async fn cancellation_stops_the_run_and_its_browsers() {
     let started = Arc::new(AtomicUsize::new(0));
 
     let err = runner_with(Cancellation::from_token(cancellation.clone()))
-        .with_chrome_profiles_dir(ChromeProfilesDir::new(profiles_dir.path()))
+        .with_chrome_profiles_dir(profiles_dir.path())
         .run(
             &IntegrationContext::default(),
             BrowserTests::sequential()
@@ -843,7 +829,7 @@ async fn next_run_removes_the_chrome_profiles_of_a_killed_run() -> RunnerResult 
     assert_that!(dir_entry_count(&profiles_dir)).is_equal_to(1);
 
     runner()
-        .with_chrome_profiles_dir(ChromeProfilesDir::new(&profiles_dir))
+        .with_chrome_profiles_dir(&profiles_dir)
         .run(
             &IntegrationContext::default(),
             BrowserTests::sequential().with(page_title_test("page title")),
@@ -863,7 +849,7 @@ async fn child_run(runner: BrowserTestRunner) -> RunnerResult {
     };
     let ready_file = ChildRun::ready_file(&dir);
     runner
-        .with_chrome_profiles_dir(ChromeProfilesDir::new(ChildRun::profiles_dir_in(&dir)))
+        .with_chrome_profiles_dir(ChildRun::profiles_dir_in(&dir))
         .run(
             &IntegrationContext::default(),
             BrowserTests::sequential().with(RunForeverTest::new(move || {

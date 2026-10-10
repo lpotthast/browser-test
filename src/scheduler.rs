@@ -4,7 +4,7 @@ use rootcause::{Report, report_collection::ReportCollection};
 
 use crate::{
     BrowserTestError,
-    env::{InvalidEnvVar, env_number},
+    env::{InvalidEnvVar, env_positive_number},
 };
 
 /// Default environment variable read by [`Parallelism::from_env`].
@@ -16,10 +16,15 @@ pub(crate) const DEFAULT_PARALLELISM_ENV: &str = "BROWSER_TEST_PARALLELISM";
 /// Sequential by default. Tests take parallel slots in their given order. A test whose browser is
 /// already running may start before an earlier test whose browser is still starting. Only run
 /// tests in parallel that can use the same application state at the same time.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Parallelism {
-    /// `None` runs sequentially.
-    max_parallel_tests: Option<NonZeroUsize>,
+    max_parallel_tests: NonZeroUsize,
+}
+
+impl Default for Parallelism {
+    fn default() -> Self {
+        Self::sequential()
+    }
 }
 
 impl Parallelism {
@@ -27,11 +32,15 @@ impl Parallelism {
     #[must_use]
     pub const fn sequential() -> Self {
         Self {
-            max_parallel_tests: None,
+            max_parallel_tests: NonZeroUsize::MIN,
         }
     }
 
-    /// Run up to `max_parallel_tests` tests at the same time. `0` and `1` run tests sequentially.
+    /// Run up to `max_parallel_tests` tests at the same time. `1` runs tests sequentially.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_parallel_tests` is zero, as no test could run.
     ///
     /// # Examples
     ///
@@ -41,12 +50,11 @@ impl Parallelism {
     /// let tests = BrowserTests::<()>::parallel(Parallelism::parallel(4));
     /// ```
     #[must_use]
+    #[track_caller]
     pub const fn parallel(max_parallel_tests: usize) -> Self {
         match NonZeroUsize::new(max_parallel_tests) {
-            Some(max_parallel_tests) if max_parallel_tests.get() > 1 => Self {
-                max_parallel_tests: Some(max_parallel_tests),
-            },
-            _ => Self::sequential(),
+            Some(max_parallel_tests) => Self { max_parallel_tests },
+            None => panic!("a parallelism of zero would run no test"),
         }
     }
 
@@ -64,26 +72,26 @@ impl Parallelism {
     /// Read the number of tests to run at the same time from `env_var`.
     ///
     /// Returns `None` if the variable is unset or empty, so the caller picks the default:
-    /// `Parallelism::from_env()?.unwrap_or(Parallelism::parallel(4))`. The value is a number as
-    /// accepted by [`Self::parallel`]. The variable is read when this function is called.
+    /// `Parallelism::from_env()?.unwrap_or(Parallelism::parallel(4))`. The value is a positive
+    /// number, `1` running tests sequentially. The variable is read when this function is called.
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidEnvVar`] if the variable is not a number.
+    /// Returns [`InvalidEnvVar`] if the variable is not a positive number.
     pub fn from_env_var(env_var: impl AsRef<str>) -> Result<Option<Self>, InvalidEnvVar> {
-        Ok(env_number(env_var.as_ref())?.map(Self::parallel))
+        Ok(env_positive_number(env_var.as_ref())?
+            .map(|max_parallel_tests| Self { max_parallel_tests }))
     }
 
-    pub(crate) const fn max_parallel_tests(self) -> NonZeroUsize {
-        match self.max_parallel_tests {
-            Some(max_parallel_tests) => max_parallel_tests,
-            None => NonZeroUsize::MIN,
-        }
+    /// The most tests that run at the same time, `1` if sequential.
+    #[must_use]
+    pub const fn max_parallel_tests(self) -> NonZeroUsize {
+        self.max_parallel_tests
     }
 }
 
 /// How [`crate::BrowserTestRunner`] handles failed browser tests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum FailurePolicy {
     /// Stop starting tests after the first failed test.
     ///
@@ -148,12 +156,17 @@ mod tests {
     use crate::test_support::EnvVarGuard;
 
     #[test]
-    fn parallel_treats_zero_and_one_as_sequential() {
+    fn parallel_treats_one_as_sequential() {
         assert_that!(Parallelism::default()).is_equal_to(Parallelism::sequential());
-        assert_that!(Parallelism::parallel(0)).is_equal_to(Parallelism::sequential());
         assert_that!(Parallelism::parallel(1)).is_equal_to(Parallelism::sequential());
         assert_that!(Parallelism::sequential().max_parallel_tests().get()).is_equal_to(1);
         assert_that!(Parallelism::parallel(4).max_parallel_tests().get()).is_equal_to(4);
+    }
+
+    #[test]
+    #[should_panic(expected = "would run no test")]
+    fn parallel_rejects_zero() {
+        let _ = Parallelism::parallel(0);
     }
 
     #[test]
@@ -167,6 +180,9 @@ mod tests {
         assert_that!(Parallelism::from_env()).is_equal_to(Ok(Some(Parallelism::parallel(4))));
 
         env.set("many");
+        assert_that!(Parallelism::from_env().is_err()).is_true();
+
+        env.set("0");
         assert_that!(Parallelism::from_env().is_err()).is_true();
     }
 

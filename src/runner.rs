@@ -9,7 +9,7 @@ use thirtyfour::{ChromeCapabilities, error::WebDriverResult};
 
 use crate::{
     BrowserTestError, BrowserTests, Cancellation, DriverOutput, ElementQueryWait, FailurePolicy,
-    Pause, ProgressWarnings, SessionReuse, Timeouts,
+    Pause, ProgressWarnings, SessionReuse, SessionSettings, Timeouts,
     cancellation::cancelled_result,
     driver_output::{DriverOutputCapture, attach_browser_driver_output_to_result},
     env::{InvalidEnvVar, env_flag},
@@ -77,8 +77,7 @@ pub struct BrowserTestRunner {
     visibility: Visibility,
     pause: Pause,
     failure_policy: FailurePolicy,
-    timeouts: Option<Timeouts>,
-    element_query_wait: Option<ElementQueryWait>,
+    session_defaults: SessionSettings,
     chrome_capabilities_setups: Vec<Arc<ChromeCapabilitiesSetup>>,
     driver_output: DriverOutput,
     chrome_for_testing_cache_dir: Option<PathBuf>,
@@ -99,8 +98,7 @@ impl fmt::Debug for BrowserTestRunner {
             .field("visibility", &self.visibility)
             .field("pause", &self.pause)
             .field("failure_policy", &self.failure_policy)
-            .field("timeouts", &self.timeouts)
-            .field("element_query_wait", &self.element_query_wait)
+            .field("session_defaults", &self.session_defaults)
             .field(
                 "chrome_capabilities_setup_count",
                 &self.chrome_capabilities_setups.len(),
@@ -133,8 +131,7 @@ impl BrowserTestRunner {
             visibility: Visibility::Headless,
             pause: Pause::disabled(),
             failure_policy: FailurePolicy::FailFast,
-            timeouts: None,
-            element_query_wait: None,
+            session_defaults: SessionSettings::new(),
             chrome_capabilities_setups: Vec::new(),
             driver_output: DriverOutput::disabled(),
             chrome_for_testing_cache_dir: None,
@@ -191,23 +188,23 @@ impl BrowserTestRunner {
         self
     }
 
-    /// Set the `WebDriver` timeouts of every session.
+    /// Set the `WebDriver` timeouts of every test. Unset by default, keeping `ChromeDriver`'s.
     ///
-    /// Individual [`crate::BrowserTest`] implementations can override this by returning `Some` from
-    /// [`crate::BrowserTest::timeouts`].
+    /// A test overrides them one by one with
+    /// [`SessionSettings::with_timeouts`].
     #[must_use]
     pub const fn with_timeouts(mut self, timeouts: Timeouts) -> Self {
-        self.timeouts = Some(timeouts);
+        self.session_defaults = self.session_defaults.with_timeouts(timeouts);
         self
     }
 
-    /// Set the element query wait of every session.
+    /// Set how element queries poll in every test. Unset by default, keeping `thirtyfour`'s
+    /// default poller.
     ///
-    /// Individual [`crate::BrowserTest`] implementations can override this by returning `Some` from
-    /// [`crate::BrowserTest::element_query_wait`].
+    /// A test overrides it with [`SessionSettings::with_element_query_wait`].
     #[must_use]
     pub const fn with_element_query_wait(mut self, wait: ElementQueryWait) -> Self {
-        self.element_query_wait = Some(wait);
+        self.session_defaults = self.session_defaults.with_element_query_wait(wait);
         self
     }
 
@@ -238,11 +235,24 @@ impl BrowserTestRunner {
         self
     }
 
-    /// Set where runs keep the Chrome profiles of their sessions. Defaults to
-    /// [`ChromeProfilesDir::in_temp_dir`]. See [`ChromeProfilesDir`] for how profiles are managed.
+    /// Set the directory in which runs keep the Chrome profiles of their sessions. Defaults to
+    /// `browser-test-profiles` in [`std::env::temp_dir`].
+    ///
+    /// Every session gets a fresh profile, removed when the session ends. When a run starts, it
+    /// also removes the profiles that killed runs left behind. Only entries created by
+    /// browser-test are removed. A relative path is resolved against the current directory when a
+    /// run starts.
+    ///
+    /// The directory is created when a run starts, unless it exists. The run fails with
+    /// [`BrowserTestError::CreateChromeProfiles`] if the directory
+    ///
+    /// - is a symlink or not a directory,
+    /// - has an absolute path that is not valid UTF-8,
+    /// - is accessible by other users (Unix only), as profiles hold cookies and other browser data, or
+    /// - is on a file system without file locks.
     #[must_use]
-    pub fn with_chrome_profiles_dir(mut self, profiles_dir: ChromeProfilesDir) -> Self {
-        self.chrome_profiles_dir = profiles_dir;
+    pub fn with_chrome_profiles_dir(mut self, profiles_dir: impl Into<PathBuf>) -> Self {
+        self.chrome_profiles_dir = ChromeProfilesDir::new(profiles_dir);
         self
     }
 
@@ -287,9 +297,8 @@ impl BrowserTestRunner {
     /// would open on top of the window of the running test. Set spare sessions explicitly to
     /// create them in visible runs as well.
     ///
-    /// Spare sessions use the runner's element query wait. A test overriding
-    /// [`crate::BrowserTest::element_query_wait`] with a different value gets a session created
-    /// when its turn comes.
+    /// Spare sessions use the runner's element query wait. A test overriding it with
+    /// [`SessionSettings::with_element_query_wait`] gets a session created when its turn comes.
     #[must_use]
     pub const fn with_spare_sessions(mut self, spare_sessions: usize) -> Self {
         self.spare_sessions = Some(spare_sessions);
@@ -301,8 +310,8 @@ impl BrowserTestRunner {
     ///
     /// Reuse makes a run create about as many sessions as tests run at the same time, plus spares,
     /// however many tests it has: worthwhile when a run has many short tests. See [`SessionReuse`]
-    /// for what the reset restores, and [`crate::BrowserTest::fresh_session`] for tests that need a
-    /// session of their own.
+    /// for what the reset restores, and [`SessionSettings::with_fresh_session`] for tests that
+    /// need a session no other test ran in.
     #[must_use]
     pub const fn with_session_reuse(mut self, session_reuse: SessionReuse) -> Self {
         self.session_reuse = session_reuse;
@@ -496,8 +505,7 @@ impl BrowserTestRunner {
         let config = ExecutionConfig {
             chrome,
             visible: self.visibility.is_visible(),
-            timeouts: self.timeouts.as_ref(),
-            element_query_wait: self.element_query_wait.as_ref(),
+            session_defaults: self.session_defaults,
             chrome_capabilities_setups: &self.chrome_capabilities_setups,
             profiles,
             cancellation,
@@ -561,11 +569,8 @@ mod tests {
 
     #[test]
     fn runner_builders_set_their_settings() {
-        let timeouts = Timeouts::builder()
-            .script_timeout(Duration::from_secs(10))
-            .build();
-        let wait = ElementQueryWait::new(Duration::from_secs(10), Duration::from_millis(500))
-            .expect("non-zero interval is valid");
+        let timeouts = Timeouts::new().with_script(Duration::from_secs(10));
+        let wait = ElementQueryWait::new(Duration::from_secs(10), Duration::from_millis(500));
 
         let runner = BrowserTestRunner::new(Cancellation::disabled())
             .with_failure_policy(FailurePolicy::RunAll)
@@ -575,13 +580,16 @@ mod tests {
             .with_element_query_wait(wait)
             .with_chrome_capabilities(|caps| caps.add_arg("--no-sandbox"))
             .with_chrome_for_testing_cache_dir("/tmp/browser-test-cft-cache")
-            .with_chrome_profiles_dir(ChromeProfilesDir::new("target/profiles"));
+            .with_chrome_profiles_dir("target/profiles");
 
         assert_that!(runner.failure_policy).is_equal_to(FailurePolicy::RunAll);
         assert_that!(runner.visibility).is_equal_to(Visibility::Visible);
         assert_that!(runner.pause.is_enabled()).is_true();
-        assert_that!(runner.timeouts).is_equal_to(Some(timeouts));
-        assert_that!(runner.element_query_wait).is_equal_to(Some(wait));
+        assert_that!(runner.session_defaults).is_equal_to(
+            SessionSettings::new()
+                .with_timeouts(timeouts)
+                .with_element_query_wait(wait),
+        );
         assert_that!(runner.chrome_capabilities_setups.len()).is_equal_to(1);
         assert_that!(runner.chrome_for_testing_cache_dir)
             .is_equal_to(Some(PathBuf::from("/tmp/browser-test-cft-cache")));
@@ -654,14 +662,6 @@ mod tests {
 
         assert_that!(first.snapshot().total_lines).is_equal_to(1);
         assert_that!(second.snapshot().total_lines).is_equal_to(0);
-    }
-
-    #[test]
-    fn driver_output_of_zero_lines_creates_no_capture() {
-        let runner = BrowserTestRunner::new(Cancellation::disabled())
-            .with_driver_output(DriverOutput::tail_lines(0));
-
-        assert_that!(runner.driver_output_capture_for_run().is_none()).is_true();
     }
 
     #[tokio::test]
