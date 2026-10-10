@@ -30,7 +30,7 @@ use rootcause::{
     ReportMut, ReportRef,
     handlers::{ContextFormattingStyle, FormattingFunction},
     hooks::{Hooks, context_formatter::ContextFormatterHook, report_creation::ReportCreationHook},
-    markers::{Dynamic, Local, SendSync, Uncloneable},
+    markers::{Dynamic, Local, ObjectMarkerFor, SendSync, Uncloneable},
     report_attachment::ReportAttachment,
 };
 use thirtyfour::error::WebDriverError;
@@ -347,32 +347,30 @@ pub(crate) fn without_own_location<C: ?Sized>(
 struct TestCodeFramesHook;
 
 impl ReportCreationHook for TestCodeFramesHook {
-    fn on_local_creation(&self, mut report: ReportMut<'_, Dynamic, Local>) {
-        if report.children().is_empty()
-            && crate::step::in_test()
-            && let Some(frames) = TestCodeFrames::capture()
-        {
-            // Frames that start where the location points replace it.
-            pop_location_at(&mut report, &frames);
-            report.attachments_mut().push(
-                ReportAttachment::<_, Local>::new_custom::<rootcause::handlers::Display>(frames)
-                    .into_dynamic(),
-            );
-        }
+    fn on_local_creation(&self, report: ReportMut<'_, Dynamic, Local>) {
+        attach_test_code_frames(report);
     }
 
-    fn on_sendsync_creation(&self, mut report: ReportMut<'_, Dynamic, SendSync>) {
-        if report.children().is_empty()
-            && crate::step::in_test()
-            && let Some(frames) = TestCodeFrames::capture()
-        {
-            // Frames that start where the location points replace it.
-            pop_location_at(&mut report, &frames);
-            report.attachments_mut().push(
-                ReportAttachment::<_, SendSync>::new_custom::<rootcause::handlers::Display>(frames)
-                    .into_dynamic(),
-            );
-        }
+    fn on_sendsync_creation(&self, report: ReportMut<'_, Dynamic, SendSync>) {
+        attach_test_code_frames(report);
+    }
+}
+
+/// See [`TestCodeFramesHook`].
+fn attach_test_code_frames<T>(mut report: ReportMut<'_, Dynamic, T>)
+where
+    TestCodeFrames: ObjectMarkerFor<T>,
+{
+    if report.children().is_empty()
+        && crate::step::in_test()
+        && let Some(frames) = TestCodeFrames::capture()
+    {
+        // Frames that start where the location points replace it.
+        pop_location_at(&mut report, &frames);
+        report.attachments_mut().push(
+            ReportAttachment::<_, T>::new_custom::<rootcause::handlers::Display>(frames)
+                .into_dynamic(),
+        );
     }
 }
 

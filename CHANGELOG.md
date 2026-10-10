@@ -111,6 +111,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   starts the page without focus: `document.hasFocus()` is `false`, and focusing an element from script fires no
   `focus`/`focusin` events. The runner brings every new session's page to the front (CDP `Page.bringToFront`); the
   re-exported `thirtyfour` has its `cdp` feature enabled for that.
+- The run summary prints durations just below a full minute as `2m 00.0s` instead of `1m 60.0s`.
 
 ### Removed
 

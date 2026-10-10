@@ -215,8 +215,8 @@ impl BrowserTestRunner {
         self
     }
 
-    /// Capture recent browser-driver output and attach it to the errors of failed runs and tests.
-    /// Defaults to [`DriverOutput::disabled`].
+    /// Capture recent browser-driver output and attach it to the error of a failed run, which
+    /// holds the errors of its failed tests. Defaults to [`DriverOutput::disabled`].
     #[must_use]
     pub const fn with_driver_output(mut self, driver_output: DriverOutput) -> Self {
         self.driver_output = driver_output;

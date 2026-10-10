@@ -2,7 +2,7 @@ use std::{
     collections::VecDeque,
     fmt,
     num::NonZeroUsize,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
 
@@ -30,7 +30,7 @@ pub(crate) const DEFAULT_BROWSER_DRIVER_OUTPUT_ENV: &str = "BROWSER_TEST_DRIVER_
 pub(crate) const DEFAULT_BROWSER_DRIVER_OUTPUT_TAIL_LINES: NonZeroUsize =
     NonZeroUsize::new(200).expect("the default is non-zero");
 
-/// Capture of recent browser-driver output, attached to the errors of failed runs and tests.
+/// Capture of recent browser-driver output, attached to the error of a failed run.
 ///
 /// Disabled by default.
 ///
@@ -167,7 +167,6 @@ impl DriverOutputFollower {
 
 impl DriverOutputCapture {
     /// Create a capture handle retaining the last `tail_lines` driver output lines.
-    ///
     #[must_use]
     pub(crate) fn new(tail_lines: NonZeroUsize) -> Self {
         Self {
@@ -179,17 +178,14 @@ impl DriverOutputCapture {
         }
     }
 
+    fn lock(&self) -> MutexGuard<'_, BrowserDriverOutputState> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Return a snapshot of the currently captured output tail.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal output capture mutex has been poisoned.
     #[must_use]
     pub(crate) fn snapshot(&self) -> DriverOutputSnapshot {
-        let state = self
-            .inner
-            .lock()
-            .expect("browser driver output capture mutex should not be poisoned");
+        let state = self.lock();
         DriverOutputSnapshot {
             total_lines: state.total_lines,
             tail_capacity: state.tail_capacity.get(),
@@ -223,10 +219,7 @@ impl DriverOutputCapture {
     }
 
     pub(crate) fn push(&self, line: DriverOutputLine) {
-        let mut state = self
-            .inner
-            .lock()
-            .expect("browser driver output capture mutex should not be poisoned");
+        let mut state = self.lock();
         let sequence = state.total_lines;
         state.total_lines += 1;
 
@@ -240,11 +233,10 @@ impl DriverOutputCapture {
 
     /// Account for `count` lines that were not captured because capturing fell behind.
     fn skip(&self, count: u64) {
-        let mut state = self
-            .inner
-            .lock()
-            .expect("browser driver output capture mutex should not be poisoned");
-        state.total_lines += usize::try_from(count).unwrap_or(usize::MAX);
+        let mut state = self.lock();
+        state.total_lines = state
+            .total_lines
+            .saturating_add(usize::try_from(count).unwrap_or(usize::MAX));
     }
 }
 

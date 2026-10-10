@@ -1,7 +1,15 @@
-use std::{borrow::Cow, fmt::Display, io::ErrorKind};
+use std::{
+    borrow::Cow,
+    fmt::Display,
+    io::{self, ErrorKind},
+    thread,
+};
 
 use rootcause::{Report, prelude::ResultExt};
-use tokio::io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::{
+    io::{AsyncWrite, AsyncWriteExt},
+    sync::oneshot,
+};
 
 use crate::{
     BrowserTestError,
@@ -131,87 +139,99 @@ pub(crate) async fn pause_if_requested(
 }
 
 async fn pause(config: &Pause) -> Result<PauseDecision, Report<BrowserTestError>> {
-    let mut stdin = io::BufReader::new(io::stdin());
-    let mut stdout = io::stdout();
-    pause_with_io(config, &mut stdin, &mut stdout).await
+    pause_with_io(config, read_stdin_line, &mut tokio::io::stdout()).await
 }
 
-async fn pause_with_io<R, W>(
+/// Read a line from stdin on a thread of its own. `None` at EOF.
+///
+/// Not through Tokio's `stdin`, which reads on the runtime's blocking pool: a read cannot be
+/// cancelled, so a cancelled pause (Ctrl-C at the prompt) would keep the runtime from shutting
+/// down until the user presses Enter. A thread of its own is left behind instead.
+async fn read_stdin_line() -> io::Result<Option<String>> {
+    let (line_sender, line) = oneshot::channel();
+    thread::Builder::new()
+        .name("browser-test-pause".into())
+        .spawn(move || {
+            let mut line = String::new();
+            let read = io::stdin()
+                .read_line(&mut line)
+                .map(|bytes_read| (bytes_read > 0).then_some(line));
+            let _ = line_sender.send(read);
+        })?;
+    line.await
+        .unwrap_or_else(|_| Err(io::Error::other("the stdin reader thread panicked")))
+}
+
+/// Print the pause to `stdout` and ask until `read_line` (`None` at EOF) gives an answer.
+async fn pause_with_io<ReadLine, W>(
     config: &Pause,
-    stdin: &mut R,
+    mut read_line: impl FnMut() -> ReadLine,
     stdout: &mut W,
 ) -> Result<PauseDecision, Report<BrowserTestError>>
 where
-    R: AsyncBufRead + Unpin,
+    ReadLine: Future<Output = io::Result<Option<String>>>,
     W: AsyncWrite + Unpin,
 {
-    stdout
-        .write_all(config.message.as_bytes())
-        .await
-        .context(BrowserTestError::WritePausePrompt)?;
-    stdout
-        .write_all(b"\n")
-        .await
-        .context(BrowserTestError::WritePausePrompt)?;
+    print(stdout, &format!("{}\n", config.message)).await?;
     tracing::info!("{}", config.message);
 
     if let Some(hint) = config.hint.as_deref().filter(|hint| !hint.is_empty()) {
-        stdout
-            .write_all(hint.as_bytes())
-            .await
-            .context(BrowserTestError::WritePausePrompt)?;
-        stdout
-            .write_all(b"\n")
-            .await
-            .context(BrowserTestError::WritePausePrompt)?;
+        print(stdout, &format!("{hint}\n")).await?;
         tracing::info!("{hint}");
     }
 
-    let mut buf = String::new();
     loop {
-        stdout
-            .write_all(config.prompt.as_bytes())
+        print(stdout, &config.prompt).await?;
+        let Some(answer) = read_line()
             .await
-            .context(BrowserTestError::WritePausePrompt)?;
-        stdout
-            .flush()
-            .await
-            .context(BrowserTestError::WritePausePrompt)?;
-
-        buf.clear();
-        let bytes_read = stdin
-            .read_line(&mut buf)
-            .await
-            .context(BrowserTestError::ReadPauseResponse)?;
-        if bytes_read == 0 {
-            return Err(Err::<(), _>(io::Error::new(
+            .context(BrowserTestError::ReadPauseResponse)?
+        else {
+            return Err(io::Error::new(
                 ErrorKind::UnexpectedEof,
                 "stdin reached EOF while waiting for pause response",
             ))
-            .context(BrowserTestError::ReadPauseResponse)
-            .expect_err("synthetic EOF error should always be an error"));
-        }
+            .context(BrowserTestError::ReadPauseResponse);
+        };
 
-        match buf.trim().to_ascii_lowercase().as_str() {
+        match answer.trim().to_ascii_lowercase().as_str() {
             "y" | "yes" | "c" | "continue" => return Ok(PauseDecision::Continue),
             "n" | "no" | "q" | "quit" | "" => return Ok(PauseDecision::Abort),
-            _ => {
-                stdout
-                    .write_all(b"Enter 'y' to continue or 'n' to abort.\n")
-                    .await
-                    .context(BrowserTestError::WritePausePrompt)?;
-            }
+            _ => print(stdout, "Enter 'y' to continue or 'n' to abort.\n").await?,
         }
     }
+}
+
+/// Write `text` to `stdout` and flush it, as the prompt waits for input on its line.
+async fn print<W: AsyncWrite + Unpin>(
+    stdout: &mut W,
+    text: &str,
+) -> Result<(), Report<BrowserTestError>> {
+    stdout
+        .write_all(text.as_bytes())
+        .await
+        .context(BrowserTestError::WritePausePrompt)?;
+    stdout
+        .flush()
+        .await
+        .context(BrowserTestError::WritePausePrompt)
 }
 
 #[cfg(test)]
 mod tests {
     use assertr::prelude::*;
-    use tokio::io::BufReader;
 
     use super::*;
     use crate::test_support::EnvVarGuard;
+
+    /// Reads `lines`, one per call, then EOF.
+    fn answers(lines: &[&str]) -> impl FnMut() -> std::future::Ready<io::Result<Option<String>>> {
+        let mut lines = lines
+            .iter()
+            .map(|line| (*line).to_owned())
+            .collect::<Vec<_>>()
+            .into_iter();
+        move || std::future::ready(Ok(lines.next()))
+    }
 
     mod pause_config {
         use super::*;
@@ -246,10 +266,10 @@ mod tests {
 
         #[tokio::test]
         async fn treats_stdin_eof_as_read_error() {
-            let mut stdin = BufReader::new(&b""[..]);
+            let stdin = answers(&[]);
             let mut stdout = Vec::new();
 
-            let err = pause_with_io(&Pause::enabled(), &mut stdin, &mut stdout)
+            let err = pause_with_io(&Pause::enabled(), stdin, &mut stdout)
                 .await
                 .expect_err("stdin EOF should fail instead of aborting");
 
@@ -260,10 +280,10 @@ mod tests {
 
         #[tokio::test]
         async fn treats_empty_line_as_abort() {
-            let mut stdin = BufReader::new(&b"\n"[..]);
+            let stdin = answers(&["\n"]);
             let mut stdout = Vec::new();
 
-            let decision = pause_with_io(&Pause::enabled(), &mut stdin, &mut stdout)
+            let decision = pause_with_io(&Pause::enabled(), stdin, &mut stdout)
                 .await
                 .expect("empty line should remain an explicit abort response");
 
@@ -272,14 +292,14 @@ mod tests {
 
         #[tokio::test]
         async fn prints_message_hint_and_prompt() {
-            let mut stdin = BufReader::new(&b"y\n"[..]);
+            let stdin = answers(&["y\n"]);
             let mut stdout = Vec::new();
             let config = Pause::enabled()
                 .with_message("Paused.")
                 .with_hint("App at http://127.0.0.1:3000")
                 .with_prompt("Go? ");
 
-            pause_with_io(&config, &mut stdin, &mut stdout)
+            pause_with_io(&config, stdin, &mut stdout)
                 .await
                 .expect("positive response should continue");
 
@@ -289,14 +309,29 @@ mod tests {
 
         #[tokio::test]
         async fn treats_y_as_continue() {
-            let mut stdin = BufReader::new(&b"y\n"[..]);
+            let stdin = answers(&["y\n"]);
             let mut stdout = Vec::new();
 
-            let decision = pause_with_io(&Pause::enabled(), &mut stdin, &mut stdout)
+            let decision = pause_with_io(&Pause::enabled(), stdin, &mut stdout)
                 .await
                 .expect("positive response should continue");
 
             assert_that!(decision).is_equal_to(PauseDecision::Continue);
+        }
+
+        #[tokio::test]
+        async fn asks_again_after_an_unknown_answer() {
+            let stdin = answers(&["maybe\n", "n\n"]);
+            let mut stdout = Vec::new();
+            let config = Pause::enabled().with_message("Paused.").with_prompt("Go? ");
+
+            let decision = pause_with_io(&config, stdin, &mut stdout)
+                .await
+                .expect("the second answer decides");
+
+            assert_that!(decision).is_equal_to(PauseDecision::Abort);
+            assert_that!(String::from_utf8(stdout).expect("output is UTF-8"))
+                .is_equal_to("Paused.\nGo? Enter 'y' to continue or 'n' to abort.\nGo? ");
         }
     }
 }

@@ -12,7 +12,7 @@
 
 use std::{
     any::Any,
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     future::Future,
     panic::AssertUnwindSafe,
     pin::{Pin, pin},
@@ -575,16 +575,8 @@ where
                 test_name: name.clone(),
                 message: panic_message.clone(),
             });
-            let record = BrowserTestRecord {
-                index: *index,
-                name: name.clone(),
-                outcome: TestOutcome::Panicked,
-                group: group.clone(),
-                session: None,
-                body: None,
-                teardown: None,
-                steps: BTreeMap::new(),
-            };
+            let record =
+                record_without_body(*index, name, group.as_deref(), TestOutcome::Panicked, None);
             env.finish(record, Err(report));
             return;
         }
@@ -621,23 +613,41 @@ where
         Err(failure) => failure,
     };
 
-    let record = BrowserTestRecord {
-        index,
-        name: test.name.clone(),
-        outcome: TestOutcome::Failed,
-        group: test.group.clone(),
-        session: Some(SessionTiming {
-            preparation: failure.preparation,
-            wait,
-        }),
-        body: None,
-        teardown: None,
-        steps: BTreeMap::new(),
+    let session = SessionTiming {
+        preparation: failure.preparation,
+        wait,
     };
+    let record = record_without_body(
+        index,
+        &test.name,
+        test.group.as_deref(),
+        TestOutcome::Failed,
+        Some(session),
+    );
     let report = failure.report.context(BrowserTestError::RunTest {
         test_name: test.name.clone(),
     });
     env.finish(record, Err(report));
+}
+
+/// The record of a test that failed before its body ran.
+fn record_without_body(
+    index: usize,
+    name: &str,
+    group: Option<&str>,
+    outcome: TestOutcome,
+    session: Option<SessionTiming>,
+) -> BrowserTestRecord {
+    BrowserTestRecord {
+        index,
+        name: name.to_owned(),
+        outcome,
+        group: group.map(str::to_owned),
+        session,
+        body: None,
+        teardown: None,
+        steps: BTreeMap::new(),
+    }
 }
 
 /// A test assigned to a session.
@@ -907,7 +917,7 @@ where
 async fn focus_page(session: &Session) -> WebDriverResult<()> {
     session
         .cdp()
-        .send_raw("Page.bringToFront", HashMap::<String, String>::new())
+        .send_raw("Page.bringToFront", serde_json::json!({}))
         .await?;
     Ok(())
 }

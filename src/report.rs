@@ -444,9 +444,10 @@ impl Display for FormatDuration {
         } else if duration < Duration::from_secs(60) {
             format!("{:.2}s", duration.as_secs_f64())
         } else {
-            let minutes = duration.as_secs() / 60;
-            let seconds = duration.as_secs_f64() % 60.0;
-            format!("{minutes}m {seconds:04.1}s")
+            // Rounded to tenths before splitting, so that 119.96s is `2m 00.0s`, not `1m 60.0s`.
+            let tenths = (duration.as_millis() + 50) / 100;
+            let (minutes, tenths) = (tenths / 600, tenths % 600);
+            format!("{minutes}m {:02}.{}s", tenths / 10, tenths % 10)
         };
         f.pad(&text)
     }
@@ -491,6 +492,8 @@ mod tests {
         assert_that!(FormatDuration(Duration::from_millis(3250)).to_string()).is_equal_to("3.25s");
         assert_that!(FormatDuration(Duration::from_millis(125_300)).to_string())
             .is_equal_to("2m 05.3s");
+        assert_that!(FormatDuration(Duration::from_millis(119_960)).to_string())
+            .is_equal_to("2m 00.0s");
     }
 
     #[test]

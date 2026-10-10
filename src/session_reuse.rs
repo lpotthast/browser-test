@@ -279,10 +279,15 @@ pub(crate) fn configure_reusable_session(
     Ok(())
 }
 
-/// Add `feature` to the `--disable-features` argument, or add one: Chrome only reads the last.
+/// Add `feature` to the last `--disable-features` argument, or add one: Chrome only reads the
+/// last.
 fn disable_feature(caps: &mut ChromeCapabilities, feature: &str) -> WebDriverResult<()> {
     const SWITCH: &str = "--disable-features=";
-    let existing = caps.args().into_iter().find(|arg| arg.starts_with(SWITCH));
+    let existing = caps
+        .args()
+        .into_iter()
+        .rev()
+        .find(|arg| arg.starts_with(SWITCH));
     match existing {
         Some(arg) => {
             caps.remove_arg(&arg)?;
@@ -396,36 +401,39 @@ impl SessionBaseline {
 pub(crate) const BLANK: &str = "data:text/html,";
 
 /// CDP commands resetting the emulation overrides [`SessionReset::Manual`] lists.
-const EMULATION_RESETS: &[(&str, &str)] = &[
-    ("Emulation.clearDeviceMetricsOverride", "{}"),
-    ("Emulation.setUserAgentOverride", r#"{"userAgent": ""}"#),
-    ("Emulation.clearGeolocationOverride", "{}"),
-    (
-        "Emulation.setEmulatedMedia",
-        r#"{"media": "", "features": []}"#,
-    ),
-    ("Emulation.setTimezoneOverride", r#"{"timezoneId": ""}"#),
-    ("Emulation.setLocaleOverride", "{}"),
-    (
-        "Emulation.setTouchEmulationEnabled",
-        r#"{"enabled": false}"#,
-    ),
-    (
-        "Emulation.setEmitTouchEventsForMouse",
-        r#"{"enabled": false}"#,
-    ),
-    ("Emulation.setCPUThrottlingRate", r#"{"rate": 1}"#),
-    ("Emulation.clearIdleOverride", "{}"),
-    (
-        "Emulation.setFocusEmulationEnabled",
-        r#"{"enabled": false}"#,
-    ),
-    ("Emulation.setDefaultBackgroundColorOverride", "{}"),
-    (
-        "Emulation.setScriptExecutionDisabled",
-        r#"{"value": false}"#,
-    ),
-];
+fn emulation_resets() -> [(&'static str, serde_json::Value); 13] {
+    use serde_json::json;
+    [
+        ("Emulation.clearDeviceMetricsOverride", json!({})),
+        ("Emulation.setUserAgentOverride", json!({ "userAgent": "" })),
+        ("Emulation.clearGeolocationOverride", json!({})),
+        (
+            "Emulation.setEmulatedMedia",
+            json!({ "media": "", "features": [] }),
+        ),
+        ("Emulation.setTimezoneOverride", json!({ "timezoneId": "" })),
+        ("Emulation.setLocaleOverride", json!({})),
+        (
+            "Emulation.setTouchEmulationEnabled",
+            json!({ "enabled": false }),
+        ),
+        (
+            "Emulation.setEmitTouchEventsForMouse",
+            json!({ "enabled": false }),
+        ),
+        ("Emulation.setCPUThrottlingRate", json!({ "rate": 1 })),
+        ("Emulation.clearIdleOverride", json!({})),
+        (
+            "Emulation.setFocusEmulationEnabled",
+            json!({ "enabled": false }),
+        ),
+        ("Emulation.setDefaultBackgroundColorOverride", json!({})),
+        (
+            "Emulation.setScriptExecutionDisabled",
+            json!({ "value": false }),
+        ),
+    ]
+}
 
 /// The reset of [`SessionReset::Manual`], in the session's `tab`.
 async fn reset_manually(
@@ -476,9 +484,7 @@ async fn reset_manually(
         cdp(driver, "Network.clearBrowserCache", serde_json::json!({})).await?;
     }
     cdp(driver, "Browser.resetPermissions", serde_json::json!({})).await?;
-    for (method, params) in EMULATION_RESETS {
-        let params: serde_json::Value =
-            serde_json::from_str(params).expect("the reset parameters are JSON");
+    for (method, params) in emulation_resets() {
         cdp(driver, method, params).await?;
     }
     cdp(driver, "Page.bringToFront", serde_json::json!({})).await?;
@@ -644,6 +650,18 @@ mod tests {
         disable_feature(&mut caps, "BackForwardCache").expect("caps accept arguments");
         assert_that!(caps.args()).is_equal_to(vec![
             "--disable-features=Translate,BackForwardCache".to_owned(),
+        ]);
+
+        // Chrome reads only the last, so the feature joins that one.
+        let mut caps = ChromeCapabilities::new();
+        caps.add_arg("--disable-features=Translate")
+            .expect("caps accept arguments");
+        caps.add_arg("--disable-features=AutofillServerCommunication")
+            .expect("caps accept arguments");
+        disable_feature(&mut caps, "BackForwardCache").expect("caps accept arguments");
+        assert_that!(caps.args()).is_equal_to(vec![
+            "--disable-features=Translate".to_owned(),
+            "--disable-features=AutofillServerCommunication,BackForwardCache".to_owned(),
         ]);
     }
 }
