@@ -284,20 +284,20 @@ pub(crate) fn configure_reusable_session(
 }
 
 /// Add `feature` to the last `--disable-features` argument, or add one: Chrome only reads the
-/// last.
+/// last. Chrome takes switches with one dash, two, or none (`ChromeDriver` adds them).
 fn disable_feature(caps: &mut ChromeCapabilities, feature: &str) -> WebDriverResult<()> {
-    const SWITCH: &str = "--disable-features=";
+    const SWITCH: &str = "disable-features=";
     let existing = caps
         .args()
         .into_iter()
         .rev()
-        .find(|arg| arg.starts_with(SWITCH));
+        .find(|arg| arg.trim_start_matches('-').starts_with(SWITCH));
     match existing {
         Some(arg) => {
             caps.remove_arg(&arg)?;
             caps.add_arg(&format!("{arg},{feature}"))
         }
-        None => caps.add_arg(&format!("{SWITCH}{feature}")),
+        None => caps.add_arg(&format!("--{SWITCH}{feature}")),
     }
 }
 
@@ -742,5 +742,13 @@ mod tests {
             "--disable-features=Translate".to_owned(),
             "--disable-features=AutofillServerCommunication,BackForwardCache".to_owned(),
         ]);
+
+        // Also written with one dash, or none.
+        for switch in ["-disable-features=Translate", "disable-features=Translate"] {
+            let mut caps = ChromeCapabilities::new();
+            caps.add_arg(switch).expect("caps accept arguments");
+            disable_feature(&mut caps, "BackForwardCache").expect("caps accept arguments");
+            assert_that!(caps.args()).is_equal_to(vec![format!("{switch},BackForwardCache")]);
+        }
     }
 }
