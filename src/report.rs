@@ -475,14 +475,17 @@ pub(crate) struct FormatDuration(pub(crate) Duration);
 
 impl Display for FormatDuration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let duration = self.0;
-        let text = if duration < Duration::from_secs(1) {
-            format!("{}ms", duration.as_millis())
-        } else if duration < Duration::from_secs(60) {
-            format!("{:.2}s", duration.as_secs_f64())
+        // Rounded to the unit shown before choosing it, so that 999.6ms is `1.00s` and 59.996s is
+        // `1m 00.0s`, and before splitting minutes, so that 119.96s is `2m 00.0s`, not `1m 60.0s`.
+        let nanos = self.0.as_nanos();
+        let millis = (nanos + 500_000) / 1_000_000;
+        let hundredths = (nanos + 5_000_000) / 10_000_000;
+        let text = if millis < 1000 {
+            format!("{millis}ms")
+        } else if hundredths < 6000 {
+            format!("{}.{:02}s", hundredths / 100, hundredths % 100)
         } else {
-            // Rounded to tenths before splitting, so that 119.96s is `2m 00.0s`, not `1m 60.0s`.
-            let tenths = (duration.as_millis() + 50) / 100;
+            let tenths = (nanos + 50_000_000) / 100_000_000;
             let (minutes, tenths) = (tenths / 600, tenths % 600);
             format!("{minutes}m {:02}.{}s", tenths / 10, tenths % 10)
         };
@@ -531,6 +534,14 @@ mod tests {
             .is_equal_to("2m 05.3s");
         assert_that!(FormatDuration(Duration::from_millis(119_960)).to_string())
             .is_equal_to("2m 00.0s");
+        // Rounded into the next unit at its edge.
+        assert_that!(FormatDuration(Duration::from_micros(999_600)).to_string())
+            .is_equal_to("1.00s");
+        assert_that!(FormatDuration(Duration::from_micros(1_999_600)).to_string())
+            .is_equal_to("2.00s");
+        assert_that!(FormatDuration(Duration::from_millis(59_996)).to_string())
+            .is_equal_to("1m 00.0s");
+        assert_that!(FormatDuration(Duration::from_micros(1_600)).to_string()).is_equal_to("2ms");
     }
 
     #[test]

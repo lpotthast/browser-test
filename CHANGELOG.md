@@ -119,7 +119,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   starts the page without focus: `document.hasFocus()` is `false`, and focusing an element from script fires no
   `focus`/`focusin` events. The runner brings every new session's page to the front (CDP `Page.bringToFront`); the
   re-exported `thirtyfour` has its `cdp` feature enabled for that.
-- The run summary prints durations just below a full minute as `2m 00.0s` instead of `1m 60.0s`.
+- The run summary prints durations just below a full minute as `2m 00.0s` instead of `1m 60.0s`, and just below a
+  minute as `1m 00.0s` instead of `60.00s`. Durations below a second are rounded instead of truncated.
 - A panic in a Chrome capability setup, or in a hand-written `BrowserTest::run` before it returns its future, fails that
   session or test. It unwound through the whole run before, skipping the shutdown of `ChromeDriver`.
 - Driver output capture no longer captures the lines printed while it starts twice.
