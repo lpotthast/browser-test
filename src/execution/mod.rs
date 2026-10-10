@@ -715,6 +715,19 @@ async fn session_worker<Context, TestError>(
     Context: Sync + ?Sized,
     TestError: ?Sized + 'static,
 {
+    let pooled = matches!(request.delivery, Delivery::Pool);
+    run_session(env, request).await;
+    if pooled {
+        env.pool.session_ended(env.keep_starting());
+    }
+}
+
+/// The work of [`session_worker`].
+async fn run_session<Context, TestError>(env: &Env<'_, Context, TestError>, request: WorkerRequest)
+where
+    Context: Sync + ?Sized,
+    TestError: ?Sized + 'static,
+{
     let config = env.config;
     let activity = Activity::Session(request.session);
     env.board

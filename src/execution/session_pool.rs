@@ -68,6 +68,9 @@ struct PoolState {
     resetting: usize,
     /// Pool sessions running a test.
     running: usize,
+    /// Pool sessions whose browser is open, or opening: from the request to create them until
+    /// their worker ended, which includes sessions that are quitting.
+    alive: usize,
     /// Tests waiting for a pool session.
     waiting: Upcoming,
     /// Pool tests that have not requested a session yet.
@@ -147,6 +150,7 @@ impl SessionPool {
                 creating: 0,
                 resetting: 0,
                 running: 0,
+                alive: 0,
                 waiting: Upcoming::default(),
                 upcoming,
                 next_session: 0,
@@ -167,6 +171,10 @@ impl SessionPool {
 
     /// Create sessions for waiting tests (fresh ones for tests that need them) and, unless tests
     /// stopped starting, spares for upcoming ones.
+    ///
+    /// Waiting tests get their sessions right away. Spares are only created while fewer sessions
+    /// are alive than tests can run at the same time plus spares, counting those still quitting:
+    /// a spare that can't be created yet is once a session ended ([`Self::session_ended`]).
     pub(super) fn replenish(&self, keep_starting: bool) {
         self.replenish_locked(&mut self.lock(), keep_starting);
     }
@@ -177,11 +185,27 @@ impl SessionPool {
         } else {
             0
         };
-        while !state.closed
-            && (state.supply() < state.waiting.total() + spares
-                || state.fresh_supply() < state.waiting.fresh)
-        {
+        let bound = self.max_concurrency + self.spare;
+        while !state.closed {
+            let waiting = state.waiting.total();
+            let needs_fresh = state.fresh_supply() < state.waiting.fresh;
+            let needs_any = state.supply() < waiting;
+            let wants_spare = state.supply() < waiting + spares && state.alive < bound;
+            if !(needs_fresh || needs_any || wants_spare) {
+                break;
+            }
+            if needs_fresh && state.alive >= bound {
+                // A reset session no waiting test takes makes way for the fresh one: dropping
+                // its ticket quits it.
+                let reset = state.idle.iter().filter(|ticket| !is_fresh(ticket)).count();
+                if reset > state.waiting.any
+                    && let Some(position) = state.idle.iter().position(|ticket| !is_fresh(ticket))
+                {
+                    state.idle.remove(position);
+                }
+            }
             state.creating += 1;
+            state.alive += 1;
             let session = state.next_session;
             state.next_session += 1;
             let _ = self.requests.send(Some(WorkerRequest {
@@ -276,6 +300,14 @@ impl SessionPool {
         self.lock().running -= 1;
     }
 
+    /// The worker of a pool session ended: its browser quit, or never started. Create the spares
+    /// that had to wait for it.
+    pub(super) fn session_ended(&self, keep_starting: bool) {
+        let mut state = self.lock();
+        state.alive -= 1;
+        self.replenish_locked(&mut state, keep_starting);
+    }
+
     /// Whether the session of a finished test should be reset: while tests (not needing a fresh
     /// session) are still to run, otherwise it quits. If so, it counts as a session on its way to
     /// the pool until [`Self::deliver_reset`] or [`Self::reset_failed`]. Claimed before the next
@@ -339,6 +371,65 @@ mod tests {
     fn pool(upcoming: Upcoming, cancellation: &CancellationToken) -> SessionPool {
         let (requests, _) = mpsc::unbounded_channel();
         SessionPool::new(1, 0, upcoming, None, requests, cancellation.clone())
+    }
+
+    /// A pool running one test at a time with one spare, and its session requests.
+    fn pool_with_spare(
+        upcoming: Upcoming,
+    ) -> (SessionPool, mpsc::UnboundedReceiver<Option<WorkerRequest>>) {
+        let (requests, requested) = mpsc::unbounded_channel();
+        let pool = SessionPool::new(1, 1, upcoming, None, requests, CancellationToken::new());
+        (pool, requested)
+    }
+
+    fn requested(requests: &mut mpsc::UnboundedReceiver<Option<WorkerRequest>>) -> usize {
+        std::iter::from_fn(|| requests.try_recv().ok()).count()
+    }
+
+    /// A session ready to run a test, and where its test arrives.
+    fn ticket(preparation: SessionPreparation) -> (Ticket, oneshot::Receiver<Job>) {
+        let (job, jobs) = oneshot::channel();
+        (Ticket { job, preparation }, jobs)
+    }
+
+    #[tokio::test]
+    async fn spares_wait_for_quitting_sessions() {
+        let created = SessionPreparation::Created(std::time::Duration::ZERO);
+        let (pool, mut requests) = pool_with_spare(Upcoming { any: 3, fresh: 0 });
+        pool.replenish(true);
+        assert_that!(requested(&mut requests)).is_equal_to(1);
+        pool.deliver(Delivery::Pool, Ok(ticket(created).0));
+
+        // The first test takes the spare, and the pool creates the next one.
+        assert_that!(pool.take(false, true).await.is_some()).is_true();
+        assert_that!(requested(&mut requests)).is_equal_to(1);
+        pool.deliver(Delivery::Pool, Ok(ticket(created).0));
+        pool.test_finished();
+
+        // While the first test's session quits, two browsers are open: the next test takes the
+        // spare, and the pool creates no further one until the session ended.
+        assert_that!(pool.take(false, true).await.is_some()).is_true();
+        assert_that!(requested(&mut requests)).is_equal_to(0);
+        pool.session_ended(true);
+        assert_that!(requested(&mut requests)).is_equal_to(1);
+    }
+
+    #[tokio::test]
+    async fn fresh_sessions_replace_idle_reset_ones_at_the_bound() {
+        let (pool, mut requests) = pool_with_spare(Upcoming { any: 0, fresh: 1 });
+        let (reset, reset_jobs) = ticket(SessionPreparation::Reset(std::time::Duration::ZERO));
+        {
+            let mut state = pool.lock();
+            state.alive = 2;
+            state.idle.push_back(Ok(reset));
+        }
+
+        let take = pin!(pool.take(true, true));
+        assert_that!(futures_util::poll!(take).is_pending()).is_true();
+
+        assert_that!(requested(&mut requests)).is_equal_to(1);
+        // The idle reset session's ticket was dropped, so it quits.
+        assert_that!(reset_jobs.await.is_err()).is_true();
     }
 
     #[tokio::test]

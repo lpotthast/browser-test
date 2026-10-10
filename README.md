@@ -406,7 +406,8 @@ runner therefore keeps fresh sessions ready while tests run: by default, one spa
 same time. A test usually finds its session ready when its turn comes, and sessions are quit in the background after
 their test.
 
-Up to `parallel tests + spare sessions` browsers are open at once. Lower the number of spare sessions on machines with
+Up to `parallel tests + spare sessions` browsers are open at once, counting those still quitting (only a test that
+needs a session right away gets one while others quit). Lower the number of spare sessions on machines with
 little memory, or disable them, with `BrowserTestRunner::with_spare_sessions(n)`. With session reuse (below), the default
 is one spare session per eight parallel tests: a returned session only needs a reset, not a new browser.
 
