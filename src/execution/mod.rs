@@ -732,7 +732,9 @@ async fn session_worker<Context, TestError>(
         }
     };
     let pooled = matches!(request.delivery, Delivery::Pool);
-    // Only pool sessions are reused: a dedicated session has settings of its own.
+    // Only pool sessions are reused: a dedicated session has settings of its own. With reuse
+    // enabled, dedicated sessions are set up like reusable ones all the same, so that their tests
+    // see the same browser.
     let reusable = config.session_reuse.is_enabled() && pooled;
     let mut delivery = Some(request.delivery);
     // The run of the session's last test, recorded once the session quit.
@@ -742,7 +744,7 @@ async fn session_worker<Context, TestError>(
         .session()
         .with_caps(|caps: &mut ChromeCapabilities| {
             configure_chrome_capabilities(caps, config.visible, config.chrome_capabilities_setups)?;
-            if reusable {
+            if config.session_reuse.is_enabled() {
                 configure_reusable_session(caps, config.session_reuse)?;
             }
             profile.configure(caps)
@@ -833,7 +835,8 @@ where
             .context("the page of the session could not be brought to the front")
             .into_dynamic());
     }
-    let mut baseline = if reusable {
+    // Prepared for dedicated sessions as well: it selects where the test runs.
+    let mut baseline = if config.session_reuse.is_enabled() {
         match SessionBaseline::prepare(session, config.session_reuse.reset()).await {
             Ok(baseline) => Some(baseline),
             Err(error) => {
@@ -871,7 +874,8 @@ where
         if pooled {
             env.pool.test_finished();
         }
-        let reuse = baseline.is_some()
+        let reuse = reusable
+            && baseline.is_some()
             && config.session_reuse.allows_another_test(tests_run)
             && env.pool.claim_reset(env.keep_starting());
         // Let the next test start while this session quits or is reset.

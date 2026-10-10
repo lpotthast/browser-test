@@ -13,8 +13,8 @@ use std::{
 use assertr::prelude::*;
 use browser_test::{
     BrowserTest, BrowserTestError, BrowserTestRunReport, BrowserTestRunner, BrowserTests,
-    CachedData, Cancellation, FailurePolicy, Parallelism, SessionPreparation, SessionReset,
-    SessionReuse, SessionSettings, StepExt, TestOutcome, TracingSummary, async_trait,
+    CachedData, Cancellation, ElementQueryWait, FailurePolicy, Parallelism, SessionPreparation,
+    SessionReset, SessionReuse, SessionSettings, StepExt, TestOutcome, TracingSummary, async_trait,
     thirtyfour::{ChromiumLikeCapabilities, WebDriver},
 };
 use rootcause::{Report, report};
@@ -853,12 +853,25 @@ async fn only_manual_resets_keeping_it_keep_the_http_cache() {
 /// script state survived) is reported in `restored`.
 struct GoesBack {
     restored: Arc<Mutex<Option<bool>>>,
+    /// Whether the test has an element query wait of its own, and so a session created for it.
+    dedicated: bool,
 }
 
 #[async_trait]
 impl BrowserTest<str> for GoesBack {
     fn name(&self) -> Cow<'_, str> {
         "goes back".into()
+    }
+
+    fn session_settings(&self) -> SessionSettings {
+        if self.dedicated {
+            SessionSettings::new().with_element_query_wait(ElementQueryWait::new(
+                Duration::from_secs(1),
+                Duration::from_millis(100),
+            ))
+        } else {
+            SessionSettings::new()
+        }
     }
 
     async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
@@ -877,8 +890,9 @@ impl BrowserTest<str> for GoesBack {
     }
 }
 
-/// Whether a page is restored from the back/forward cache in a reused session.
-async fn restored_from_back_forward_cache(reuse: SessionReuse) -> bool {
+/// Whether a page is restored from the back/forward cache in a reused session, or in a
+/// `dedicated` one created for a test with settings of its own.
+async fn restored_from_back_forward_cache(reuse: SessionReuse, dedicated: bool) -> bool {
     let base_url = serve_fixture().await;
     let restored = Arc::new(Mutex::new(None));
     let outcome = run(
@@ -886,6 +900,7 @@ async fn restored_from_back_forward_cache(reuse: SessionReuse) -> bool {
         base_url.as_str(),
         BrowserTests::sequential().with(GoesBack {
             restored: Arc::clone(&restored),
+            dedicated,
         }),
     )
     .await;
@@ -897,10 +912,16 @@ async fn restored_from_back_forward_cache(reuse: SessionReuse) -> bool {
 #[serial]
 async fn reused_sessions_have_no_back_forward_cache_unless_enabled() {
     for reset in [SessionReset::NewContext, SessionReset::manual([])] {
-        let reuse = SessionReuse::enabled().with_reset(reset);
-        assert_that!(restored_from_back_forward_cache(reuse).await).is_false();
-        assert_that!(restored_from_back_forward_cache(reuse.with_back_forward_cache(true)).await)
+        // Sessions created for tests with settings of their own are set up alike.
+        for dedicated in [false, true] {
+            let reuse = SessionReuse::enabled().with_reset(reset);
+            assert_that!(restored_from_back_forward_cache(reuse, dedicated).await).is_false();
+            assert_that!(
+                restored_from_back_forward_cache(reuse.with_back_forward_cache(true), dedicated)
+                    .await
+            )
             .is_true();
+        }
     }
 }
 

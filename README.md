@@ -415,7 +415,8 @@ window of the running test. Each test then waits for its browser to start. Set `
 create spare sessions in visible runs as well.
 
 Spare sessions use the runner's element-query wait. A test that sets an element-query wait of its own in
-`session_settings()` gets a session created when its turn comes, so it waits for its browser to start.
+`session_settings()` gets a session created when its turn comes, so it waits for its browser to start. With session
+reuse, such a session is set up like the pool's (see below), and quits after its test.
 
 ### Session Reuse
 
@@ -467,7 +468,7 @@ change during a run (content-hashed names, as in production): the next test load
 the cache, with the code V8 compiled for them. State the list doesn't cover (e.g. Shared Storage, Storage Buckets, other
 CDP domains' settings) survives into the next test; use `NewContext` for tests that change it.
 
-Reusable sessions start Chrome without its back/forward cache (`--disable-features=BackForwardCache`, merged into a
+With session reuse, sessions start Chrome without its back/forward cache (`--disable-features=BackForwardCache`, merged into a
 `--disable-features` of your own), so both strategies behave alike within a test (going back loads a page again), and no
 cached page keeps a renderer process (100 to 250 MB) alive in a reused browser. `SessionReuse::with_back_forward_cache(true)`
 keeps it, e.g. for tests of pages restored from it.

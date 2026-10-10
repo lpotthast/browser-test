@@ -31,11 +31,13 @@ pub(crate) const DEFAULT_SESSION_REUSE_ENV: &str = "BROWSER_TEST_SESSION_REUSE";
 /// the pool gives it a session no test ran in, creating one if none is ready. Afterwards its session returns to the pool like
 /// any other. A session whose reset fails (e.g. its browser crashed) quits.
 ///
-/// Reusable sessions start Chrome without its back/forward cache
+/// With reuse enabled, sessions start Chrome without its back/forward cache
 /// (`--disable-features=BackForwardCache`, merged into a `--disable-features` of your own), unless
 /// [`Self::with_back_forward_cache`] enables it: both resets then behave alike within a test (a
 /// page left is unloaded, going back loads it again), and no cached page keeps a renderer process
-/// alive across tests of a [`SessionReset::Manual`] session.
+/// alive across tests of a [`SessionReset::Manual`] session. A test with an element query wait of
+/// its own gets a session created for it, which is set up the same way (also running the test in
+/// a user context of its own with [`SessionReset::NewContext`]), and quits after the test.
 ///
 /// The settings ([`Self::with_reset`], [`Self::with_max_tests_per_session`],
 /// [`Self::with_back_forward_cache`]) only take effect while reuse is enabled. They are kept while
@@ -265,7 +267,8 @@ impl FromIterator<CachedData> for KeptCaches {
     }
 }
 
-/// Configure a reusable session's capabilities for `reuse`.
+/// Configure the capabilities of a session of a run with `reuse` enabled: reusable or not (a
+/// session created for a test with settings of its own), so that every test sees the same browser.
 pub(crate) fn configure_reusable_session(
     caps: &mut ChromeCapabilities,
     reuse: SessionReuse,
