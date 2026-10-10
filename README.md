@@ -490,8 +490,9 @@ less memory in every test (with Leptos: `leptos-browser-test`'s `BuildProfile::R
 
 ## Timing and Progress
 
-Every test's timing is logged (`tracing`, `info` level) when it finishes: how long creating (or resetting) its session
-took and how long the test waited for it, its body, and the session teardown. At the end of each run, the runner hands a
+Every test's start is logged (`tracing`, `debug` level), and its timing when it finishes: how long creating (or
+resetting) its session took and how long the test waited for it, its body, and the session teardown (`debug` level for
+a passed test, `error` for a failed one). At the end of each run, the runner hands a
 `BrowserTestRunReport` to every `RunReportConsumer` added with `BrowserTestRunner::with_report_consumer`. It prints or logs
 nothing on its own. `StderrSummary`, `StdoutSummary`, and `TracingSummary` print a summary of the report. Any closure
 taking a `&BrowserTestRunReport` works as a consumer too:

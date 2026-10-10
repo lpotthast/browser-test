@@ -61,6 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A test's start ("Executing browser test: ...") and a passed test's timing are logged at `debug` level instead of
+  `info`, so a run logs little at `info`.
 - **Breaking:** `SessionTiming::creation` became `SessionTiming::preparation`, a `SessionPreparation`: `Created` with
   the creation time, or `Reset` with the reset time of a reused session. `BrowserTestRecord::teardown` is `None` for a
   test whose session ran further tests.

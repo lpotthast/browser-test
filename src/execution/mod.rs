@@ -426,7 +426,7 @@ where
         let total = FormatDuration(record.total());
         let breakdown = timing_breakdown(&record);
         match record.outcome {
-            TestOutcome::Passed => tracing::info!(
+            TestOutcome::Passed => tracing::debug!(
                 test = %record.name,
                 total_ms = record.total().as_millis(),
                 "Browser test '{}' passed in {total} ({breakdown}).",
@@ -1032,7 +1032,7 @@ async fn run_body<Context, TestError>(
     TestError: ?Sized + 'static,
 {
     let name = test.name.as_str();
-    tracing::info!("Executing browser test: {name}");
+    tracing::debug!("Executing browser test: {name}");
     env.board.enter(
         Activity::Test(test.index),
         format!("browser test '{name}'"),
