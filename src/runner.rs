@@ -454,6 +454,7 @@ impl BrowserTestRunner {
             .await;
         report.tests = execution.records;
         report.groups = execution.groups;
+        report.released_session_teardown = execution.released_session_teardown;
         let test_result = execution.result;
 
         let shutdown_start = Instant::now();

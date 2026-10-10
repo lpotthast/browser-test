@@ -79,6 +79,9 @@ pub(crate) struct Execution {
     pub(crate) records: Vec<BrowserTestRecord>,
     /// The timing of every named group, in definition order.
     pub(crate) groups: Vec<GroupRecord>,
+    /// Time spent quitting sessions without a test (see
+    /// [`BrowserTestRunReport::released_session_teardown`](crate::BrowserTestRunReport::released_session_teardown)).
+    pub(crate) released_session_teardown: Duration,
     pub(crate) result: Result<(), Report<BrowserTestError>>,
 }
 
@@ -125,6 +128,7 @@ where
         failures: Mutex::default(),
         records: Mutex::default(),
         groups: Mutex::default(),
+        released_session_teardown: Mutex::default(),
         board: ProgressBoard::default(),
         pool: SessionPool::new(
             max_concurrency,
@@ -152,6 +156,7 @@ where
         failures,
         records,
         groups,
+        released_session_teardown,
         ..
     } = env;
     let mut records = records.into_inner().unwrap_or_else(PoisonError::into_inner);
@@ -169,6 +174,9 @@ where
     Execution {
         records,
         groups: groups.into_iter().map(|(_, group)| group).collect(),
+        released_session_teardown: released_session_teardown
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner),
         result,
     }
 }
@@ -392,6 +400,8 @@ where
     failures: Mutex<BrowserTestFailures>,
     records: Mutex<Vec<BrowserTestRecord>>,
     groups: Mutex<Vec<(usize, GroupRecord)>>,
+    /// Time spent quitting sessions without a test.
+    released_session_teardown: Mutex<Duration>,
     board: ProgressBoard,
     pool: SessionPool,
 }
@@ -793,6 +803,8 @@ where
     let mut delivery = Some(request.delivery);
     // The run of the session's last test, recorded once the session quit.
     let mut last_run = None;
+    // When the session started quitting without a test.
+    let mut released = None;
     let session_result = config
         .chrome
         .session()
@@ -820,10 +832,18 @@ where
                 },
                 &mut delivery,
                 &mut last_run,
+                &mut released,
             )
             .await
         })
         .await;
+    if let Some(quit_start) = released {
+        let teardown = quit_start.elapsed();
+        env.warn_if_slow_session("Quitting a browser session", teardown);
+        *env.released_session_teardown
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) += teardown;
+    }
     profile.remove().await;
     env.board.clear(activity);
 
@@ -865,13 +885,16 @@ struct SessionStart {
 
 /// Offer `session` through `delivery` (or, once it ran a test, to the pool), and run the tests it
 /// is assigned: one, or with [`SessionReuse`] several, resetting the session in between. The run
-/// of the last test is left in `last_run`, to be recorded once the session quit.
+/// of the last test is left in `last_run`, to be recorded once the session quit. A session that
+/// quits without a test (no test took it, or the pool released it after a reset) leaves when it
+/// started quitting in `released`.
 async fn serve_tests<Context, TestError>(
     env: &Env<'_, Context, TestError>,
     session: &Session,
     start: SessionStart,
     delivery: &mut Option<Delivery>,
     last_run: &mut Option<JobRun>,
+    released: &mut Option<Instant>,
 ) -> Result<(), Report>
 where
     Context: Sync + ?Sized,
@@ -921,6 +944,7 @@ where
         }
         // An error means no test needs this session anymore.
         let Ok(job) = job_rx.await else {
+            *released = Some(Instant::now());
             return Ok(());
         };
         tests_run += 1;
@@ -970,6 +994,7 @@ where
                 ),
             }
             env.pool.reset_failed(env.keep_starting());
+            *released = Some(Instant::now());
             return Ok(());
         }
         preparation = SessionPreparation::Reset(reset_duration);

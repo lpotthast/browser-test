@@ -31,6 +31,11 @@ pub struct BrowserTestRunReport {
     /// Every named group (see [`crate::BrowserTests::named`]) that ran, in the order the groups
     /// were defined.
     pub groups: Vec<GroupRecord>,
+
+    /// Time spent quitting sessions without a test: spares no test took, and, with
+    /// [`crate::SessionReuse`], sessions the pool released after resetting them, or whose reset
+    /// failed. The other quits are the [`BrowserTestRecord::teardown`] of a session's last test.
+    pub released_session_teardown: Duration,
 }
 
 /// Timing of one named group of tests.
@@ -283,7 +288,11 @@ impl BrowserTestRunReport {
     /// Total time spent quitting sessions.
     #[must_use]
     pub fn session_teardown_time(&self) -> Duration {
-        self.tests.iter().filter_map(|test| test.teardown).sum()
+        self.tests
+            .iter()
+            .filter_map(|test| test.teardown)
+            .sum::<Duration>()
+            + self.released_session_teardown
     }
 
     /// Total time spent in test bodies.
@@ -653,6 +662,7 @@ mod tests {
                 name: "after all".to_owned(),
                 duration: Duration::from_millis(1200),
             }],
+            released_session_teardown: Duration::from_millis(60),
         };
 
         let summary = report.to_string();
@@ -660,7 +670,7 @@ mod tests {
         assert_that!(summary.as_str())
             .contains("Browser test run: 2 test(s), 1 passed, 1 failed, in 5.00s");
         assert_that!(summary.as_str())
-            .contains("2 created in 1.20s (avg 600ms), tests waited 15ms for them, quit in 40ms");
+            .contains("2 created in 1.20s (avg 600ms), tests waited 15ms for them, quit in 100ms");
         assert_that!(summary.as_str())
             .contains("broken [failed] (session 400ms, waited 15ms, body 2.50s, quit 40ms)");
         assert_that!(summary.as_str()).contains("works (session 800ms, body 1.00s)");

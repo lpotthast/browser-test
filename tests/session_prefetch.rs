@@ -761,6 +761,30 @@ async fn manual_resets_clear_the_storage_of_file_pages() {
     assert_that!(preparations(&outcome)).is_equal_to(vec!["created", "reset"]);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn quits_of_released_sessions_are_measured() {
+    let base_url = serve_fixture().await;
+    let tracker = Arc::new(Tracker::default());
+
+    // The second test takes the spare created while the first one runs, so the pool releases the
+    // first test's session after resetting it.
+    let outcome = run(
+        runner()
+            .with_session_reuse(SessionReuse::enabled())
+            .with_spare_sessions(1),
+        base_url.as_str(),
+        visits(2, Duration::from_secs(1), &tracker),
+    )
+    .await;
+
+    assert_that!(outcome.result.is_ok()).is_true();
+    assert_that!(preparations(&outcome)).is_equal_to(vec!["created", "created"]);
+    assert_that!(outcome.report.released_session_teardown).is_greater_than(Duration::ZERO);
+    assert_that!(outcome.report.session_teardown_time())
+        .is_greater_than(outcome.report.released_session_teardown);
+}
+
 /// Leaves a page load timeout behind that no navigation can meet.
 struct ImpatientPageLoads;
 
