@@ -25,14 +25,21 @@
 //!   So such a directory is left over from an interrupted removal, or was recreated by a Chrome
 //!   that outlived its run.
 //! - A lock file that cannot be opened or locked counts as held, and its directory stays.
+//! - The runs of this process are never probed: they are alive. Probing them could also release
+//!   their locks where the file system emulates `flock` with locks owned by the process (Linux on
+//!   NFS), which a probe of the same process takes, and releases when it closes its file.
 //!
 //! Entries not named `run-*` are never removed.
 
 use std::{
+    collections::BTreeSet,
     fs::{self, File, TryLockError},
     io,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        Mutex, PoisonError,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -60,6 +67,42 @@ const USER_DATA_DIR_SWITCH: &str = "user-data-dir";
 
 /// Tells apart the runs one process starts.
 static NEXT_RUN: AtomicUsize = AtomicUsize::new(0);
+
+/// The names ([`RunProfiles::unique_name`]) of the runs of this process that are alive.
+static LIVE_RUNS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// Registers a run of this process as alive in [`LIVE_RUNS`] while it lives.
+#[derive(Debug)]
+struct LiveRun {
+    name: String,
+}
+
+impl LiveRun {
+    fn register(name: String) -> Self {
+        LIVE_RUNS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(name.clone());
+        Self { name }
+    }
+
+    /// Whether `name` is the name of a live run of this process.
+    fn is_alive(name: &str) -> bool {
+        LIVE_RUNS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(name)
+    }
+}
+
+impl Drop for LiveRun {
+    fn drop(&mut self) {
+        LIVE_RUNS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.name);
+    }
+}
 
 /// Where runs keep the Chrome profiles of their sessions, see
 /// [`BrowserTestRunner::with_chrome_profiles_dir`](crate::BrowserTestRunner::with_chrome_profiles_dir).
@@ -144,6 +187,8 @@ pub(crate) struct RunProfiles {
     lock: RunLock,
     dir: OwnedDir,
     next_session: AtomicUsize,
+    // Last: a sweep may remove the directory once it is no longer registered.
+    live: LiveRun,
 }
 
 impl RunProfiles {
@@ -169,6 +214,7 @@ impl RunProfiles {
         Self::remove_abandoned(&base);
 
         let name = Self::unique_name();
+        let live = LiveRun::register(name.clone());
         // The directory gets its run name only once it holds its lock, so that a concurrent sweep
         // never sees it unlocked. Should a step fail, dropping `dir` removes it.
         let mut dir = OwnedDir::create(base.join(format!("{STAGING_DIR_PREFIX}{name}")))?;
@@ -178,6 +224,7 @@ impl RunProfiles {
             lock,
             dir,
             next_session: AtomicUsize::new(0),
+            live,
         })
     }
 
@@ -196,14 +243,21 @@ impl RunProfiles {
             return;
         };
         for entry in entries.flatten() {
-            let is_run_dir = entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.starts_with(RUN_DIR_PREFIX))
-                // `file_type` does not follow symlinks.
-                && entry.file_type().is_ok_and(|file_type| file_type.is_dir());
+            let file_name = entry.file_name();
+            let Some(file_name) = file_name.to_str() else {
+                continue;
+            };
+            let Some(name) = file_name.strip_prefix(RUN_DIR_PREFIX) else {
+                continue;
+            };
+            // `file_type` does not follow symlinks.
+            if !entry.file_type().is_ok_and(|file_type| file_type.is_dir())
+                || LiveRun::is_alive(name)
+            {
+                continue;
+            }
             let path = entry.path();
-            if is_run_dir && !RunLock::is_held(&path.join(LOCK_FILE_NAME)) {
+            if !RunLock::is_held(&path.join(LOCK_FILE_NAME)) {
                 tracing::debug!(
                     "Removing Chrome profiles of an ended run: {}",
                     path.display()
@@ -230,9 +284,12 @@ impl RunProfiles {
     ///
     /// Dropping removes it as well, blocking the thread. That only happens if the run ends early.
     pub(crate) async fn remove(self) {
-        let Self { lock, dir, .. } = self;
+        let Self {
+            lock, dir, live, ..
+        } = self;
         drop(lock);
         dir.remove().await;
+        drop(live);
     }
 }
 
@@ -436,6 +493,18 @@ mod tests {
         drop(run);
         assert_that!(run_path.exists()).is_false();
         assert_that!(entry_count(profiles_dir.path())).is_equal_to(0);
+    }
+
+    #[test]
+    fn a_starting_run_leaves_the_runs_of_its_process_alone() {
+        let profiles_dir = TestProfilesDir::new("own-runs");
+        let alive = profiles_dir.create_run();
+        // As if its lock were not seen as held, as on NFS for a probe of the same process.
+        fs::remove_file(alive.dir.path().join(LOCK_FILE_NAME)).expect("lock file should exist");
+
+        let _next = profiles_dir.create_run();
+
+        assert_that!(alive.dir.path().is_dir()).is_true();
     }
 
     #[test]
