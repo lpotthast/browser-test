@@ -659,6 +659,51 @@ async fn manual_resets_keep_no_state_of_earlier_tests() {
     assert_reset_keeps_no_state(SessionReset::manual([CachedData::Http]), true, 1).await;
 }
 
+/// Leaves a page load timeout behind that no navigation can meet.
+struct ImpatientPageLoads;
+
+#[async_trait]
+impl BrowserTest<str> for ImpatientPageLoads {
+    fn name(&self) -> Cow<'_, str> {
+        "impatient page loads".into()
+    }
+
+    async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
+        driver.goto(base_url).await?;
+        driver
+            .update_timeouts(browser_test::thirtyfour::TimeoutConfiguration::new(
+                None,
+                Some(Duration::ZERO),
+                None,
+            ))
+            .await?;
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn resets_run_with_the_sessions_timeouts() {
+    let base_url = serve_fixture().await;
+    let outcome = run(
+        runner()
+            .with_session_reuse(
+                SessionReuse::enabled().with_reset(SessionReset::manual([CachedData::Http])),
+            )
+            .with_spare_sessions(0),
+        base_url.as_str(),
+        BrowserTests::sequential()
+            .with(ImpatientPageLoads)
+            .with(Visit::new(0, Duration::ZERO, &Arc::default())),
+    )
+    .await;
+
+    if let Err(error) = &outcome.result {
+        panic!("every test should pass: {error:?}");
+    }
+    assert_that!(preparations(&outcome)).is_equal_to(vec!["created", "reset"]);
+}
+
 /// Opens a window in the browser's default context, or navigates the session's first tab there.
 /// Removing the test's user context would leave the state of the default context behind.
 struct UsesDefaultContext {

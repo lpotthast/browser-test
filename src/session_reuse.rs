@@ -368,6 +368,12 @@ impl SessionBaseline {
 
     /// Reset the session for the next test (see [`SessionReset`]).
     pub(crate) async fn reset(&mut self, driver: &WebDriver) -> Result<(), ResetError> {
+        // First, so that the reset's own commands (e.g. its navigation) run with the session's
+        // timeouts, not those the test set.
+        driver
+            .update_timeouts(self.timeouts.clone())
+            .await
+            .context("the timeouts could not be restored")?;
         match &mut self.isolation {
             Isolation::UserContext(user_context) => {
                 let bidi = driver
@@ -405,10 +411,6 @@ impl SessionBaseline {
                 .await
                 .context("the window size could not be restored")?;
         }
-        driver
-            .update_timeouts(self.timeouts.clone())
-            .await
-            .context("the timeouts could not be restored")?;
         Ok(())
     }
 }
