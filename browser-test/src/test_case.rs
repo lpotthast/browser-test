@@ -1,4 +1,4 @@
-use std::{borrow::Cow, fmt, future::Future};
+use std::{borrow::Cow, fmt, future::Future, panic::AssertUnwindSafe};
 
 use async_trait::async_trait;
 use rootcause::Report;
@@ -355,7 +355,7 @@ where
                 &self
                     .tests
                     .iter()
-                    .map(|test| test.name())
+                    .map(|test| DebugName(test.as_ref()))
                     .collect::<Vec<_>>(),
             )
             .finish()
@@ -475,6 +475,7 @@ where
 
     /// Keep only the tests whose name `include` accepts, in this group and nested ones.
     ///
+    /// A test whose [`BrowserTest::name`] panics is kept, so that the run reports it as failed.
     /// Nested groups keep how they run, and empty ones are removed. Groups marked
     /// [`Self::run_always`] are filtered too: add tests that must always run after filtering.
     #[must_use]
@@ -485,9 +486,9 @@ where
 
     fn retain_tests(&mut self, include: &mut impl FnMut(&str) -> bool) {
         self.entries.retain_mut(|entry| match entry {
-            BrowserTestEntry::Test(test) => include(&test.name()),
+            BrowserTestEntry::Test(test) => includes(include, test.as_ref()),
             BrowserTestEntry::TestGroup(group) => {
-                group.tests.retain(|test| include(&test.name()));
+                group.tests.retain(|test| includes(include, test.as_ref()));
                 !group.tests.is_empty()
             }
             BrowserTestEntry::Group(group) => {
@@ -530,9 +531,49 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Test(test) => write!(f, "{:?}", test.name()),
+            Self::Test(test) => DebugName(test.as_ref()).fmt(f),
             Self::Group(group) => group.fmt(f),
             Self::TestGroup(group) => group.fmt(f),
+        }
+    }
+}
+
+/// The name of `test`, or `None` if reading it panics.
+fn name_of<Context, TestError>(test: &dyn BrowserTest<Context, TestError>) -> Option<Cow<'_, str>>
+where
+    Context: Sync + ?Sized,
+    TestError: ?Sized,
+{
+    std::panic::catch_unwind(AssertUnwindSafe(|| test.name())).ok()
+}
+
+/// Whether `include` accepts the name of `test`. A test whose name panics is kept, so that the
+/// run reports it as failed.
+fn includes<Context, TestError>(
+    include: &mut impl FnMut(&str) -> bool,
+    test: &dyn BrowserTest<Context, TestError>,
+) -> bool
+where
+    Context: Sync + ?Sized,
+    TestError: ?Sized,
+{
+    name_of(test).is_none_or(|name| include(&name))
+}
+
+/// A test's name in `Debug` output, also if reading it panics.
+struct DebugName<'a, Context: Sync + ?Sized, TestError: ?Sized>(
+    &'a dyn BrowserTest<Context, TestError>,
+);
+
+impl<Context, TestError> fmt::Debug for DebugName<'_, Context, TestError>
+where
+    Context: Sync + ?Sized,
+    TestError: ?Sized,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match name_of(self.0) {
+            Some(name) => name.fmt(f),
+            None => f.write_str("<name() panicked>"),
         }
     }
 }
@@ -552,6 +593,36 @@ mod tests {
         async fn run(&self, _driver: &WebDriver, _context: &()) -> Result<(), Report> {
             Ok(())
         }
+    }
+
+    struct UnnamedTest;
+
+    #[async_trait::async_trait]
+    impl BrowserTest for UnnamedTest {
+        fn name(&self) -> Cow<'_, str> {
+            panic!("no name")
+        }
+
+        async fn run(&self, _driver: &WebDriver, _context: &()) -> Result<(), Report> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn tests_whose_name_panics_survive_filters_and_debug_output() {
+        let tests = BrowserTests::sequential()
+            .with(NamedTest("menu"))
+            .with(UnnamedTest)
+            .with_test_group(TestGroup::new("group").with(UnnamedTest))
+            .filter_tests(|name| name.contains("checkout"));
+
+        // Kept, so that the run reports them as failed.
+        assert_eq!(
+            format!("{tests:?}"),
+            "BrowserTests { parallelism: Parallelism { max_parallel_tests: 1 }, name: None, \
+             run_always: false, entries: [<name() panicked>, TestGroup { name: \"group\", \
+             tests: [<name() panicked>] }] }"
+        );
     }
 
     #[test]
