@@ -44,7 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The run report counts reset sessions (`BrowserTestRunReport::session_resets`, `session_reset_time`), and the summary
   shows the average duration of every step kind. `BrowserTestRunReport::released_session_teardown` measures the quits of
   sessions without a test (spares no test took, reused sessions the pool released), which `session_teardown_time`
-  includes.
+  includes. `BrowserTestRunReport::not_started` counts the tests a fail-fast stop or a cancellation kept from starting,
+  and the summary lists them.
 - `#[browser_test]`, re-exported from the new `browser-test-macros` crate, turns an async function into a test: a unit
   struct implementing `BrowserTest`, named in PascalCase (`async fn opens_menu` becomes `OpensMenu`), registered with
   `.with(OpensMenu)`. Its name defaults to the module-qualified function name and can be set with `name = "..."`. Its

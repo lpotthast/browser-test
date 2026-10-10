@@ -24,9 +24,13 @@ pub struct BrowserTestRunReport {
     pub webdriver_shutdown: Duration,
 
     /// Every test that was started (or failed before it could start), in the order the tests were
-    /// given to the runner. Tests not started because of [`crate::FailurePolicy::FailFast`]
-    /// are missing.
+    /// given to the runner. Tests not started because of [`crate::FailurePolicy::FailFast`] or a
+    /// cancellation are missing, and counted in [`Self::not_started`].
     pub tests: Vec<BrowserTestRecord>,
+
+    /// How many of the tests given to the runner did not start, because an earlier one failed
+    /// ([`crate::FailurePolicy::FailFast`]) or the run was cancelled.
+    pub not_started: usize,
 
     /// Every named group (see [`crate::BrowserTests::named`]) that ran, in the order the groups
     /// were defined.
@@ -329,13 +333,16 @@ impl Display for BrowserTestRunReport {
         write!(
             f,
             "Browser test run: {} test(s), {} passed, {} failed",
-            self.tests.len(),
+            self.tests.len() + self.not_started,
             self.passed(),
             self.failed(),
         )?;
         let cancelled = self.cancelled();
         if cancelled > 0 {
             write!(f, ", {cancelled} cancelled")?;
+        }
+        if self.not_started > 0 {
+            write!(f, ", {} not started", self.not_started)?;
         }
         writeln!(f, ", in {}", FormatDuration(self.total))?;
         writeln!(
@@ -656,6 +663,13 @@ mod tests {
         assert_that!((report.passed(), report.failed(), report.cancelled())).is_equal_to((1, 0, 1));
         let summary = report.to_string();
         assert_that!(summary.as_str()).contains("2 test(s), 1 passed, 0 failed, 1 cancelled, in");
+
+        let report = BrowserTestRunReport {
+            not_started: 3,
+            ..report
+        };
+        assert_that!(report.to_string().as_str())
+            .contains("5 test(s), 1 passed, 0 failed, 1 cancelled, 3 not started, in");
         assert_that!(summary.as_str()).contains("running [cancelled]");
     }
 
@@ -674,6 +688,7 @@ mod tests {
                 duration: Duration::from_millis(1200),
             }],
             released_session_teardown: Duration::from_millis(60),
+            not_started: 0,
         };
 
         let summary = report.to_string();

@@ -82,6 +82,8 @@ pub(crate) struct Execution {
     /// Time spent quitting sessions without a test (see
     /// [`BrowserTestRunReport::released_session_teardown`](crate::BrowserTestRunReport::released_session_teardown)).
     pub(crate) released_session_teardown: Duration,
+    /// How many tests did not start, after a fail-fast stop or a cancellation.
+    pub(crate) not_started: usize,
     pub(crate) result: Result<(), Report<BrowserTestError>>,
 }
 
@@ -153,6 +155,7 @@ where
     futures_util::future::select(pin!(run), pin!(watchdog)).await;
 
     let Env {
+        tests,
         failures,
         records,
         groups,
@@ -160,6 +163,7 @@ where
         ..
     } = env;
     let mut records = records.into_inner().unwrap_or_else(PoisonError::into_inner);
+    let not_started = tests.len() - records.len();
     records.sort_by_key(|record| record.index);
     let mut groups = groups.into_inner().unwrap_or_else(PoisonError::into_inner);
     groups.sort_by_key(|(id, _)| *id);
@@ -177,6 +181,7 @@ where
         released_session_teardown: released_session_teardown
             .into_inner()
             .unwrap_or_else(PoisonError::into_inner),
+        not_started,
         result,
     }
 }

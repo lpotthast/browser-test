@@ -305,6 +305,7 @@ async fn fail_fast_does_not_start_tests_whose_session_is_ready() {
     assert_that!(outcome.result.is_err()).is_true();
     assert_that!(tracker.started.lock().unwrap().clone()).is_equal_to(vec![0]);
     assert_that!(outcome.report.tests.len()).is_equal_to(1);
+    assert_that!(outcome.report.not_started).is_equal_to(2);
     assert_that!(outcome.report.tests[0].outcome).is_equal_to(TestOutcome::Failed);
 }
 
