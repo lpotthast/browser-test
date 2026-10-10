@@ -2,13 +2,14 @@ use std::{
     borrow::Cow,
     fmt::Display,
     io::{self, ErrorKind},
+    sync::{Mutex, PoisonError},
     thread,
 };
 
 use rootcause::{Report, prelude::ResultExt};
 use tokio::{
     io::{AsyncWrite, AsyncWriteExt},
-    sync::oneshot,
+    sync::{self, oneshot},
 };
 
 use crate::{
@@ -139,15 +140,30 @@ pub(crate) async fn pause_if_requested(
 }
 
 async fn pause(config: &Pause) -> Result<PauseDecision, Report<BrowserTestError>> {
+    // Runs pausing at the same time (in parallel, or on several runtimes) ask one after another.
+    static PROMPT: sync::Mutex<()> = sync::Mutex::const_new(());
+    let _prompt = PROMPT.lock().await;
     pause_with_io(config, read_stdin_line, &mut tokio::io::stdout()).await
 }
+
+/// A line read from stdin, `None` at EOF.
+type LineReceiver = oneshot::Receiver<io::Result<Option<String>>>;
+
+/// The read a cancelled pause left behind, if any: its thread still waits for a line, which the
+/// next read takes.
+static PENDING_READ: Mutex<Option<LineReceiver>> = Mutex::new(None);
 
 /// Read a line from stdin on a thread of its own. `None` at EOF.
 ///
 /// Not through Tokio's `stdin`, which reads on the runtime's blocking pool: a read cannot be
 /// cancelled, so a cancelled pause (Ctrl-C at the prompt) would keep the runtime from shutting
-/// down until the user presses Enter. A thread of its own is left behind instead.
+/// down until the user presses Enter. A thread of its own is left behind instead, and the next
+/// pause takes the line it reads.
 async fn read_stdin_line() -> io::Result<Option<String>> {
+    read_pending_or(spawn_stdin_reader).await
+}
+
+fn spawn_stdin_reader() -> io::Result<LineReceiver> {
     let (line_sender, line) = oneshot::channel();
     thread::Builder::new()
         .name("browser-test-pause".into())
@@ -158,8 +174,39 @@ async fn read_stdin_line() -> io::Result<Option<String>> {
                 .map(|bytes_read| (bytes_read > 0).then_some(line));
             let _ = line_sender.send(read);
         })?;
-    line.await
-        .unwrap_or_else(|_| Err(io::Error::other("the stdin reader thread panicked")))
+    Ok(line)
+}
+
+/// Take the line of the pending read, or of a read `start`s. If cancelled, leave the read pending.
+async fn read_pending_or(
+    start: impl FnOnce() -> io::Result<LineReceiver>,
+) -> io::Result<Option<String>> {
+    /// Puts the read back when the reading future is dropped before it finished.
+    struct Pending(Option<LineReceiver>);
+
+    impl Drop for Pending {
+        fn drop(&mut self) {
+            if let Some(read) = self.0.take() {
+                *PENDING_READ.lock().unwrap_or_else(PoisonError::into_inner) = Some(read);
+            }
+        }
+    }
+
+    let pending = PENDING_READ
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take();
+    let mut read = Pending(Some(match pending {
+        Some(read) => read,
+        None => start()?,
+    }));
+    let line = read
+        .0
+        .as_mut()
+        .expect("the read is set until it finished")
+        .await;
+    read.0 = None;
+    line.unwrap_or_else(|_| Err(io::Error::other("the stdin reader thread panicked")))
 }
 
 /// Print the pause to `stdout` and ask until `read_line` (`None` at EOF) gives an answer.
@@ -222,6 +269,22 @@ mod tests {
 
     use super::*;
     use crate::test_support::EnvVarGuard;
+
+    #[tokio::test]
+    async fn a_cancelled_read_leaves_its_line_to_the_next_one() {
+        let (line_sender, line) = oneshot::channel();
+        let mut line = Some(line);
+        let cancelled = read_pending_or(|| Ok(line.take().expect("started once")));
+        // Polled once, then dropped, as a cancelled pause is.
+        assert_that!(futures_util::poll!(std::pin::pin!(cancelled)).is_pending()).is_true();
+
+        line_sender
+            .send(Ok(Some("y\n".to_owned())))
+            .expect("the read is pending");
+        let next = read_pending_or(|| panic!("the pending read is taken")).await;
+
+        assert_that!(next.ok().flatten()).is_equal_to(Some("y\n".to_owned()));
+    }
 
     /// Reads `lines`, one per call, then EOF.
     fn answers(lines: &[&str]) -> impl FnMut() -> std::future::Ready<io::Result<Option<String>>> {
