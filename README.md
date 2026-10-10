@@ -599,6 +599,10 @@ failure_report::hooks(Hooks::new())
 
 `BrowserTestRunner::with_failure_report_hooks(false)` goes without the hooks.
 
+To locate panics, the first run also installs a panic hook, which calls the one installed before it. Set a panic hook
+of your own before the first run: one set later replaces the runner's, and failure reports then lack where tests
+panicked.
+
 ### Getting the most out of failure reports
 
 - **Return errors with `?`.** Write test code and helpers as `async fn ... -> Result<_, Report>` and propagate with

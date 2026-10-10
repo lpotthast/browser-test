@@ -102,6 +102,11 @@ pub(crate) fn install(report_hooks: bool) {
     PANIC_HOOK.get_or_init(|| {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
+            // Capturing frames symbolizes a backtrace: only for the panics of tests.
+            if !crate::step::in_test() {
+                previous(info);
+                return;
+            }
             crate::step::record_panic(PanicDetails {
                 location: info.location().map(|location| {
                     format!(
