@@ -448,6 +448,12 @@ where
                 "Browser test '{}' failed in {total} ({breakdown}).",
                 record.name,
             ),
+            TestOutcome::Cancelled => tracing::warn!(
+                test = %record.name,
+                total_ms = record.total().as_millis(),
+                "Browser test '{}' was cancelled after {total} ({breakdown}).",
+                record.name,
+            ),
         }
         if let Err(report) = result {
             self.stop_starting_on_fail_fast();
@@ -621,17 +627,33 @@ async fn run_test<Context, TestError>(
                 wait,
                 body_done: body_done_tx,
             };
-            match ticket.job.send(job) {
-                Ok(()) => {
-                    // An error means the worker ended without running the body. It recorded
-                    // the test itself.
-                    let _ = body_done_rx.await;
-                    return;
+            let preparation = ticket.preparation;
+            let started = Instant::now();
+            if ticket.job.send(job).is_ok() {
+                if body_done_rx.await.is_err() {
+                    // The worker ended without finishing the test, which only a cancelled run
+                    // does: it drops its workers.
+                    if pooled {
+                        env.pool.test_finished();
+                    }
+                    let mut record = record_without_body(
+                        index,
+                        &test.name,
+                        test.group.as_deref(),
+                        TestOutcome::Cancelled,
+                        Some(SessionTiming { preparation, wait }),
+                    );
+                    record.body = Some(started.elapsed());
+                    env.finish(record, Ok(()));
                 }
-                Err(_) => CreationFailure {
-                    report: rootcause::report!("the browser session ended before the test started"),
-                    preparation: ticket.preparation,
-                },
+                return;
+            }
+            if pooled {
+                env.pool.test_finished();
+            }
+            CreationFailure {
+                report: rootcause::report!("the browser session ended before the test started"),
+                preparation,
             }
         }
         Err(failure) => failure,
@@ -654,7 +676,7 @@ async fn run_test<Context, TestError>(
     env.finish(record, Err(report));
 }
 
-/// The record of a test that failed before its body ran.
+/// The record of a test that failed before its body ran, or was cancelled while it ran.
 fn record_without_body(
     index: usize,
     name: &str,

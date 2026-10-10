@@ -12,9 +12,9 @@ use std::{
 
 use assertr::prelude::*;
 use browser_test::{
-    BrowserTest, BrowserTestError, BrowserTestRunner, BrowserTests, Cancellation,
-    CancellationToken, FailurePolicy, Parallelism, SessionSettings, StepExt, async_trait,
-    browser_test,
+    BrowserTest, BrowserTestError, BrowserTestRunReport, BrowserTestRunner, BrowserTests,
+    Cancellation, CancellationToken, FailurePolicy, Parallelism, SessionSettings, StepExt,
+    TestOutcome, async_trait, browser_test,
     thirtyfour::{By, ChromiumLikeCapabilities, WebDriver, prelude::ElementQueryable},
 };
 use rootcause::{Report, prelude::ResultExt};
@@ -784,9 +784,18 @@ async fn cancellation_stops_the_run_and_its_browsers() {
     let profiles_dir = ScratchDir::new("cancellation-profiles");
     let cancellation = CancellationToken::new();
     let started = Arc::new(AtomicUsize::new(0));
+    let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let reported = Arc::clone(&outcomes);
 
     let err = runner_with(Cancellation::from_token(cancellation.clone()))
         .with_chrome_profiles_dir(profiles_dir.path())
+        .with_report_consumer(move |report: &BrowserTestRunReport| {
+            *reported.lock().unwrap() = report
+                .tests
+                .iter()
+                .map(|test| (test.name.clone(), test.outcome))
+                .collect();
+        })
         .run(
             &IntegrationContext::default(),
             BrowserTests::sequential()
@@ -801,6 +810,9 @@ async fn cancellation_stops_the_run_and_its_browsers() {
 
     assert_that!(err.to_string()).contains(BrowserTestError::Cancelled.to_string());
     assert_that!(started.load(Ordering::SeqCst)).is_equal_to(0);
+    // The running test is recorded as cancelled, the one not started is not recorded.
+    assert_that!(outcomes.lock().unwrap().clone())
+        .is_equal_to(vec![("run forever".to_owned(), TestOutcome::Cancelled)]);
     assert_that!(dir_entry_count(profiles_dir.path())).is_equal_to(0);
     let own_pid = std::process::id();
     let leftovers = || {

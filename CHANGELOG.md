@@ -58,7 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keeping its settings. The trait's default name is the Rust type name.
 - `SessionSettings`, returned by the new `BrowserTest::session_settings`, holds what a test needs of its session: timeouts,
   element-query wait, and whether it needs a fresh session.
-- `TestOutcome::is_passed` and `is_failed`, `BrowserTestRunReport::passed` and `failed`.
+- `TestOutcome::is_passed`, `is_failed` and `is_cancelled`, `BrowserTestRunReport::passed`, `failed` and `cancelled`.
 - `Parallelism::max_parallel_tests` is public.
 
 ### Changed
@@ -76,6 +76,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cancels runs once your own token is cancelled. `Cancellation::disabled()` keeps the previous behavior. Replace
   `BrowserTestRunner::new()` with `BrowserTestRunner::new(Cancellation::on_shutdown_signals())`.
 - **Breaking:** `BrowserTestRunner` no longer implements `Default`, as it has no default `Cancellation`.
+- **Breaking:** `TestOutcome` is `#[non_exhaustive]` and has a new variant, `Cancelled`: a test that was running when
+  its run was cancelled is recorded with it.
 - **Breaking:** `BrowserTest::timeouts` and `element_query_wait` were replaced by `BrowserTest::session_settings`,
   returning a `SessionSettings`. A wrapper around another test now forwards `name`, `description` and
   `session_settings`, and future settings reach the wrapped test without changes to the wrapper. Replace

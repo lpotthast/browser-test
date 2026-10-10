@@ -94,6 +94,7 @@ impl BrowserTestRecord {
 
 /// Outcome of one browser test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum TestOutcome {
     /// The test passed.
     Passed,
@@ -103,6 +104,10 @@ pub enum TestOutcome {
 
     /// The test panicked.
     Panicked,
+
+    /// The test was running when the run was cancelled. Its body time is the time until then,
+    /// and its steps are not recorded.
+    Cancelled,
 }
 
 impl TestOutcome {
@@ -115,7 +120,13 @@ impl TestOutcome {
     /// Whether the test failed or panicked.
     #[must_use]
     pub const fn is_failed(self) -> bool {
-        !self.is_passed()
+        matches!(self, Self::Failed | Self::Panicked)
+    }
+
+    /// Whether the test was cancelled while it ran.
+    #[must_use]
+    pub const fn is_cancelled(self) -> bool {
+        matches!(self, Self::Cancelled)
     }
 }
 
@@ -200,7 +211,19 @@ impl BrowserTestRunReport {
     /// Number of tests that failed or panicked.
     #[must_use]
     pub fn failed(&self) -> usize {
-        self.tests.len() - self.passed()
+        self.tests
+            .iter()
+            .filter(|test| test.outcome.is_failed())
+            .count()
+    }
+
+    /// Number of tests that were running when the run was cancelled.
+    #[must_use]
+    pub fn cancelled(&self) -> usize {
+        self.tests
+            .iter()
+            .filter(|test| test.outcome.is_cancelled())
+            .count()
     }
 
     /// Number of sessions created for the tests of this report.
@@ -294,14 +317,18 @@ impl BrowserTestRunReport {
 
 impl Display for BrowserTestRunReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(
+        write!(
             f,
-            "Browser test run: {} test(s), {} passed, {} failed, in {}",
+            "Browser test run: {} test(s), {} passed, {} failed",
             self.tests.len(),
             self.passed(),
             self.failed(),
-            FormatDuration(self.total),
         )?;
+        let cancelled = self.cancelled();
+        if cancelled > 0 {
+            write!(f, ", {cancelled} cancelled")?;
+        }
+        writeln!(f, ", in {}", FormatDuration(self.total))?;
         writeln!(
             f,
             "  chromedriver:   started in {}, stopped in {}",
@@ -385,6 +412,7 @@ impl Display for Describe<'_> {
             TestOutcome::Passed => {}
             TestOutcome::Failed => f.write_str(" [failed]")?,
             TestOutcome::Panicked => f.write_str(" [panicked]")?,
+            TestOutcome::Cancelled => f.write_str(" [cancelled]")?,
         }
         f.write_str(" (")?;
         f.write_str(&timing_breakdown(test))?;
@@ -594,6 +622,21 @@ mod tests {
             max: Duration::from_millis(500),
         });
         assert_that!(steps[1].0.as_str()).is_equal_to("wait");
+    }
+
+    #[test]
+    fn cancelled_tests_count_apart_from_failed_ones() {
+        let mut cancelled = record(1, "running", session(400, 15), 2500);
+        cancelled.outcome = TestOutcome::Cancelled;
+        let report = BrowserTestRunReport {
+            tests: vec![record(0, "works", session(800, 0), 1000), cancelled],
+            ..BrowserTestRunReport::default()
+        };
+
+        assert_that!((report.passed(), report.failed(), report.cancelled())).is_equal_to((1, 0, 1));
+        let summary = report.to_string();
+        assert_that!(summary.as_str()).contains("2 test(s), 1 passed, 0 failed, 1 cancelled, in");
+        assert_that!(summary.as_str()).contains("running [cancelled]");
     }
 
     #[test]
