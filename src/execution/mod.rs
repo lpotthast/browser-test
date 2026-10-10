@@ -26,7 +26,10 @@ use std::{
 use chrome_for_testing_manager::{CancellationToken, ChromeForTesting, Session};
 use futures_util::{FutureExt as _, StreamExt as _, stream::FuturesUnordered};
 use rootcause::Report;
-use thirtyfour::{ChromeCapabilities, ChromiumLikeCapabilities, error::WebDriverResult};
+use thirtyfour::{
+    ChromeCapabilities, ChromiumLikeCapabilities,
+    error::{WebDriverError, WebDriverResult},
+};
 use tokio::sync::{mpsc, oneshot};
 use tracing::Instrument as _;
 
@@ -1089,8 +1092,11 @@ async fn run_body<Context, TestError>(
         group = test.group.as_deref().unwrap_or_default(),
     );
     let start = Instant::now();
+    // `run` is called in the block, so that a panic before it returns its future (in a
+    // hand-written implementation) is caught as well.
+    let body = async { test.test.run(session, env.context).await };
     let result = recorder
-        .scope(AssertUnwindSafe(test.test.run(session, env.context)).catch_unwind())
+        .scope(AssertUnwindSafe(body).catch_unwind())
         .instrument(span)
         .await;
     run.body = Some(start.elapsed());
@@ -1122,7 +1128,13 @@ fn configure_chrome_capabilities(
         caps.unset_headless()?;
     }
     for setup in chrome_capabilities_setups {
-        setup(caps)?;
+        // A panic would unwind through the whole run: it fails the session instead.
+        std::panic::catch_unwind(AssertUnwindSafe(|| setup(caps))).unwrap_or_else(|payload| {
+            Err(WebDriverError::SessionCreateError(format!(
+                "a Chrome capability setup panicked: {}",
+                panic_payload_message(payload.as_ref())
+            )))
+        })?;
     }
     Ok(())
 }
@@ -1298,6 +1310,19 @@ mod tests {
             assert_that!(custom_setup_called.load(Ordering::SeqCst)).is_equal_to(1);
             assert_that!(caps.is_headless()).is_false();
             assert_that!(caps.has_arg("--window-size=800,600")).is_true();
+        }
+
+        #[test]
+        fn a_panicking_setup_is_an_error() {
+            let panicking = Arc::new(|_: &mut ChromeCapabilities| -> WebDriverResult<()> {
+                panic!("no window size")
+            }) as Arc<ChromeCapabilitiesSetup>;
+            let error =
+                configure_chrome_capabilities(&mut ChromeCapabilities::new(), false, &[panicking])
+                    .expect_err("a panicking setup should fail");
+
+            assert_that!(error.to_string())
+                .contains("a Chrome capability setup panicked: no window size");
         }
     }
 

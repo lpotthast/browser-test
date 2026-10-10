@@ -559,6 +559,51 @@ async fn run_all_reports_intentional_failure_and_runs_page_title_test() {
     assert_that!(err.children().len()).is_equal_to(1);
 }
 
+/// Implements `run` by hand, and panics before returning its future.
+struct PanicsBeforeItsFuture;
+
+impl BrowserTest<IntegrationContext, IntegrationTestError> for PanicsBeforeItsFuture {
+    fn name(&self) -> Cow<'_, str> {
+        Cow::Borrowed("panics before its future")
+    }
+
+    fn run<'test, 'driver, 'context, 'future>(
+        &'test self,
+        _driver: &'driver WebDriver,
+        _context: &'context IntegrationContext,
+    ) -> std::pin::Pin<
+        Box<dyn Future<Output = Result<(), Report<IntegrationTestError>>> + Send + 'future>,
+    >
+    where
+        'test: 'future,
+        'driver: 'future,
+        'context: 'future,
+        Self: 'future,
+    {
+        panic!("no future")
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn run_all_reports_panics_outside_test_bodies_and_runs_remaining_tests() {
+    let started = Arc::new(AtomicUsize::new(0));
+    let err = runner()
+        .with_failure_policy(FailurePolicy::RunAll)
+        .run(
+            &IntegrationContext::default(),
+            BrowserTests::sequential().with(PanicsBeforeItsFuture).with(
+                page_title_test_with_counter("page title", Arc::clone(&started)),
+            ),
+        )
+        .await
+        .expect_err("run-all should report the panic");
+
+    assert_that!(started.load(Ordering::SeqCst)).is_equal_to(1);
+    assert_that!(err.children().len()).is_equal_to(1);
+    assert_that!(format!("{err:?}")).contains("no future");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn run_all_reports_metadata_hook_panics_and_runs_remaining_page_title_test() {
