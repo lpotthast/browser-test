@@ -584,8 +584,8 @@ anything in your test code:
   chromedriver's native stack trace; messages print without quotes and escapes.
 
 The runner installs the [`rootcause`](https://docs.rs/rootcause) hooks behind this with its first run. `rootcause`
-takes one set of hooks per process, so if your application installs hooks of its own, add browser-test's to them. The
-runner then leaves the installation to you:
+takes one set of hooks per process, so if your application installs hooks of its own, add browser-test's to them,
+before the first run. The runner then finds them installed:
 
 ```rust,no_run
 use browser_test::failure_report;

@@ -60,11 +60,10 @@ pub(crate) const RECENT_STEP_COUNT: usize = 8;
 ///     .expect("hooks are installed once");
 /// ```
 ///
-/// Once this was called, runners no longer install the hooks themselves: [`rootcause`] takes only
-/// one set of hooks per process, and the returned one includes them.
+/// Once these are installed, runners no longer install the hooks themselves: [`rootcause`] takes
+/// only one set of hooks per process, and the returned one includes them.
 #[must_use]
 pub fn hooks(hooks: Hooks) -> Hooks {
-    ADDED_BY_APPLICATION.store(true, Ordering::Relaxed);
     hooks
         .report_creation_hook(TestCodeFramesHook)
         .context_formatter::<WebDriverError, _>(WebDriverErrorFormatter)
@@ -73,17 +72,26 @@ pub fn hooks(hooks: Hooks) -> Hooks {
         .context_formatter::<&'static str, _>(DisplayFormatter)
 }
 
-/// Whether the application added the hooks to its own with [`hooks`].
-static ADDED_BY_APPLICATION: AtomicBool = AtomicBool::new(false);
+/// Set by [`TestCodeFramesHook`] whenever it runs: the [`hooks`] are installed.
+static HOOKS_RAN: AtomicBool = AtomicBool::new(false);
 
-/// Install [`hooks`] and the panic hook, once per process, unless the application added the hooks
-/// to its own. Called by the runner.
+/// Whether the [`hooks`] are installed, e.g. by the application with hooks of its own: creating a
+/// report runs them.
+fn hooks_installed() -> bool {
+    drop(rootcause::report!(
+        "Are browser-test's rootcause hooks installed?"
+    ));
+    HOOKS_RAN.load(Ordering::Relaxed)
+}
+
+/// Install [`hooks`] and the panic hook, once per process, unless the application installed the
+/// hooks with its own. Called by the runner.
 pub(crate) fn install(report_hooks: bool) {
     static REPORT_HOOKS: OnceLock<()> = OnceLock::new();
     static PANIC_HOOK: OnceLock<()> = OnceLock::new();
-    if report_hooks && !ADDED_BY_APPLICATION.load(Ordering::Relaxed) {
+    if report_hooks {
         REPORT_HOOKS.get_or_init(|| {
-            if hooks(Hooks::new()).install().is_err() {
+            if !hooks_installed() && hooks(Hooks::new()).install().is_err() {
                 tracing::warn!(
                     "Other rootcause hooks are installed already, so failure reports lack the test \
                      code's frames. Add browser-test's with `browser_test::failure_report::hooks`."
@@ -428,10 +436,12 @@ struct TestCodeFramesHook;
 
 impl ReportCreationHook for TestCodeFramesHook {
     fn on_local_creation(&self, report: ReportMut<'_, Dynamic, Local>) {
+        HOOKS_RAN.store(true, Ordering::Relaxed);
         attach_test_code_frames(report);
     }
 
     fn on_sendsync_creation(&self, report: ReportMut<'_, Dynamic, SendSync>) {
+        HOOKS_RAN.store(true, Ordering::Relaxed);
         attach_test_code_frames(report);
     }
 }
