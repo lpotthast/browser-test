@@ -134,6 +134,7 @@ fn generated_tests_implement_the_trait_with_distinct_module_qualified_names() {
     assert_eq!(BorrowedPage.name(), "macros::borrowed_page");
     assert_eq!(Type.name(), "macros::type");
     assert_eq!(other::BorrowedPage.name(), "macros::other::borrowed_page");
+    let _: BrowserTests = BrowserTests::sequential().with(FunctionAttributes);
     let _: BrowserTests<str> = BrowserTests::sequential().with(RawDriver);
     let _: BrowserTests<(), CustomError> = BrowserTests::sequential().with(TypedError);
     let tests = BrowserTests::sequential()
@@ -198,15 +199,15 @@ fn names_and_descriptions_are_independent_and_survive_wrapping() {
 }
 
 #[tokio::test]
-async fn generated_bodies_preserve_async_results_and_borrowed_arguments() {
+async fn functions_keep_their_name_async_results_and_borrowed_arguments() {
     let title = String::from("title");
     let page = Page { title: &title };
-    BorrowedPage::__browser_test_body(&page).await.unwrap();
-    ExplicitLifetime::__browser_test_body(&page).await.unwrap();
-    assert!(TypedError::__browser_test_body(&()).await.is_err());
+    borrowed_page(&page).await.unwrap();
+    explicit_lifetime(&page).await.unwrap();
+    assert!(typed_error(&()).await.is_err());
     let callbacks = Callbacks {
         on_title: str::len,
         on_click: &str::len,
     };
-    HigherRanked::__browser_test_body(&callbacks).await.unwrap();
+    higher_ranked(&callbacks).await.unwrap();
 }

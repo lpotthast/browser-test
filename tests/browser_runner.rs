@@ -14,6 +14,7 @@ use assertr::prelude::*;
 use browser_test::{
     BrowserTest, BrowserTestError, BrowserTestRunner, BrowserTests, Cancellation,
     CancellationToken, FailurePolicy, Parallelism, SessionSettings, StepExt, async_trait,
+    browser_test,
     thirtyfour::{By, ChromiumLikeCapabilities, WebDriver, prelude::ElementQueryable},
 };
 use rootcause::{Report, prelude::ResultExt};
@@ -404,6 +405,43 @@ async fn failure_reports_locate_errors_in_test_code() {
         .contains("goto")
         .contains("find #missing")
         .does_not_contain("Stacktrace");
+}
+
+/// Calls [`find_missing`] from a `#[browser_test]` function.
+#[browser_test]
+async fn missing_element(
+    driver: &WebDriver,
+    context: &IntegrationContext,
+) -> Result<(), Report<IntegrationTestError>> {
+    driver
+        .goto(context.page_url)
+        .await
+        .context(IntegrationTestError::OpenTestPage)?;
+    find_missing(driver).await
+}
+
+/// The test code of a `#[browser_test]` ends at its function, named as written.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn failure_reports_name_browser_test_functions() {
+    let err = runner()
+        .run(
+            &IntegrationContext::default(),
+            BrowserTests::sequential().with(MissingElement),
+        )
+        .await
+        .expect_err("the element is missing");
+
+    let report = format!("{err:?}");
+    let test_code: Vec<_> = report
+        .lines()
+        .skip_while(|line| !line.contains("Test code:"))
+        .skip(1)
+        .take_while(|line| line.contains("tests/browser_runner.rs"))
+        .collect();
+    assert_that!(test_code.len()).is_equal_to(2);
+    assert_that!(test_code[0]).ends_with("browser_runner::find_missing");
+    assert_that!(test_code[1]).ends_with("browser_runner::missing_element");
 }
 
 /// A failure report locates a panic and its test code.

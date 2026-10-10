@@ -284,7 +284,8 @@ let tests: BrowserTests<str> = BrowserTests::sequential().with(ClosesMenu);
   `#[browser_test(name = "menu::closes")]` sets another one.
 - **Description**: `BrowserTest::description()` returns the doc comments. Filters don't match it.
 
-The function becomes the test's body and keeps its other attributes. Type and const parameters, `&mut` arguments, and
+The function stays as the test's body, under its own name (which failure reports show), private to its module, and
+keeps its other attributes. Type and const parameters, `&mut` arguments, and
 non-async functions are rejected at the declaration:
 
 ```compile_fail

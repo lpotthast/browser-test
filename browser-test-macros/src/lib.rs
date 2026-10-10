@@ -43,8 +43,9 @@ use syn::ItemFn;
 /// `async fn shows_greeting` becomes `struct ShowsGreeting;`, a unit struct named in `PascalCase`
 /// with the function's visibility, its doc comments and its `#[cfg]`s. It derives `Debug`,
 /// `Clone`, `Copy` and `Default`. Register it with `BrowserTests::with(ShowsGreeting)`. The
-/// function itself becomes the test's body: it is no longer callable under its own name, and all
-/// its other attributes (e.g. `#[allow]`, `#[expect]`, `#[tracing::instrument]`) stay on it.
+/// function itself stays as the test's body, private to its module, under its own name (which
+/// failure reports and `#[tracing::instrument]` show), and all its other attributes (e.g.
+/// `#[allow]`, `#[expect]`, `#[tracing::instrument]`) stay on it.
 ///
 /// - **Name**: `BrowserTest::name` returns the module-qualified function name
 ///   (`module_path!()` and the function name, e.g. `my_tests::checkout::shows_greeting`), which
