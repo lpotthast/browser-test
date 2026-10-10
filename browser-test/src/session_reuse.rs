@@ -1,13 +1,16 @@
 //! Reusing a test's session for the next test, after resetting it.
 
-use std::{collections::BTreeSet, num::NonZeroUsize};
+use std::{collections::BTreeSet, num::NonZeroUsize, time::Duration};
+
+use futures_util::StreamExt as _;
 
 use rootcause::{Report, prelude::ResultExt as _};
 use thirtyfour::{
     BrowserCapabilitiesHelper as _, CapabilitiesHelper as _, ChromeCapabilities,
     ChromiumLikeCapabilities as _, Rect, TimeoutConfiguration, WebDriver, WindowHandle,
     bidi::{
-        UserContextId,
+        EventStream, UserContextId,
+        events::NavigationStarted,
         modules::browsing_context::{Create, CreateType},
     },
     error::WebDriverResult,
@@ -38,6 +41,7 @@ pub(crate) const DEFAULT_SESSION_REUSE_ENV: &str = "BROWSER_TEST_SESSION_REUSE";
 /// alive across tests of a [`SessionReset::Manual`] session. A test with an element query wait of
 /// its own gets a session created for it, which is set up the same way (also running the test in
 /// a user context of its own with [`SessionReset::NewContext`]), and quits after the test.
+/// Sessions are created with `WebDriver` `BiDi` enabled (`webSocketUrl`), which both resets use.
 ///
 /// The settings ([`Self::with_reset`], [`Self::with_max_tests_per_session`],
 /// [`Self::with_back_forward_cache`]) only take effect while reuse is enabled. They are kept while
@@ -194,7 +198,7 @@ pub enum SessionReset {
     /// windows. A test that leaves state in the default context, which removing a user context
     /// doesn't remove, makes its session quit instead of being reset: by opening windows with
     /// `WebDriver`'s New Window command (they open in the default context), or by navigating the
-    /// first tab. Sessions are created with `WebDriver` `BiDi` enabled (`webSocketUrl`).
+    /// first tab.
     #[default]
     NewContext,
 
@@ -207,17 +211,21 @@ pub enum SessionReset {
     /// - navigates the tab to an empty page in a new renderer process (a `data:` URL; the test's
     ///   page and its process go, with the caches in it), and clears its history;
     /// - clears cookies, and the storage (`localStorage`, `sessionStorage`, `IndexedDB`, cache
-    ///   storage, service workers, file systems) of every origin the tab's history and the closed
-    ///   windows showed;
+    ///   storage, service workers, file systems) of every origin a page navigated to since the last
+    ///   reset, in any window or frame, also when no history lists it anymore (`location.replace`);
     /// - resets permissions granted through CDP, and the CDP emulation overrides (device metrics,
     ///   user agent, geolocation, media, timezone, locale, touch, CPU throttling, idle state,
     ///   focus emulation, background color, script execution);
     /// - clears the HTTP cache, unless kept ([`CachedData::Http`]).
     ///
-    /// State it doesn't list survives into the next test: e.g. other CDP domains' settings, storage
-    /// of an origin only an iframe showed, Shared Storage, Storage Buckets, Interest Groups (the
-    /// shader cache is kept: compiled GPU shaders, invisible to pages). Use [`Self::NewContext`] for
-    /// tests that change such state, or to cross-check.
+    /// State it doesn't list survives into the next test: e.g. other CDP domains' settings, Shared
+    /// Storage, Storage Buckets, Interest Groups (the shader cache is kept: compiled GPU shaders,
+    /// invisible to pages). Use [`Self::NewContext`] for tests that change such state, or to
+    /// cross-check.
+    ///
+    /// The reset learns where pages navigated from `WebDriver` `BiDi` events. A test that subscribes
+    /// to more than a thousand `BiDi` events of its own can push some of them out of the buffer
+    /// they share, and the storage of origins only those named survives.
     Manual(KeptCaches),
 }
 
@@ -273,10 +281,8 @@ pub(crate) fn configure_reusable_session(
     caps: &mut ChromeCapabilities,
     reuse: SessionReuse,
 ) -> WebDriverResult<()> {
-    if reuse.reset == SessionReset::NewContext {
-        // The user contexts are created over BiDi.
-        caps.enable_bidi()?;
-    }
+    // Over BiDi, `NewContext` creates user contexts, and `Manual` learns where tests navigated.
+    caps.enable_bidi()?;
     if !reuse.back_forward_cache {
         disable_feature(caps, "BackForwardCache")?;
     }
@@ -332,7 +338,11 @@ enum Isolation {
     /// In a tab of this user context ([`SessionReset::NewContext`]).
     UserContext(UserContextId),
     /// In the first tab ([`SessionReset::Manual`]).
-    Manual(KeptCaches),
+    Manual {
+        kept: KeptCaches,
+        /// The navigations of every page of the session, whose origins the reset clears.
+        navigations: EventStream<NavigationStarted>,
+    },
 }
 
 impl SessionBaseline {
@@ -353,7 +363,16 @@ impl SessionBaseline {
             .context("the timeouts could not be read")?;
         let isolation = match reset {
             SessionReset::NewContext => Isolation::UserContext(open_user_context(driver).await?),
-            SessionReset::Manual(kept) => Isolation::Manual(kept),
+            SessionReset::Manual(kept) => Isolation::Manual {
+                kept,
+                navigations: driver
+                    .bidi()
+                    .await
+                    .context("the BiDi connection could not be opened")?
+                    .subscribe::<NavigationStarted>()
+                    .await
+                    .context("navigations could not be subscribed to")?,
+            },
         };
         // The window of the first test's tab: every test's tab gets this size and position.
         let window_rect = driver
@@ -390,7 +409,9 @@ impl SessionBaseline {
                 check_default_context_unused(driver, &self.first_tab, &self.first_url).await?;
                 *user_context = open_user_context(driver).await?;
             }
-            Isolation::Manual(kept) => reset_manually(driver, &self.first_tab, *kept).await?,
+            Isolation::Manual { kept, navigations } => {
+                reset_manually(driver, &self.first_tab, *kept, navigations).await?;
+            }
         }
         driver
             .action_chain()
@@ -459,11 +480,17 @@ fn emulation_resets() -> [(&'static str, serde_json::Value); 13] {
     ]
 }
 
-/// The reset of [`SessionReset::Manual`], in the session's `tab`.
+/// How long the reset of [`SessionReset::Manual`] waits for the event of its own navigation, which
+/// arrives right after the navigation, unless the `BiDi` connection broke.
+const NAVIGATION_EVENT_WAIT: Duration = Duration::from_secs(5);
+
+/// The reset of [`SessionReset::Manual`], in the session's `tab`. `navigations` holds the
+/// navigations since the last reset.
 async fn reset_manually(
     driver: &WebDriver,
     tab: &WindowHandle,
     kept: KeptCaches,
+    navigations: &mut EventStream<NavigationStarted>,
 ) -> Result<(), Report> {
     // An open alert would fail every following command.
     let _ = driver.dismiss_alert().await;
@@ -499,6 +526,23 @@ async fn reset_manually(
         .await
         .context("the tab could not be cleared")?;
     cdp(driver, "Page.resetNavigationHistory", serde_json::json!({})).await?;
+
+    // Every origin a page navigated to, also those no history lists (replaced entries, frames,
+    // closed windows): events arrive in order, so all are in once that of the navigation above is.
+    let tab_context = tab.to_string();
+    let all_read = tokio::time::timeout(NAVIGATION_EVENT_WAIT, async {
+        while let Some(navigation) = navigations.next().await {
+            if navigation.context.as_str() == tab_context && navigation.url == BLANK {
+                return true;
+            }
+            insert_origin(&mut origins, &navigation.url);
+        }
+        false
+    })
+    .await;
+    if all_read != Ok(true) {
+        rootcause::bail!("the navigations of the test could not be read");
+    }
 
     for origin in &origins {
         clear_storage(driver, origin).await?;

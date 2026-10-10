@@ -466,8 +466,8 @@ let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals()).with_se
 
 It closes other windows, navigates to an empty page in a new renderer process (a `data:` URL: the test's page and its
 process go, with the caches in it) and clears the history, clears cookies and the storage
-(`localStorage`, `sessionStorage`, `IndexedDB`, cache storage, service workers, file systems) of every origin the tab
-showed, resets CDP permissions and emulation overrides (device metrics, user
+(`localStorage`, `sessionStorage`, `IndexedDB`, cache storage, service workers, file systems) of every origin a page
+navigated to (in any window or frame, also when replaced in the history), resets CDP permissions and emulation overrides (device metrics, user
 agent, geolocation, media, timezone, locale, touch, CPU throttling, idle state, focus emulation, background color, script
 execution), and clears the HTTP cache unless `CachedData::Http` is kept. Keeping it is safe while the served files don't
 change during a run (content-hashed names, as in production): the next test loads the app's scripts and WebAssembly from

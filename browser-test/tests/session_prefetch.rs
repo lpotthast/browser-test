@@ -701,6 +701,82 @@ async fn manual_resets_keep_no_state_of_earlier_tests() {
     assert_reset_keeps_no_state(SessionReset::manual([CachedData::Http]), true, 1).await;
 }
 
+/// Writes `localStorage` of the fixture's page, then replaces the page with one of another origin
+/// (the same server under another host name), so that no history lists the first.
+struct LeavesByReplacing;
+
+#[async_trait]
+impl BrowserTest<str> for LeavesByReplacing {
+    fn name(&self) -> Cow<'_, str> {
+        "leaves by replacing".into()
+    }
+
+    async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
+        driver.goto(base_url).await?;
+        let other_origin = base_url.replace("127.0.0.1", "localhost");
+        driver
+            .execute(
+                "localStorage.setItem('leak', '1'); location.replace(arguments[0]);",
+                vec![serde_json::json!(other_origin)],
+            )
+            .await?;
+        // Wait for the replacement.
+        for _ in 0..50 {
+            if driver
+                .current_url()
+                .await?
+                .as_str()
+                .starts_with(&other_origin)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Ok(())
+    }
+}
+
+/// Checks that `localStorage` of the fixture's page is empty.
+struct FindsNoStorage;
+
+#[async_trait]
+impl BrowserTest<str> for FindsNoStorage {
+    fn name(&self) -> Cow<'_, str> {
+        "finds no storage".into()
+    }
+
+    async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
+        driver.goto(base_url).await?;
+        let stored = driver
+            .execute("return localStorage.getItem('leak');", Vec::new())
+            .await?
+            .convert::<Option<String>>()?;
+        assert_that!(stored).is_none();
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn manual_resets_clear_the_storage_of_replaced_pages() {
+    let base_url = serve_fixture().await;
+    let outcome = run(
+        runner()
+            .with_session_reuse(SessionReuse::enabled().with_reset(SessionReset::manual([])))
+            .with_spare_sessions(0),
+        base_url.as_str(),
+        BrowserTests::sequential()
+            .with(LeavesByReplacing)
+            .with(FindsNoStorage),
+    )
+    .await;
+
+    if let Err(error) = &outcome.result {
+        panic!("the second test should find no storage: {error:?}");
+    }
+    assert_that!(preparations(&outcome)).is_equal_to(vec!["created", "reset"]);
+}
+
 /// Writes `localStorage` of a `file:` page, or checks that it is empty.
 struct FileStorage {
     url: String,
