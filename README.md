@@ -574,7 +574,9 @@ anything in your test code:
   test's `run`. An error from a helper (a lookup, a wait in a page object) points at the test line that called it. A
   panic (a failed `assert!`/`assertr` assertion, an `unwrap`, an index out of bounds) shows where it panicked and its
   frames; a panic raised inside a dependency (e.g. an assertion library's own code) is marked "outside the test code",
-  and the frames show the test line that called it. Test code is the code of the package whose tests run (`CARGO_MANIFEST_DIR`); dependencies are left out.
+  and the frames show the test line that called it. Test code is the code of the workspace whose tests run (found from
+  `CARGO_MANIFEST_DIR`), so helpers in its other packages count. Dependencies are left out, also those in the workspace's
+  directory (a vendor directory, a `CARGO_HOME` inside it, generated sources in the target directory).
 - **When**: the test's last steps ("Last steps"), with how far into the test each started and how long it took. Steps
   are the futures you mark with `StepExt::step` (see above). A step that didn't finish, cut off by a timeout or a
   panic, is marked "unfinished".
