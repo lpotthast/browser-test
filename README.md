@@ -568,7 +568,8 @@ anything in your test code:
   frames; a panic raised inside a dependency (e.g. an assertion library's own code) is marked "outside the test code",
   and the frames show the test line that called it. Test code is the code of the package whose tests run (`CARGO_MANIFEST_DIR`); dependencies are left out.
 - **When**: the test's last steps ("Last steps"), with how far into the test each started and how long it took. Steps
-  are the futures you mark with `StepExt::step` (see above).
+  are the futures you mark with `StepExt::step` (see above). A step that didn't finish, cut off by a timeout or a
+  panic, is marked "unfinished".
 - **What**: the error and the context added on its way up. `thirtyfour` errors show their `WebDriver` message, without
   chromedriver's native stack trace; messages print without quotes and escapes.
 

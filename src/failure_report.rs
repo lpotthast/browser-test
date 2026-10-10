@@ -382,6 +382,8 @@ pub(crate) struct StepEvent {
     /// Since the test started.
     pub(crate) started: Duration,
     pub(crate) duration: Duration,
+    /// Whether the step's future finished, rather than being dropped before.
+    pub(crate) finished: bool,
 }
 
 /// The last steps of a failed test, oldest first: what it did right before it failed, when and for
@@ -413,9 +415,10 @@ impl fmt::Display for RecentSteps {
                 .as_deref()
                 .map(|detail| format!(" {detail}"))
                 .unwrap_or_default();
+            let unfinished = if step.finished { "" } else { ", unfinished" };
             write!(
                 f,
-                "\n  +{:<8} {}{detail} ({})",
+                "\n  +{:<8} {}{detail} ({}{unfinished})",
                 FormatDuration(step.started).to_string(),
                 step.kind,
                 FormatDuration(step.duration)

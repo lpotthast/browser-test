@@ -92,6 +92,9 @@ pub trait StepExt: Future + Sized {
     /// to the test's [`crate::BrowserTestRecord::steps`] under `kind`, and the run summary lists
     /// the step kinds that took the most time.
     ///
+    /// A step that doesn't finish, because it is dropped (e.g. by a timeout around it) or a panic
+    /// unwinds through it, is recorded as unfinished when dropped, with the time until then.
+    ///
     /// Use a small, fixed set of `kind`s (e.g. `"goto"`, `"wait_for_text"`), so that they
     /// aggregate across tests, and add specifics (URL, selector, expected text) with
     /// [`Step::detail`], which is only logged. Steps may nest. A nested step's time counts towards
@@ -115,6 +118,7 @@ pub trait StepExt: Future + Sized {
             kind,
             detail: None,
             start: None,
+            finished: false,
         }
     }
 }
@@ -128,6 +132,9 @@ pub struct Step<F> {
     kind: &'static str,
     detail: Option<String>,
     start: Option<Instant>,
+    /// Whether the future finished. A step dropped before, e.g. by a timeout or a panic, is
+    /// recorded as unfinished when dropped.
+    finished: bool,
 }
 
 impl<F> Step<F> {
@@ -155,8 +162,19 @@ impl<F: Future> Future for Step<F> {
         let this = self.get_mut();
         let start = *this.start.get_or_insert_with(Instant::now);
         let output = ready!(this.future.as_mut().poll(cx));
-        record_step(this.kind, this.detail.as_deref(), start, start.elapsed());
+        this.finished = true;
+        record_step(this.kind, this.detail.as_deref(), start, true);
         Poll::Ready(output)
+    }
+}
+
+impl<F> Drop for Step<F> {
+    fn drop(&mut self) {
+        if let Some(start) = self.start
+            && !self.finished
+        {
+            record_step(self.kind, self.detail.as_deref(), start, false);
+        }
     }
 }
 
@@ -177,8 +195,10 @@ pub(crate) fn record_panic(details: PanicDetails) {
     });
 }
 
-/// Log a finished step and add it to the current test's record, if any.
-fn record_step(kind: &'static str, detail: Option<&str>, start: Instant, duration: Duration) {
+/// Log a step that ended, `finished` or dropped before, and add it to the current test's record, if
+/// any.
+fn record_step(kind: &'static str, detail: Option<&str>, start: Instant, finished: bool) {
+    let duration = start.elapsed();
     let recorder = CURRENT_TEST.try_with(Arc::clone).ok();
     let slow_step = match &recorder {
         Some(recorder) => recorder.slow_step,
@@ -191,23 +211,29 @@ fn record_step(kind: &'static str, detail: Option<&str>, start: Instant, duratio
             detail: detail.map(str::to_owned),
             started: start.saturating_duration_since(recorder.started),
             duration,
+            finished,
         });
     }
     let detail = detail
         .map(|detail| format!(" {detail}"))
         .unwrap_or_default();
+    let ended = if finished {
+        "took"
+    } else {
+        "ended unfinished after"
+    };
     if slow_step.is_some_and(|slow_step| duration > slow_step) {
         tracing::warn!(
             step = kind,
             duration_ms = duration.as_millis(),
-            "Slow step: {kind}{detail} took {}",
+            "Slow step: {kind}{detail} {ended} {}",
             FormatDuration(duration),
         );
     } else {
         tracing::debug!(
             step = kind,
             duration_ms = duration.as_millis(),
-            "Step {kind}{detail} took {}",
+            "Step {kind}{detail} {ended} {}",
             FormatDuration(duration),
         );
     }
@@ -249,6 +275,41 @@ mod tests {
         assert_that!(first["goto"].count).is_equal_to(2);
         assert_that!(second.keys().collect::<Vec<_>>()).is_equal_to(vec!["wait"]);
         assert_that!(second["wait"].count).is_equal_to(1);
+    }
+
+    #[test]
+    fn steps_that_do_not_finish_are_recorded_unfinished() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("current-thread runtime should build");
+        let recorder = StepRecorder::new(None);
+
+        runtime.block_on(recorder.scope(async {
+            // Cut off by a timeout.
+            let pending = std::future::pending::<()>().step("wait");
+            let _ = tokio::time::timeout(Duration::from_millis(1), pending).await;
+            // Unwound by a panic.
+            let panicked = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+                async { panic!("assertion failed") }.step("assert"),
+            ))
+            .await;
+            assert!(panicked.is_err());
+            // Never polled.
+            drop(async {}.step("unpolled"));
+        }));
+
+        let steps = recorder.take();
+        assert_that!(steps.keys().collect::<Vec<_>>()).is_equal_to(vec!["assert", "wait"]);
+        let recent = recorder
+            .recent_steps()
+            .expect("the steps are recent")
+            .to_string();
+        let lines: Vec<_> = recent.lines().skip(1).collect();
+        assert_that!(lines.len()).is_equal_to(2);
+        assert_that!(lines[0]).contains(" wait (");
+        assert_that!(lines[1]).contains(" assert (");
+        assert_that!(lines.iter().all(|line| line.ends_with(", unfinished)"))).is_true();
     }
 
     #[test]
