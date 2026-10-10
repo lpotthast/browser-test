@@ -184,14 +184,14 @@ pub(crate) fn in_test() -> bool {
 }
 
 /// Record where the running test panicked (called by the panic hook; outside a test, it does
-/// nothing). The first panic of a test counts.
+/// nothing). The last panic of a test counts: a panic failing the test ends it, while one before
+/// was caught by the test itself.
 pub(crate) fn record_panic(details: PanicDetails) {
     let _ = CURRENT_TEST.try_with(|recorder| {
-        recorder
+        *recorder
             .panic
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get_or_insert(details);
+            .unwrap_or_else(PoisonError::into_inner) = Some(details);
     });
 }
 
@@ -310,6 +310,27 @@ mod tests {
         assert_that!(lines[0]).contains(" wait (");
         assert_that!(lines[1]).contains(" assert (");
         assert_that!(lines.iter().all(|line| line.ends_with(", unfinished)"))).is_true();
+    }
+
+    #[test]
+    fn the_last_panic_of_a_test_counts() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("current-thread runtime should build");
+        let recorder = StepRecorder::new(None);
+        let panic_at = |location: &str| PanicDetails {
+            location: Some(location.to_owned()),
+            frames: None,
+        };
+
+        runtime.block_on(recorder.scope(async {
+            // One the test caught, then the one failing it.
+            record_panic(panic_at("tests/ui.rs:10:5"));
+            record_panic(panic_at("tests/ui.rs:20:5"));
+        }));
+
+        let panic = recorder.take_panic().expect("the test panicked");
+        assert_that!(panic.location).is_equal_to(Some("tests/ui.rs:20:5".to_owned()));
     }
 
     #[test]
