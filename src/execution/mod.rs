@@ -131,6 +131,7 @@ where
             upcoming,
             default_wait,
             requests_tx,
+            config.cancellation.clone(),
         ),
     };
 
@@ -584,7 +585,11 @@ where
 
     let requested = Instant::now();
     let ticket = if test.uses_pool(env.pool.default_wait) {
-        env.pool.take(test.fresh_session, env.keep_starting()).await
+        // Tests not started because of a cancellation are not recorded.
+        let Some(ticket) = env.pool.take(test.fresh_session, env.keep_starting()).await else {
+            return;
+        };
+        ticket
     } else {
         env.pool.dedicated(test.element_query_wait).await
     };

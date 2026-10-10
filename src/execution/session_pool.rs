@@ -7,6 +7,7 @@ use std::{
     time::Instant,
 };
 
+use chrome_for_testing_manager::CancellationToken;
 use rootcause::Report;
 use tokio::sync::{Notify, mpsc, oneshot};
 
@@ -54,6 +55,8 @@ pub(super) struct SessionPool {
     spare: usize,
     pub(super) default_wait: Option<ElementQueryWait>,
     requests: mpsc::UnboundedSender<Option<WorkerRequest>>,
+    /// Ends the wait of tests for sessions: a cancelled run drops the sessions on their way.
+    cancellation: CancellationToken,
 }
 
 struct PoolState {
@@ -136,6 +139,7 @@ impl SessionPool {
         upcoming: Upcoming,
         default_wait: Option<ElementQueryWait>,
         requests: mpsc::UnboundedSender<Option<WorkerRequest>>,
+        cancellation: CancellationToken,
     ) -> Self {
         Self {
             state: Mutex::new(PoolState {
@@ -153,6 +157,7 @@ impl SessionPool {
             spare,
             default_wait,
             requests,
+            cancellation,
         }
     }
 
@@ -188,8 +193,9 @@ impl SessionPool {
     }
 
     /// Take a session for a starting test, a `fresh` one if it needs one, waiting until one is
-    /// ready.
-    pub(super) async fn take(&self, fresh: bool, keep_starting: bool) -> TicketResult {
+    /// ready. `None` if the run is cancelled first: a cancelled run drops the sessions being
+    /// created or reset, so the one a test waits for may never arrive.
+    pub(super) async fn take(&self, fresh: bool, keep_starting: bool) -> Option<TicketResult> {
         {
             let mut state = self.lock();
             let upcoming = state.upcoming.count(fresh);
@@ -208,10 +214,16 @@ impl SessionPool {
                         state.running += 1;
                     }
                     self.replenish_locked(&mut state, keep_starting);
-                    return ticket;
+                    return Some(ticket);
                 }
             }
-            available.await;
+            tokio::select! {
+                () = available => {}
+                () = self.cancellation.cancelled() => {
+                    *self.lock().waiting.count(fresh) -= 1;
+                    return None;
+                }
+            }
         }
     }
 
@@ -315,5 +327,31 @@ impl SessionPool {
             state.idle.clear();
         }
         let _ = self.requests.send(None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use assertr::prelude::*;
+
+    use super::*;
+
+    fn pool(upcoming: Upcoming, cancellation: &CancellationToken) -> SessionPool {
+        let (requests, _) = mpsc::unbounded_channel();
+        SessionPool::new(1, 0, upcoming, None, requests, cancellation.clone())
+    }
+
+    #[tokio::test]
+    async fn waiting_for_a_reset_ends_when_the_run_is_cancelled() {
+        let cancellation = CancellationToken::new();
+        let pool = pool(Upcoming { any: 2, fresh: 0 }, &cancellation);
+        // The session of a finished test is reset for the next one, which then waits for it
+        // instead of a new session. A cancelled run drops the reset.
+        assert_that!(pool.claim_reset(true)).is_true();
+        let take = pool.take(false, true);
+        cancellation.cancel();
+
+        assert_that!(take.await.is_none()).is_true();
+        assert_that!(pool.lock().waiting.total()).is_equal_to(0);
     }
 }
