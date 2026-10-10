@@ -555,12 +555,15 @@ async fn clear_storage(driver: &WebDriver, origin: &str) -> Result<(), Report> {
 }
 
 /// Add the origin of `url` to `origins`. `about:blank`, `data:` and other opaque origins have no
-/// storage to clear.
+/// storage to clear. `file:` URLs are opaque to the URL standard, but Chrome gives all of them one
+/// origin with storage, `file://`.
 fn insert_origin(origins: &mut BTreeSet<String>, url: &str) {
     if let Ok(url) = url::Url::parse(url) {
         let origin = url.origin();
         if origin.is_tuple() {
             origins.insert(origin.ascii_serialization());
+        } else if url.scheme() == "file" {
+            origins.insert("file://".to_owned());
         }
     }
 }
@@ -682,6 +685,24 @@ mod tests {
     use assertr::prelude::*;
 
     use super::*;
+
+    #[test]
+    fn origins_of_pages_with_storage_are_collected() {
+        let mut origins = BTreeSet::new();
+        for url in [
+            "http://127.0.0.1:3000/menu?open",
+            "http://127.0.0.1:3000/",
+            "file:///tmp/fixture.html",
+            "about:blank",
+            "data:text/html,",
+        ] {
+            insert_origin(&mut origins, url);
+        }
+        assert_that!(origins.into_iter().collect::<Vec<_>>()).is_equal_to(vec![
+            "file://".to_owned(),
+            "http://127.0.0.1:3000".to_owned(),
+        ]);
+    }
 
     #[test]
     fn manual_resets_keep_exactly_the_listed_caches() {

@@ -700,6 +700,67 @@ async fn manual_resets_keep_no_state_of_earlier_tests() {
     assert_reset_keeps_no_state(SessionReset::manual([CachedData::Http]), true, 1).await;
 }
 
+/// Writes `localStorage` of a `file:` page, or checks that it is empty.
+struct FileStorage {
+    url: String,
+    write: bool,
+}
+
+#[async_trait]
+impl BrowserTest<str> for FileStorage {
+    fn name(&self) -> Cow<'_, str> {
+        format!("file storage (write: {})", self.write).into()
+    }
+
+    async fn run(&self, driver: &WebDriver, _base_url: &str) -> Result<(), Report> {
+        driver.goto(&self.url).await?;
+        let stored = driver
+            .execute(
+                "const stored = localStorage.getItem('leak');
+                 localStorage.setItem('leak', '1');
+                 return stored;",
+                Vec::new(),
+            )
+            .await?
+            .convert::<Option<String>>()?;
+        if !self.write {
+            assert_that!(stored).is_none();
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn manual_resets_clear_the_storage_of_file_pages() {
+    let dir =
+        std::env::temp_dir().join(format!("browser-test-file-storage-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("dir should be created");
+    let page = dir.join("fixture.html");
+    std::fs::write(&page, PAGE).expect("page should be written");
+    let url = format!("file://{}", page.display());
+
+    let outcome = run(
+        runner()
+            .with_session_reuse(SessionReuse::enabled().with_reset(SessionReset::manual([])))
+            .with_spare_sessions(0),
+        "",
+        BrowserTests::sequential()
+            .with(FileStorage {
+                url: url.clone(),
+                write: true,
+            })
+            .with(FileStorage { url, write: false }),
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(&dir);
+
+    if let Err(error) = &outcome.result {
+        panic!("the second test should find no storage: {error:?}");
+    }
+    assert_that!(preparations(&outcome)).is_equal_to(vec!["created", "reset"]);
+}
+
 /// Leaves a page load timeout behind that no navigation can meet.
 struct ImpatientPageLoads;
 
