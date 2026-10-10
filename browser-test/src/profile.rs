@@ -29,7 +29,9 @@
 //!   their locks where the file system emulates `flock` with locks owned by the process (Linux on
 //!   NFS), which a probe of the same process takes, and releases when it closes its file.
 //!
-//! Entries not named `run-*` are never removed.
+//! A run's directory is named `.staging-*` until it holds its lock. One whose lock nobody holds is
+//! removed once it is older than [`STAGING_GRACE`]: its run was killed while it started, as a
+//! starting run locks its directory right away. Other entries are never removed.
 
 use std::{
     collections::BTreeSet,
@@ -40,7 +42,7 @@ use std::{
         Mutex, PoisonError,
         atomic::{AtomicUsize, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use rootcause::{Report, prelude::ResultExt as _};
@@ -60,6 +62,10 @@ const RUN_DIR_PREFIX: &str = "run-";
 
 /// Prefix of a run's directory before it holds its lock.
 const STAGING_DIR_PREFIX: &str = ".staging-";
+
+/// How old a staging directory without a held lock must be to be removed. A starting run creates
+/// its lock file right after its directory, so this only spares runs starting at the moment.
+const STAGING_GRACE: Duration = Duration::from_secs(10 * 60);
 
 const LOCK_FILE_NAME: &str = "run.lock";
 
@@ -247,7 +253,11 @@ impl RunProfiles {
             let Some(file_name) = file_name.to_str() else {
                 continue;
             };
-            let Some(name) = file_name.strip_prefix(RUN_DIR_PREFIX) else {
+            let (name, staging) = if let Some(name) = file_name.strip_prefix(RUN_DIR_PREFIX) {
+                (name, false)
+            } else if let Some(name) = file_name.strip_prefix(STAGING_DIR_PREFIX) {
+                (name, true)
+            } else {
                 continue;
             };
             // `file_type` does not follow symlinks.
@@ -257,6 +267,9 @@ impl RunProfiles {
                 continue;
             }
             let path = entry.path();
+            if staging && !Self::is_older_than(&path, STAGING_GRACE) {
+                continue;
+            }
             if !RunLock::is_held(&path.join(LOCK_FILE_NAME)) {
                 tracing::debug!(
                     "Removing Chrome profiles of an ended run: {}",
@@ -265,6 +278,13 @@ impl RunProfiles {
                 remove_dir(&path);
             }
         }
+    }
+
+    /// Whether `path` was last modified longer than `age` ago. Unknown ages count as younger.
+    fn is_older_than(path: &Path, age: Duration) -> bool {
+        fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .is_ok_and(|modified| modified.elapsed().is_ok_and(|elapsed| elapsed > age))
     }
 
     /// Create an empty profile for one session.
@@ -505,6 +525,26 @@ mod tests {
         let _next = profiles_dir.create_run();
 
         assert_that!(alive.dir.path().is_dir()).is_true();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_starting_run_removes_old_staging_dirs_of_killed_runs() {
+        let profiles_dir = TestProfilesDir::new("staging");
+        let base = profiles_dir.path();
+        let killed = base.join(format!("{STAGING_DIR_PREFIX}killed"));
+        private_dir_builder()
+            .recursive(true)
+            .create(&killed)
+            .expect("dir should be created");
+        File::create(killed.join(LOCK_FILE_NAME)).expect("lock file should be created");
+        File::open(&killed)
+            .and_then(|dir| dir.set_modified(SystemTime::now() - 2 * STAGING_GRACE))
+            .expect("the dir's age should be set");
+
+        let _next = profiles_dir.create_run();
+
+        assert_that!(killed.exists()).is_false();
     }
 
     #[test]
