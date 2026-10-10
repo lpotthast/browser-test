@@ -30,20 +30,20 @@ use thirtyfour::{ChromeCapabilities, ChromiumLikeCapabilities, error::WebDriverR
 use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::Instrument as _;
 
-use crate::failure_report::{PanicDetails, PanicLocation, RecentSteps, without_own_location};
-use crate::profile::RunProfiles;
-use crate::progress::{Activity, Phase, ProgressBoard};
-use crate::report::{
-    BrowserTestRecord, FormatDuration, GroupRecord, SessionPreparation, SessionTiming, StepStats,
-    TestOutcome, timing_breakdown,
-};
-use crate::scheduler::BrowserTestFailures;
-use crate::session_reuse::{SessionBaseline, configure_reusable_session};
-use crate::step::StepRecorder;
-use crate::test_case::BrowserTestEntry;
 use crate::{
     BrowserTest, BrowserTestError, BrowserTests, ElementQueryWait, FailurePolicy, Parallelism,
     ProgressWarnings, SessionReuse, Timeouts,
+    failure_report::{PanicDetails, PanicLocation, RecentSteps, without_own_location},
+    profile::RunProfiles,
+    progress::{Activity, Phase, ProgressBoard},
+    report::{
+        BrowserTestRecord, FormatDuration, GroupRecord, SessionPreparation, SessionTiming,
+        StepStats, TestOutcome, timing_breakdown,
+    },
+    scheduler::BrowserTestFailures,
+    session_reuse::{SessionBaseline, configure_reusable_session},
+    step::StepRecorder,
+    test_case::BrowserTestEntry,
 };
 
 pub(crate) type ChromeCapabilitiesSetup =
@@ -88,7 +88,14 @@ where
 {
     let mut prepared = Vec::new();
     let mut next_group = 0;
-    let root = prepare_group(tests, None, &mut prepared, &mut next_group, config);
+    let root = prepare_group(
+        tests,
+        None,
+        &mut prepared,
+        &mut next_group,
+        config.timeouts,
+        config.element_query_wait,
+    );
     let max_concurrency = root.max_concurrency();
     let default_wait = config.element_query_wait.copied();
     let pooled = |fresh: bool| {
@@ -257,7 +264,8 @@ fn prepare_group<Context, TestError>(
     parent_path: Option<&str>,
     prepared: &mut Vec<QueuedTest<Context, TestError>>,
     next_group: &mut usize,
-    config: &ExecutionConfig<'_>,
+    default_timeouts: Option<&Timeouts>,
+    default_wait: Option<&ElementQueryWait>,
 ) -> Group
 where
     Context: Sync + ?Sized,
@@ -272,23 +280,47 @@ where
     };
     let id = *next_group;
     *next_group += 1;
-    let children = entries
-        .into_iter()
-        .map(|entry| match entry {
+    let mut children = Vec::new();
+    for entry in entries {
+        match entry {
             BrowserTestEntry::Test(test) => {
                 let index = prepared.len();
-                prepared.push(prepare_test(index, test, path.clone(), config));
-                Node::Test(index)
+                prepared.push(prepare_test(
+                    index,
+                    test,
+                    path.clone(),
+                    default_timeouts,
+                    default_wait,
+                ));
+                children.push(Node::Test(index));
             }
-            BrowserTestEntry::Group(group) => Node::Group(prepare_group(
+            BrowserTestEntry::Group(group) => children.push(Node::Group(prepare_group(
                 group,
                 path.as_deref(),
                 prepared,
                 next_group,
-                config,
-            )),
-        })
-        .collect();
+                default_timeouts,
+                default_wait,
+            ))),
+            BrowserTestEntry::TestGroup(group) => {
+                let group_path = match path.as_deref() {
+                    Some(parent) => format!("{parent} / {}", group.name),
+                    None => group.name,
+                };
+                for test in group.tests {
+                    let index = prepared.len();
+                    prepared.push(prepare_test(
+                        index,
+                        test,
+                        Some(group_path.clone()),
+                        default_timeouts,
+                        default_wait,
+                    ));
+                    children.push(Node::Test(index));
+                }
+            }
+        }
+    }
     Group {
         id,
         name: if named { path } else { None },
@@ -302,7 +334,8 @@ fn prepare_test<Context, TestError>(
     index: usize,
     test: Box<dyn BrowserTest<Context, TestError>>,
     group: Option<String>,
-    config: &ExecutionConfig<'_>,
+    default_timeouts: Option<&Timeouts>,
+    default_wait: Option<&ElementQueryWait>,
 ) -> QueuedTest<Context, TestError>
 where
     Context: Sync + ?Sized,
@@ -313,8 +346,8 @@ where
     let metadata = std::panic::catch_unwind(AssertUnwindSafe(|| {
         name = test.name().into_owned();
         (
-            resolve_webdriver_timeouts(test.as_ref(), config.timeouts),
-            resolve_element_query_wait(test.as_ref(), config.element_query_wait),
+            resolve_webdriver_timeouts(test.as_ref(), default_timeouts),
+            resolve_element_query_wait(test.as_ref(), default_wait),
             test.fresh_session(),
         )
     }));
@@ -1237,8 +1270,14 @@ fn test_outcome(
             }));
         if let Some(panic) = run.panic.take() {
             if let Some(location) = panic.location {
-                report = report
-                    .attach_custom::<rootcause::handlers::Display, _>(PanicLocation(location));
+                let outside_test_code = panic
+                    .frames
+                    .as_ref()
+                    .is_some_and(|frames| !frames.starts_at(&location));
+                report = report.attach_custom::<rootcause::handlers::Display, _>(PanicLocation {
+                    location,
+                    outside_test_code,
+                });
             }
             if let Some(frames) = panic.frames {
                 report = report.attach_custom::<rootcause::handlers::Display, _>(frames);
@@ -1367,15 +1406,61 @@ fn panic_payload_message(payload: &(dyn Any + Send + 'static)) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
+    use std::{
+        borrow::Cow,
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
 
     use assertr::prelude::*;
     use rootcause::Report;
     use thirtyfour::{BrowserCapabilitiesHelper, WebDriver};
 
     use super::*;
+
+    #[test]
+    fn logical_groups_share_parent_concurrency_and_retain_names() {
+        async fn passes((): &()) -> Result<(), Report> {
+            Ok(())
+        }
+        let tests = BrowserTests::parallel(Parallelism::parallel(2))
+            .named("ui")
+            .with_test_group(
+                crate::TestGroup::new("one")
+                    .with(passes.named("a"))
+                    .with(passes.named("b")),
+            )
+            .with_test_group(
+                crate::TestGroup::new("two")
+                    .with(passes.named("c"))
+                    .with(passes.named("d")),
+            );
+        let mut prepared = Vec::new();
+        let root = prepare_group(tests, None, &mut prepared, &mut 0, None, None);
+        assert_eq!(root.max_concurrency(), 2);
+        assert_eq!(root.children.len(), 4);
+        assert!(
+            root.children
+                .iter()
+                .all(|child| matches!(child, Node::Test(_)))
+        );
+        let metadata: Vec<_> = prepared
+            .iter()
+            .map(|test| match test {
+                QueuedTest::Ready(test) => (test.index, test.name.as_str(), test.group.as_deref()),
+                QueuedTest::Broken { .. } => panic!("metadata must be valid"),
+            })
+            .collect();
+        assert_eq!(
+            metadata,
+            [
+                (0, "a", Some("ui / one")),
+                (1, "b", Some("ui / one")),
+                (2, "c", Some("ui / two")),
+                (3, "d", Some("ui / two")),
+            ]
+        );
+    }
 
     mod resolve_webdriver_timeouts {
         use super::*;

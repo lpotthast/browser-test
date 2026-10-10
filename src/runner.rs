@@ -4,21 +4,20 @@ use chrome_for_testing_manager::{
     CancellationToken, Channel, ChromeBinary, ChromeForTesting, ChromeForTestingConfig,
     VersionRequest,
 };
-use rootcause::Report;
-use rootcause::prelude::ResultExt;
+use rootcause::{Report, prelude::ResultExt};
 use thirtyfour::{ChromeCapabilities, error::WebDriverResult};
 
-use crate::cancellation::cancelled_result;
-use crate::driver_output::{DriverOutputCapture, attach_browser_driver_output_to_result};
-use crate::env::{InvalidEnvVar, env_flag};
-use crate::execution::{ChromeCapabilitiesSetup, Execution, ExecutionConfig, execute_tests};
-use crate::pause::{self, PauseDecision};
-use crate::profile::{ChromeProfilesDir, RunProfiles};
-use crate::report::BrowserTestRunReport;
-use crate::report_consumer::RunReportConsumer;
 use crate::{
     BrowserTestError, BrowserTests, Cancellation, DriverOutput, ElementQueryWait, FailurePolicy,
     Pause, ProgressWarnings, SessionReuse, Timeouts,
+    cancellation::cancelled_result,
+    driver_output::{DriverOutputCapture, attach_browser_driver_output_to_result},
+    env::{InvalidEnvVar, env_flag},
+    execution::{ChromeCapabilitiesSetup, Execution, ExecutionConfig, execute_tests},
+    pause::{self, PauseDecision},
+    profile::{ChromeProfilesDir, RunProfiles},
+    report::BrowserTestRunReport,
+    report_consumer::RunReportConsumer,
 };
 
 pub(crate) const DEFAULT_VISIBLE_ENV: &str = "BROWSER_TEST_VISIBLE";
@@ -249,9 +248,11 @@ impl BrowserTestRunner {
 
     /// Whether the first run installs the [`rootcause`] hooks behind failure reports
     /// ([`failure_report::hooks`](crate::failure_report::hooks): the test code's frames on every
-    /// error, readable `WebDriver` errors). Defaults to `true`. Disable it when the application
-    /// installs hooks of its own, and add browser-test's to them with
-    /// [`failure_report::hooks`](crate::failure_report::hooks). Panics are located either way.
+    /// error, readable `WebDriver` errors). Defaults to `true`. Panics are located either way.
+    ///
+    /// [`rootcause`] takes one set of hooks per process. An application installing hooks of its
+    /// own adds browser-test's to them with [`failure_report::hooks`](crate::failure_report::hooks),
+    /// and runs then install none, whatever this says. Disable it only to go without the hooks.
     #[must_use]
     pub const fn with_failure_report_hooks(mut self, install: bool) -> Self {
         self.failure_report_hooks = install;
@@ -328,9 +329,10 @@ impl BrowserTestRunner {
         self
     }
 
-    /// Run every test with a fresh `WebDriver` session.
+    /// Run `tests`, each in a `WebDriver` session of its own: a fresh one, or, with
+    /// [`Self::with_session_reuse`], the reset session of an earlier test.
     ///
-    /// Sessions are created ahead of the tests that use them, see [`Self::with_spare_sessions`].
+    /// Sessions are prepared ahead of the tests that use them, see [`Self::with_spare_sessions`].
     ///
     /// The shared chromedriver process is always terminated, even when a test returns an error or
     /// panics. Test panics are converted into [`BrowserTestError::Panic`] reports instead of being
@@ -534,13 +536,17 @@ fn merge_shutdown_result(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::test_support::EnvVarGuard;
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
+
     use assertr::prelude::*;
     use chrome_for_testing_manager::{DriverOutputLine, DriverOutputSource};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
     use thirtyfour::ChromiumLikeCapabilities;
+
+    use super::*;
+    use crate::test_support::EnvVarGuard;
 
     #[test]
     fn runner_defaults_to_sequential_fail_fast_headless_execution() {

@@ -11,16 +11,18 @@ use std::{
 };
 
 use assertr::prelude::*;
-use browser_test::thirtyfour::{ChromiumLikeCapabilities, WebDriver};
 use browser_test::{
     BrowserTest, BrowserTestError, BrowserTestRunReport, BrowserTestRunner, BrowserTests,
     CachedData, Cancellation, FailurePolicy, Parallelism, SessionPreparation, SessionReset,
     SessionReuse, StepExt, TestOutcome, TracingSummary, async_trait,
+    thirtyfour::{ChromiumLikeCapabilities, WebDriver},
 };
 use rootcause::{Report, report};
 use serial_test::serial;
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::net::TcpListener;
+use tokio::{
+    io::{AsyncReadExt as _, AsyncWriteExt as _},
+    net::TcpListener,
+};
 
 const PAGE: &str = "<!doctype html><title>session prefetch fixture</title><p>fixture</p>";
 

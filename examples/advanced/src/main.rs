@@ -31,7 +31,9 @@ async fn main() -> Result<(), Report> {
     tracing::subscriber::set_global_default(subscriber)
         .context("Setting global tracing subscriber")?;
 
-    Hooks::new()
+    // rootcause takes one set of hooks per process: add browser-test's failure report hooks to
+    // ours.
+    browser_test::failure_report::hooks(Hooks::new())
         .report_creation_hook(SpanCollector {
             capture_span_for_reports_with_children: false,
         })

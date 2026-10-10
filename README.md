@@ -12,7 +12,7 @@ It does not start or wait for your web app. Your test harness does that first, u
 `cargo leptos serve`, Docker Compose, a static fixture page, or anything else.
 
 Then `browser-test` resolves Chrome for Testing, starts the matching chromedriver, runs your `thirtyfour` test code with
-one fresh `WebDriver` session per test, reports where the time went, and shuts the driver down again.
+one `WebDriver` session per test (fresh, or reset after an earlier test), reports where the time went, and shuts the driver down again.
 
 Use this crate when your project already owns app startup and wants a focused runner for the browser
 side of the integration test.
@@ -20,7 +20,7 @@ side of the integration test.
 ## What It Does
 
 - Manages Chrome for Testing and chromedriver through `chrome-for-testing-manager`.
-- Runs named async `BrowserTest` values collected in `BrowserTests`.
+- Runs async test functions (`#[browser_test]`) and other `BrowserTest` values collected in `BrowserTests`.
 - Gives every test a fresh `WebDriver` session, created in the background while earlier tests run, or, with session
   reuse, the reset session of an earlier test (see "Sessions").
 - Runs sequentially and fails fast by default.
@@ -89,12 +89,9 @@ This example opens Wikipedia. In a real integration test, the shared context is 
 base URL or a small struct with whatever the tests need.
 
 ```rust,no_run
-use std::borrow::Cow;
-
 use browser_test::thirtyfour::WebDriver;
 use browser_test::{
-    BrowserTest, BrowserTestError, BrowserTestRunner, BrowserTests, Cancellation, Visibility,
-    async_trait,
+    BrowserTestError, BrowserTestRunner, BrowserTests, Cancellation, Visibility, browser_test,
 };
 use rootcause::{Report, report};
 
@@ -102,25 +99,18 @@ struct Context {
     base_url: String,
 }
 
-struct PageTitleTest;
+/// The page title names Wikipedia.
+#[browser_test]
+async fn page_title(driver: &WebDriver, context: &Context) -> Result<(), Report> {
+    driver.goto(&context.base_url).await?;
 
-#[async_trait]
-impl BrowserTest<Context> for PageTitleTest {
-    fn name(&self) -> Cow<'_, str> {
-        "page title".into()
+    let title = driver.title().await?;
+    if !title.contains("Wikipedia") {
+        return Err(report!(
+            "unexpected page title: expected it to contain \"Wikipedia\", got {title:?}",
+        ));
     }
-
-    async fn run(&self, driver: &WebDriver, context: &Context) -> Result<(), Report> {
-        driver.goto(&context.base_url).await?;
-
-        let title = driver.title().await?;
-        if !title.contains("Wikipedia") {
-            return Err(report!(
-                "unexpected page title: expected it to contain \"Wikipedia\", got {title:?}",
-            ));
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -131,12 +121,13 @@ async fn main() -> Result<(), Report<BrowserTestError>> {
 
     BrowserTestRunner::new(Cancellation::on_shutdown_signals())
         .with_visibility(Visibility::Visible)
-        .run(&context, BrowserTests::sequential().with(PageTitleTest))
+        .run(&context, BrowserTests::sequential().with(PageTitle))
         .await
 }
 ```
 
-`BrowserTestRunner::run(...)` returns `Report<BrowserTestError>`, so runner failures, test failures,
+`#[browser_test]` turns the function into a unit struct, `PageTitle`, implementing `BrowserTest<Context>` (see "Defining
+Tests"). `BrowserTestRunner::run(...)` returns `Report<BrowserTestError>`, so runner failures, test failures,
 and panics get useful context. The runner logs through `tracing`. Install a subscriber (e.g. `tracing-subscriber`) to see
 its output.
 
@@ -176,6 +167,8 @@ BROWSER_TEST_VISIBLE=1 BROWSER_TEST_PAUSE=1 BROWSER_TEST_DRIVER_OUTPUT=1 cargo t
 | `BROWSER_TEST_DRIVER_OUTPUT`            | `DriverOutput::from_env()`  | Attach recent chromedriver output to errors.               |
 | `BROWSER_TEST_DRIVER_OUTPUT_TAIL_LINES` | `DriverOutput::from_env()`  | Number of output lines kept (default 200).                 |
 | `BROWSER_TEST_PARALLELISM`              | `Parallelism::from_env()`   | Number of tests run at the same time (see below).          |
+| `BROWSER_TEST_FILTER`                   | `TestFilter::from_env()`    | Comma-separated test-name substrings (any match).          |
+| `BROWSER_TEST_GROUP`                    | `TestFilter::from_env()`    | Comma-separated exact logical group names (any match).    |
 
 Use `0`/`1`, `false`/`true`, `no`/`yes`, `off`/`on` or `disabled`/`enabled` for boolean environment flags (ignoring
 case). Each type also has `from_env_var(name)` to read a variable of your choice.
@@ -249,6 +242,71 @@ profiles that killed runs left behind. Profiles are kept in `browser-test-profil
 Choose another place with `.with_chrome_profiles_dir(ChromeProfilesDir::new("target/browser-test-profiles"))`.
 Capability setups must not set `--user-data-dir`.
 
+## Defining Tests
+
+`#[browser_test]` turns an async function into a test: a unit struct implementing `BrowserTest`, named in `PascalCase`
+(`async fn opens_menu` becomes `OpensMenu`), with the function's visibility and doc comments. Register it with
+`.with(OpensMenu)`.
+
+```rust
+use browser_test::{BrowserTest, BrowserTests, browser_test, thirtyfour::WebDriver};
+use rootcause::Report;
+
+struct Page<'a> {
+    driver: &'a WebDriver,
+    base_url: &'a str,
+}
+
+/// The menu opens on click.
+#[browser_test]
+async fn opens_menu(page: &Page<'_>) -> Result<(), Report> {
+    page.driver.goto(format!("{}/menu", page.base_url)).await?;
+    Ok(())
+}
+
+#[browser_test(name = "menu::closes")]
+async fn closes_menu(driver: &WebDriver, base_url: &str) -> Result<(), Report> {
+    driver.goto(format!("{base_url}/menu")).await?;
+    Ok(())
+}
+
+assert!(OpensMenu.name().ends_with("::opens_menu"));
+assert_eq!(OpensMenu.description().as_deref(), Some("The menu opens on click."));
+assert_eq!(ClosesMenu.name(), "menu::closes");
+let tests: BrowserTests<str> = BrowserTests::sequential().with(ClosesMenu);
+```
+
+- **Arguments**: none, the run's context (`&Context`), or the session's driver and the context
+  (`&WebDriver, &Context`). Contexts can be unsized (`str`) or borrow from the run (`Page<'_>`), e.g. a page object
+  that a wrapping test creates for every test.
+- **Result**: `Result<(), Report>` or `Result<(), Report<E>>`, also through a type alias. The future must be `Send`.
+- **Name**: the module-qualified function name (`my_tests::menu::opens_menu`), which filters match.
+  `#[browser_test(name = "menu::closes")]` sets another one.
+- **Description**: `BrowserTest::description()` returns the doc comments. Filters don't match it.
+
+The function becomes the test's body and keeps its other attributes. Type and const parameters, `&mut` arguments, and
+non-async functions are rejected at the declaration:
+
+```compile_fail
+use browser_test::browser_test;
+use rootcause::Report;
+
+#[browser_test]
+fn synchronous(_context: &()) -> Result<(), Report> { Ok(()) }
+```
+
+```compile_fail
+use browser_test::browser_test;
+use rootcause::Report;
+
+#[browser_test]
+async fn mutable_context(_context: &mut ()) -> Result<(), Report> { Ok(()) }
+```
+
+An `async fn` taking `&Context` is a `BrowserTest` without the attribute too, named by its Rust path;
+`BrowserTest::named` gives any test another name. Implement `BrowserTest` yourself for tests with session settings of
+their own (timeouts, element-query wait, a fresh session), tests with parameters, and wrappers around other tests.
+
 ## Execution Model
 
 `BrowserTests` says which tests run one after another and which at the same time. A group runs its entries either
@@ -300,6 +358,43 @@ group runs, and all failures are returned as child reports on one aggregate `Rep
 group only means its tests must not run at the same time: a failing test does not skip the ones after it.
 
 Named groups (`named(...)`) are listed with their wall time in the run report, and their tests' records carry the name.
+
+### Logical Groups and Selection
+
+A `TestGroup` makes tests selectable by a name of its own, e.g. the tests of one component, wherever their code lives.
+Added with `with_test_group`, its tests run like tests added one by one with `with`: in the enclosing `BrowserTests`'s
+parallelism limit, in order. A logical group never changes how its tests run. Test records carry its name, and wall
+times are measured for named `BrowserTests`.
+
+```rust
+use browser_test::{BrowserTests, Parallelism, TestFilter, TestGroup, browser_test};
+use rootcause::Report;
+
+#[browser_test]
+async fn presses(_base_url: &str) -> Result<(), Report> { Ok(()) }
+#[browser_test]
+async fn presses_with_keyboard(_base_url: &str) -> Result<(), Report> { Ok(()) }
+
+let tests: BrowserTests<str> = BrowserTests::parallel(Parallelism::parallel(8))
+    .with_test_group(TestGroup::new("button").with(Presses).with(PressesWithKeyboard))
+    .filter(&TestFilter::from_env()?);
+# Ok::<(), browser_test::InvalidEnvVar>(())
+```
+
+`TestFilter` selects tests by name substring and by exact logical group name:
+
+- `BROWSER_TEST_FILTER=press,keyboard` (`TestFilter::new().with_name_containing("press")`) selects tests whose names
+  contain either substring.
+- `BROWSER_TEST_GROUP=button` (`TestFilter::new().with_group("button")`) selects the tests of that group. Ungrouped tests
+  are then left out.
+- Combined, a test must match both. Without either, every test is selected.
+
+Values are case-sensitive, whitespace around comma-separated entries is trimmed, and empty entries are ignored. An
+unknown group or unmatched name selects no tests. `with_name_substrings_from_env_var` and `with_groups_from_env_var`
+read variables of your choice, and `BrowserTests::filter_tests` and `filter_groups` take predicates for custom selection.
+
+Selection is explicit: the runner runs every test it is given, so call `filter`. Filtering keeps how nested groups run.
+Add checks that must always run **after** filtering: `run_always` exempts tests from fail-fast, not from filters.
 
 ## Sessions
 
@@ -465,26 +560,28 @@ anything in your test code:
 - **Where**: every error gets the frames of your test code that led to it ("Test code"), innermost first, ending at the
   test's `run`. An error from a helper (a lookup, a wait in a page object) points at the test line that called it. A
   panic (a failed `assert!`/`assertr` assertion, an `unwrap`, an index out of bounds) shows where it panicked and its
-  frames. Test code is the code of the package whose tests run (`CARGO_MANIFEST_DIR`); dependencies are left out.
+  frames; a panic raised inside a dependency (e.g. an assertion library's own code) is marked "outside the test code",
+  and the frames show the test line that called it. Test code is the code of the package whose tests run (`CARGO_MANIFEST_DIR`); dependencies are left out.
 - **When**: the test's last steps ("Last steps"), with how far into the test each started and how long it took. Steps
   are the futures you mark with `StepExt::step` (see above).
 - **What**: the error and the context added on its way up. `thirtyfour` errors show their `WebDriver` message, without
   chromedriver's native stack trace; messages print without quotes and escapes.
 
-The runner installs the [`rootcause`](https://docs.rs/rootcause) hooks behind this with its first run. If your
-application installs `rootcause` hooks of its own, add browser-test's to them and disable the runner's installation:
+The runner installs the [`rootcause`](https://docs.rs/rootcause) hooks behind this with its first run. `rootcause`
+takes one set of hooks per process, so if your application installs hooks of its own, add browser-test's to them. The
+runner then leaves the installation to you:
 
 ```rust,no_run
-use browser_test::{BrowserTestRunner, Cancellation, failure_report};
+use browser_test::failure_report;
 use rootcause::hooks::Hooks;
 
 failure_report::hooks(Hooks::new())
     // ... your own hooks ...
     .install()
     .expect("hooks are installed once");
-let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals())
-    .with_failure_report_hooks(false);
 ```
+
+`BrowserTestRunner::with_failure_report_hooks(false)` goes without the hooks.
 
 ### Getting the most out of failure reports
 

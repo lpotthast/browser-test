@@ -1,3 +1,8 @@
+[workspace]
+members = ["browser-test-macros"]
+exclude = ["examples/advanced", "examples/minimal"]
+resolver = "2"
+
 [package]
 name = "browser-test"
 version = "0.6.0"
@@ -26,6 +31,7 @@ component = ["thirtyfour/component"]
 [dependencies]
 async-trait = { version = "0.1.83", default-features = false }
 backtrace = { version = "0.3.76", default-features = false, features = ["std"] }
+browser-test-macros = { version = "0.6.0", path = "browser-test-macros" }
 chrome-for-testing-manager = { version = "0.14.0", default-features = false, features = ["thirtyfour"] }
 futures-util = { version = "0.3.32", default-features = false, features = ["std"] }
 rootcause = { version = "0.13.0", default-features = false }

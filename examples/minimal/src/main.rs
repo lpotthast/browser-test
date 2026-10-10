@@ -1,9 +1,6 @@
-use std::borrow::Cow;
-
 use browser_test::thirtyfour::WebDriver;
 use browser_test::{
-    BrowserTest, BrowserTestError, BrowserTestRunner, BrowserTests, Cancellation, Visibility,
-    async_trait,
+    BrowserTestError, BrowserTestRunner, BrowserTests, Cancellation, Visibility, browser_test,
 };
 use rootcause::{Report, report};
 
@@ -11,25 +8,18 @@ struct Context {
     base_url: String,
 }
 
-struct PageTitleTest;
+/// The page title names Wikipedia.
+#[browser_test]
+async fn page_title(driver: &WebDriver, context: &Context) -> Result<(), Report> {
+    driver.goto(&context.base_url).await?;
 
-#[async_trait]
-impl BrowserTest<Context> for PageTitleTest {
-    fn name(&self) -> Cow<'_, str> {
-        "page title".into()
+    let title = driver.title().await?;
+    if !title.contains("Wikipedia") {
+        return Err(report!(
+            "unexpected page title: expected it to contain \"Wikipedia\", got {title:?}",
+        ));
     }
-
-    async fn run(&self, driver: &WebDriver, context: &Context) -> Result<(), Report> {
-        driver.goto(&context.base_url).await?;
-
-        let title = driver.title().await?;
-        if !title.contains("Wikipedia") {
-            return Err(report!(
-                "unexpected page title: expected it to contain \"Wikipedia\", got {title:?}",
-            ));
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -42,6 +32,6 @@ async fn main() -> Result<(), Report<BrowserTestError>> {
 
     BrowserTestRunner::new(Cancellation::on_shutdown_signals())
         .with_visibility(Visibility::Visible)
-        .run(&context, BrowserTests::sequential().with(PageTitleTest))
+        .run(&context, BrowserTests::sequential().with(PageTitle))
         .await
 }

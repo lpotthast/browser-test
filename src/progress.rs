@@ -1,13 +1,14 @@
 //! Warnings about browser tests that make no progress.
 
-use std::collections::BTreeMap;
-use std::sync::{Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::{
+    collections::BTreeMap,
+    sync::{Mutex, PoisonError},
+    time::{Duration, Instant},
+};
 
 use typed_builder::TypedBuilder;
 
-use crate::report::FormatDuration;
-use crate::step::DEFAULT_SLOW_STEP;
+use crate::{report::FormatDuration, step::DEFAULT_SLOW_STEP};
 
 /// When [`crate::BrowserTestRunner`] warns that a test run seems not to progress fast enough.
 ///
@@ -219,8 +220,9 @@ fn is_overdue(elapsed: Duration, threshold: Duration, warnings: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assertr::prelude::*;
+
+    use super::*;
 
     #[test]
     fn defaults_warn_about_long_tests_and_slow_sessions() {

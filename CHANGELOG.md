@@ -10,12 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Failure reports (module `failure_report`): every error of a failing test carries the frames of the test code that led
-  to it (`TestCodeFrames`, innermost first, also for errors created in helpers), panics carry their location and
-  frames, and a failing test's report lists its last steps with their timing (`RecentSteps`). `thirtyfour` errors print
+  to it (`TestCodeFrames`, innermost first, also for errors created in helpers), panics carry their location (marked
+  "outside the test code" when a dependency raised them) and frames, and a failing test's report lists its last steps with their timing (`RecentSteps`). `thirtyfour` errors print
   their `WebDriver` message without chromedriver's native stack trace, and messages print without quotes and escapes,
   also where a report is printed with `Debug`. The runner installs the `rootcause` hooks behind this with its first
-  run; `BrowserTestRunner::with_failure_report_hooks(false)` and `failure_report::hooks` let applications with hooks of
-  their own add them instead. See the README's "Failure Reports".
+  run. Applications with hooks of their own add them with `failure_report::hooks`, and runners then leave the
+  installation to them. `BrowserTestRunner::with_failure_report_hooks(false)` goes without the hooks. See the README's
+  "Failure Reports".
 - `BrowserTestRunner::with_chrome_profiles_dir(ChromeProfilesDir)` sets where runs keep the Chrome profiles of their
   sessions. Defaults to `ChromeProfilesDir::in_temp_dir()`, which is `"browser-test-profiles"` in the system's temporary
   directory.
@@ -41,6 +42,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BROWSER_TEST_SESSION_REUSE`. Disabled by default. See the README's "Session Reuse".
 - The run report counts reset sessions (`BrowserTestRunReport::session_resets`, `session_reset_time`), and the summary
   shows the average duration of every step kind.
+- `#[browser_test]`, re-exported from the new `browser-test-macros` crate, turns an async function into a test: a unit
+  struct implementing `BrowserTest`, named in PascalCase (`async fn opens_menu` becomes `OpensMenu`), registered with
+  `.with(OpensMenu)`. Its name defaults to the module-qualified function name and can be set with `name = "..."`. Its
+  doc comments are its `BrowserTest::description`. Functions take no arguments, a context reference (also borrowed, e.g.
+  `&Page<'_>`), or a driver and a context reference, and return `Result<(), Report<E>>`.
+- `BrowserTest::description`: what a test checks, in prose.
+- Logical `TestGroup`s, added with `BrowserTests::with_test_group`: tests selectable by a group name, wherever their
+  code lives. They run like tests added one by one.
+- `TestFilter` selects tests by name substring (`with_name_containing`) and logical group (`with_group`), applied with
+  `BrowserTests::filter`. `TestFilter::from_env` reads `BROWSER_TEST_FILTER` and `BROWSER_TEST_GROUP`.
+  `BrowserTests::filter_tests` and `filter_groups` select by predicate.
+- Async functions taking a context reference implement `BrowserTest`. `BrowserTest::named` gives any test another name,
+  keeping its settings. The trait's default name is the Rust type name.
 
 ### Changed
 

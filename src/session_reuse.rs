@@ -1,20 +1,19 @@
 //! Reusing a test's session for the next test, after resetting it.
 
-use std::collections::BTreeSet;
-use std::num::NonZeroUsize;
+use std::{collections::BTreeSet, num::NonZeroUsize};
 
-use rootcause::Report;
-use rootcause::prelude::ResultExt as _;
-use thirtyfour::bidi::UserContextId;
-use thirtyfour::bidi::modules::browsing_context::{Create, CreateType};
-use thirtyfour::error::WebDriverResult;
+use rootcause::{Report, prelude::ResultExt as _};
 use thirtyfour::{
     BrowserCapabilitiesHelper as _, CapabilitiesHelper as _, ChromeCapabilities,
     ChromiumLikeCapabilities as _, Rect, TimeoutConfiguration, WebDriver, WindowHandle,
+    bidi::{
+        UserContextId,
+        modules::browsing_context::{Create, CreateType},
+    },
+    error::WebDriverResult,
 };
 
-use crate::InvalidEnvVar;
-use crate::env::env_flag;
+use crate::{InvalidEnvVar, env::env_flag};
 
 pub(crate) const DEFAULT_SESSION_REUSE_ENV: &str = "BROWSER_TEST_SESSION_REUSE";
 
@@ -37,6 +36,19 @@ pub(crate) const DEFAULT_SESSION_REUSE_ENV: &str = "BROWSER_TEST_SESSION_REUSE";
 /// [`Self::with_back_forward_cache`] enables it: both resets then behave alike within a test (a
 /// page left is unloaded, going back loads it again), and no cached page keeps a renderer process
 /// alive across tests of a [`SessionReset::Manual`] session.
+///
+/// The settings ([`Self::with_reset`], [`Self::with_max_tests_per_session`],
+/// [`Self::with_back_forward_cache`]) only take effect while reuse is enabled. They are kept while
+/// it is disabled, so that settings can be applied to whatever [`Self::from_env`] chose:
+///
+/// ```
+/// use browser_test::{CachedData, SessionReset, SessionReuse};
+///
+/// let reuse = SessionReuse::from_env()?
+///     .unwrap_or(SessionReuse::enabled())
+///     .with_reset(SessionReset::manual([CachedData::Http]));
+/// # Ok::<(), browser_test::InvalidEnvVar>(())
+/// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct SessionReuse {
     enabled: bool,

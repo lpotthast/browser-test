@@ -1,6 +1,9 @@
 #![doc = include_str!("../README.md")]
 
+extern crate self as browser_test;
+
 pub use async_trait::async_trait;
+pub use browser_test_macros::browser_test;
 pub use chrome_for_testing_manager::{CancellationToken, Channel, ChromeBinary};
 pub use thirtyfour;
 
@@ -10,6 +13,7 @@ mod env;
 mod error;
 mod execution;
 pub mod failure_report;
+mod filter;
 mod pause;
 mod profile;
 mod progress;
@@ -29,6 +33,7 @@ pub use cancellation::Cancellation;
 pub use driver_output::DriverOutput;
 pub use env::InvalidEnvVar;
 pub use error::BrowserTestError;
+pub use filter::TestFilter;
 pub use pause::Pause;
 pub use profile::ChromeProfilesDir;
 pub use progress::{ProgressWarnings, ProgressWarningsBuilder};
@@ -41,6 +46,25 @@ pub use runner::{BrowserTestRunner, Visibility};
 pub use scheduler::{FailurePolicy, Parallelism};
 pub use session_reuse::{CachedData, KeptCaches, SessionReset, SessionReuse};
 pub use step::{Step, StepExt};
-pub use test_case::{BrowserTest, BrowserTests};
+pub use test_case::{BrowserTest, BrowserTests, NamedTest, TestGroup};
 pub use timeout::{Timeouts, TimeoutsBuilder};
 pub use wait::{ElementQueryWait, ElementQueryWaitError};
+
+/// Implementation details used by generated browser tests.
+#[doc(hidden)]
+pub mod __private {
+    /// Extract the error marker from a test's result, including through result aliases.
+    #[diagnostic::on_unimplemented(
+        message = "browser tests must return `Result<(), rootcause::Report<E>>`, not `{Self}`",
+        label = "the return type of this browser test",
+        note = "`rootcause::Report` without a type parameter is `Report<Dynamic>`, which any error converts into with `?`"
+    )]
+    pub trait TestResult {
+        /// The error marker expected by `BrowserTest`.
+        type Error: ?Sized + 'static;
+    }
+
+    impl<E: ?Sized + 'static> TestResult for Result<(), rootcause::Report<E>> {
+        type Error = E;
+    }
+}

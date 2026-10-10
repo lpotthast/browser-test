@@ -63,8 +63,9 @@ pub enum BrowserTestError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assertr::prelude::*;
+
+    use super::*;
 
     #[test]
     fn run_test_error_displays_plain_test_name() {

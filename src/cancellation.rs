@@ -1,12 +1,13 @@
 //! Cancelling runs, e.g. when the process is asked to shut down on Ctrl-C.
 
-use std::io;
-use std::sync::{LazyLock, Mutex, PoisonError, mpsc};
-use std::thread;
+use std::{
+    io,
+    sync::{LazyLock, Mutex, PoisonError, mpsc},
+    thread,
+};
 
 use chrome_for_testing_manager::CancellationToken;
-use rootcause::Report;
-use rootcause::prelude::ResultExt as _;
+use rootcause::{Report, prelude::ResultExt as _};
 
 use crate::BrowserTestError;
 

@@ -11,15 +11,13 @@ use std::{
 };
 
 use assertr::prelude::*;
-use browser_test::thirtyfour::prelude::ElementQueryable;
-use browser_test::thirtyfour::{By, ChromiumLikeCapabilities, WebDriver};
 use browser_test::{
     BrowserTest, BrowserTestError, BrowserTestRunner, BrowserTests, Cancellation,
     CancellationToken, ChromeProfilesDir, ElementQueryWait, FailurePolicy, Parallelism, StepExt,
     Timeouts, async_trait,
+    thirtyfour::{By, ChromiumLikeCapabilities, WebDriver, prelude::ElementQueryable},
 };
-use rootcause::Report;
-use rootcause::prelude::ResultExt;
+use rootcause::{Report, prelude::ResultExt};
 use serial_test::serial;
 
 type RunnerResult = Result<(), Report<BrowserTestError>>;
@@ -205,6 +203,26 @@ impl BrowserTest<IntegrationContext, IntegrationTestError> for PanickingTest {
         _context: &IntegrationContext,
     ) -> Result<(), Report<IntegrationTestError>> {
         assert_that!(1).is_equal_to(2);
+        Ok(())
+    }
+}
+
+/// Panics in a dependency (here `core`, adding durations that overflow), as a library raising an
+/// assertion from its own code does.
+struct PanickingInADependencyTest;
+
+#[async_trait]
+impl BrowserTest<IntegrationContext, IntegrationTestError> for PanickingInADependencyTest {
+    fn name(&self) -> Cow<'_, str> {
+        Cow::Borrowed("panicking in a dependency")
+    }
+
+    async fn run(
+        &self,
+        _driver: &WebDriver,
+        _context: &IntegrationContext,
+    ) -> Result<(), Report<IntegrationTestError>> {
+        let _ = std::hint::black_box(std::time::Duration::MAX) + std::time::Duration::from_secs(1);
         Ok(())
     }
 }
@@ -415,6 +433,27 @@ async fn failure_reports_locate_panics() {
         .contains("Browser test 'panicking' panicked")
         .contains("Panicked at tests/browser_runner.rs:")
         .contains("Test code:");
+}
+
+/// A panic in a dependency is reported as outside the test code, which the test code's frames
+/// locate.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn failure_reports_name_panics_outside_the_test_code() {
+    let err = runner()
+        .run(
+            &IntegrationContext::default(),
+            BrowserTests::sequential().with(PanickingInADependencyTest),
+        )
+        .await
+        .expect_err("the test panics");
+
+    let report = format!("{err:?}");
+    assert_that!(&report)
+        .contains("Panicked outside the test code at ")
+        .contains("core/src/time.rs")
+        .contains("Test code:")
+        .contains("tests/browser_runner.rs");
 }
 
 /// Sessions run on profiles browser-test creates, on which `ChromeDriver` starts the page without

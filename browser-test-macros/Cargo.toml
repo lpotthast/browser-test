@@ -1,0 +1,32 @@
+[package]
+name = "browser-test-macros"
+version = "0.6.0"
+edition = "2024"
+rust-version = "1.89.0"
+authors = ["Lukas Potthast <privat@lukas-potthast.de>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/lpotthast/browser-test"
+description = "Attribute macros for browser-test."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+heck = "0.5"
+manyhow = "0.14"
+proc-macro-crate = "3.4"
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "3", features = ["full", "visit-mut"] }
+
+[dev-dependencies]
+# The documentation's examples use the attribute through `browser-test`. Without a version, the
+# dependency is left out when publishing.
+browser-test = { path = ".." }
+rootcause = { version = "0.13.0", default-features = false }
+
+[lints.rust]
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = "warn"

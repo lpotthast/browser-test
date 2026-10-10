@@ -1,10 +1,11 @@
 use std::num::NonZeroUsize;
 
-use rootcause::Report;
-use rootcause::report_collection::ReportCollection;
+use rootcause::{Report, report_collection::ReportCollection};
 
-use crate::BrowserTestError;
-use crate::env::{InvalidEnvVar, env_number};
+use crate::{
+    BrowserTestError,
+    env::{InvalidEnvVar, env_number},
+};
 
 /// Default environment variable read by [`Parallelism::from_env`].
 pub(crate) const DEFAULT_PARALLELISM_ENV: &str = "BROWSER_TEST_PARALLELISM";

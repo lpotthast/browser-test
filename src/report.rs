@@ -1,8 +1,10 @@
 //! Timing report of a browser test run.
 
-use std::collections::BTreeMap;
-use std::fmt::{self, Display, Write as _};
-use std::time::Duration;
+use std::{
+    collections::BTreeMap,
+    fmt::{self, Display, Write as _},
+    time::Duration,
+};
 
 /// Where a browser test run spent its time.
 ///
@@ -55,7 +57,9 @@ pub struct BrowserTestRecord {
     /// Whether the test passed.
     pub outcome: TestOutcome,
 
-    /// The name of the innermost named group containing the test (see [`GroupRecord::name`]).
+    /// The containing group's name, prefixed by enclosing named execution groups with ` / `.
+    /// For tests in a [`crate::TestGroup`], ends with that logical group's name. Logical groups
+    /// share their parent's execution policy and have no separate [`GroupRecord`] wall time.
     pub group: Option<String>,
 
     /// How the test's session was prepared (created, or reset after an earlier test), and how long
@@ -428,8 +432,9 @@ impl Display for FormatDuration {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assertr::prelude::*;
+
+    use super::*;
 
     fn record(index: usize, name: &str, session: SessionTiming, body_ms: u64) -> BrowserTestRecord {
         BrowserTestRecord {

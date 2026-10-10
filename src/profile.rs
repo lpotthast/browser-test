@@ -28,14 +28,15 @@
 //!
 //! Entries not named `run-*` are never removed.
 
-use std::fs::{self, File, TryLockError};
-use std::io;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    fs::{self, File, TryLockError},
+    io,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicUsize, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-use rootcause::Report;
-use rootcause::prelude::ResultExt as _;
+use rootcause::{Report, prelude::ResultExt as _};
 use thirtyfour::{
     BrowserCapabilitiesHelper as _, ChromeCapabilities, ChromiumLikeCapabilities,
     error::{WebDriverError, WebDriverResult},
@@ -367,8 +368,9 @@ fn remove_dir(path: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assertr::prelude::*;
+
+    use super::*;
 
     /// A profiles directory for one test, removed when dropped, even if the test fails.
     struct TestProfilesDir {

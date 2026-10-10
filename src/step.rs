@@ -1,15 +1,19 @@
 //! Timed steps inside browser tests.
 
-use std::collections::BTreeMap;
-use std::fmt::{self, Display};
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::{Arc, Mutex, PoisonError};
-use std::task::{Context, Poll, ready};
-use std::time::{Duration, Instant};
+use std::{
+    collections::BTreeMap,
+    fmt::{self, Display},
+    future::Future,
+    pin::Pin,
+    sync::{Arc, Mutex, PoisonError},
+    task::{Context, Poll, ready},
+    time::{Duration, Instant},
+};
 
-use crate::failure_report::{PanicDetails, RecentSteps, StepEvent, StepLog};
-use crate::report::{FormatDuration, StepStats};
+use crate::{
+    failure_report::{PanicDetails, RecentSteps, StepEvent, StepLog},
+    report::{FormatDuration, StepStats},
+};
 
 /// Default for [`crate::ProgressWarnings`]'s slow step threshold, also used for steps outside of
 /// a runner.
@@ -156,7 +160,6 @@ impl<F: Future> Future for Step<F> {
     }
 }
 
-/// Log a finished step and add it to the current test's record, if any.
 /// Whether this code runs in a test's body.
 pub(crate) fn in_test() -> bool {
     CURRENT_TEST.try_with(|_| ()).is_ok()
@@ -174,6 +177,7 @@ pub(crate) fn record_panic(details: PanicDetails) {
     });
 }
 
+/// Log a finished step and add it to the current test's record, if any.
 fn record_step(kind: &'static str, detail: Option<&str>, start: Instant, duration: Duration) {
     let recorder = CURRENT_TEST.try_with(Arc::clone).ok();
     let slow_step = match &recorder {
@@ -211,8 +215,9 @@ fn record_step(kind: &'static str, detail: Option<&str>, start: Instant, duratio
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assertr::prelude::*;
+
+    use super::*;
 
     #[test]
     fn steps_record_into_the_enclosing_test() {

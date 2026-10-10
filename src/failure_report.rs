@@ -12,13 +12,17 @@
 //!
 //! The runner installs the [`rootcause`] hooks behind this with the first run
 //! ([`BrowserTestRunner::with_failure_report_hooks`](crate::BrowserTestRunner::with_failure_report_hooks)).
-//! An application that installs hooks of its own adds them with [`hooks`].
+//! An application that installs hooks of its own adds them with [`hooks`], and the runner then
+//! leaves the installation to it.
 
 use std::{
     collections::VecDeque,
     fmt,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock, PoisonError},
+    sync::{
+        Mutex, OnceLock, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -54,10 +58,11 @@ pub(crate) const RECENT_STEP_COUNT: usize = 8;
 ///     .expect("hooks are installed once");
 /// ```
 ///
-/// Then disable the runner's own installation with
-/// [`BrowserTestRunner::with_failure_report_hooks(false)`](crate::BrowserTestRunner::with_failure_report_hooks).
+/// Once this was called, runners no longer install the hooks themselves: [`rootcause`] takes only
+/// one set of hooks per process, and the returned one includes them.
 #[must_use]
 pub fn hooks(hooks: Hooks) -> Hooks {
+    ADDED_BY_APPLICATION.store(true, Ordering::Relaxed);
     hooks
         .report_creation_hook(TestCodeFramesHook)
         .context_formatter::<WebDriverError, _>(WebDriverErrorFormatter)
@@ -66,11 +71,15 @@ pub fn hooks(hooks: Hooks) -> Hooks {
         .context_formatter::<&'static str, _>(DisplayFormatter)
 }
 
-/// Install [`hooks`] and the panic hook, once per process. Called by the runner.
+/// Whether the application added the hooks to its own with [`hooks`].
+static ADDED_BY_APPLICATION: AtomicBool = AtomicBool::new(false);
+
+/// Install [`hooks`] and the panic hook, once per process, unless the application added the hooks
+/// to its own. Called by the runner.
 pub(crate) fn install(report_hooks: bool) {
     static REPORT_HOOKS: OnceLock<()> = OnceLock::new();
     static PANIC_HOOK: OnceLock<()> = OnceLock::new();
-    if report_hooks {
+    if report_hooks && !ADDED_BY_APPLICATION.load(Ordering::Relaxed) {
         REPORT_HOOKS.get_or_init(|| {
             if hooks(Hooks::new()).install().is_err() {
                 tracing::warn!(
@@ -176,6 +185,21 @@ impl TestCodeFrames {
     }
 }
 
+impl TestCodeFrames {
+    /// Whether `location` (`file:line:column`, as a panic reports it) is the innermost frame: the
+    /// test code itself panicked there.
+    pub(crate) fn starts_at(&self, location: &str) -> bool {
+        let mut parts = location.rsplitn(3, ':');
+        let (Some(_column), Some(line), Some(file)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return false;
+        };
+        self.frames.first().is_some_and(|frame| {
+            line.parse() == Ok(frame.line) && Path::new(file).ends_with(&frame.file)
+        })
+    }
+}
+
 impl fmt::Display for TestCodeFrames {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let width = self
@@ -250,13 +274,22 @@ impl fmt::Debug for RecentSteps {
     }
 }
 
-/// Where a test panicked, as its failure report shows it.
+/// Where a test panicked, as its failure report shows it. A panic outside the test code (in a
+/// dependency, e.g. an assertion library that raises from its own code) says so, as the test
+/// code's frames show where the test called it.
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct PanicLocation(pub(crate) String);
+pub(crate) struct PanicLocation {
+    pub(crate) location: String,
+    pub(crate) outside_test_code: bool,
+}
 
 impl fmt::Display for PanicLocation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Panicked at {}", self.0)
+        if self.outside_test_code {
+            write!(f, "Panicked outside the test code at {}", self.location)
+        } else {
+            write!(f, "Panicked at {}", self.location)
+        }
     }
 }
 
@@ -484,6 +517,30 @@ mod tests {
     use assertr::prelude::*;
 
     use super::*;
+
+    #[test]
+    fn a_panic_location_is_test_code_when_it_is_the_innermost_frame() {
+        let frames = TestCodeFrames {
+            frames: vec![
+                Frame {
+                    file: "tests/ui/checkbox.rs".to_owned(),
+                    line: 84,
+                    function: "checkbox::selected_state".to_owned(),
+                },
+                Frame {
+                    file: "tests/main.rs".to_owned(),
+                    line: 12,
+                    function: "main".to_owned(),
+                },
+            ],
+        };
+        assert!(frames.starts_at("tests/ui/checkbox.rs:84:9"));
+        assert!(frames.starts_at("my_crate/tests/ui/checkbox.rs:84:9"));
+        assert!(!frames.starts_at("tests/ui/checkbox.rs:85:9"));
+        assert!(!frames.starts_at("tests/main.rs:12:5"));
+        assert!(!frames.starts_at("/home/me/.cargo/registry/src/assertr/src/lib.rs:84:9"));
+        assert!(!frames.starts_at("no location"));
+    }
 
     #[test]
     fn function_names_are_shortened() {
