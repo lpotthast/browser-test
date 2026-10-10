@@ -118,6 +118,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The run summary prints durations just below a full minute as `2m 00.0s` instead of `1m 60.0s`.
 - A panic in a Chrome capability setup, or in a hand-written `BrowserTest::run` before it returns its future, fails that
   session or test. It unwound through the whole run before, skipping the shutdown of `ChromeDriver`.
+- Driver output capture no longer captures the lines printed while it starts twice.
 - Driver output capture no longer reserves memory for all of its tail lines up front. A large
   `BROWSER_TEST_DRIVER_OUTPUT_TAIL_LINES` or `DriverOutput::tail_lines` reserved gigabytes, and `usize::MAX` panicked.
 

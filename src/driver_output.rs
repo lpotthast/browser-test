@@ -197,12 +197,10 @@ impl DriverOutputCapture {
     }
 
     /// Capture the driver's output so far, then keep capturing its live output until the driver
-    /// shuts down.
-    ///
-    /// A line printed while following starts can be captured twice.
+    /// shuts down. Every line is captured once.
     pub(crate) fn follow(&self, chrome: &ChromeForTesting) -> DriverOutputFollower {
-        let mut subscription = chrome.subscribe_output();
-        for line in chrome.recent_output() {
+        let (history, mut subscription) = chrome.subscribe_output_with_history();
+        for line in history {
             self.push(line);
         }
         let capture = self.clone();
