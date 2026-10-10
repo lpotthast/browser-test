@@ -467,10 +467,11 @@ fn preparations(outcome: &Run) -> Vec<&'static str> {
 /// The window size and position a [`Dirty`] test found, for [`Clean`] to compare with.
 type SharedRect = Arc<Mutex<Option<browser_test::thirtyfour::Rect>>>;
 
-/// Leaves state behind that a session reset must remove: storage, a cookie, a second window, a
-/// held key, a resized window, a granted permission.
+/// Leaves state behind that a session reset must remove: storage, a cookie, a held key, a resized
+/// window, a granted permission, and, if `second_window`, a second window showing the app.
 struct Dirty {
     initial_rect: SharedRect,
+    second_window: bool,
 }
 
 #[async_trait]
@@ -524,9 +525,11 @@ impl BrowserTest<str> for Dirty {
             .perform()
             .await?;
         driver.set_window_rect(0, 0, 640, 480).await?;
-        let second = driver.new_window().await?;
-        driver.switch_to_window(second).await?;
-        driver.goto(base_url).await?;
+        if self.second_window {
+            let second = driver.new_window().await?;
+            driver.switch_to_window(second).await?;
+            driver.goto(base_url).await?;
+        }
         Ok(())
     }
 }
@@ -611,7 +614,7 @@ impl BrowserTest<str> for Clean {
 }
 
 /// Runs [`Dirty`], then [`Clean`] in the reset session.
-async fn assert_reset_keeps_no_state(reset: SessionReset, windows: usize) {
+async fn assert_reset_keeps_no_state(reset: SessionReset, second_window: bool, windows: usize) {
     let base_url = serve_fixture().await;
     let initial_rect = SharedRect::default();
 
@@ -623,6 +626,7 @@ async fn assert_reset_keeps_no_state(reset: SessionReset, windows: usize) {
         BrowserTests::sequential()
             .with(Dirty {
                 initial_rect: Arc::clone(&initial_rect),
+                second_window,
             })
             .with(Clean {
                 initial_rect,
@@ -646,13 +650,68 @@ async fn assert_reset_keeps_no_state(reset: SessionReset, windows: usize) {
 #[serial]
 async fn new_context_resets_keep_no_state_of_earlier_tests() {
     // The session's first tab, and the tab of the test's user context.
-    assert_reset_keeps_no_state(SessionReset::NewContext, 2).await;
+    assert_reset_keeps_no_state(SessionReset::NewContext, false, 2).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn manual_resets_keep_no_state_of_earlier_tests() {
-    assert_reset_keeps_no_state(SessionReset::manual([CachedData::Http]), 1).await;
+    assert_reset_keeps_no_state(SessionReset::manual([CachedData::Http]), true, 1).await;
+}
+
+/// Opens a window in the browser's default context, or navigates the session's first tab there.
+/// Removing the test's user context would leave the state of the default context behind.
+struct UsesDefaultContext {
+    new_window: bool,
+}
+
+#[async_trait]
+impl BrowserTest<str> for UsesDefaultContext {
+    fn name(&self) -> Cow<'_, str> {
+        format!("uses the default context (new window: {})", self.new_window).into()
+    }
+
+    async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
+        let window = if self.new_window {
+            driver.new_window().await?
+        } else {
+            let current = driver.window().await?;
+            let windows = driver.windows().await?;
+            windows
+                .into_iter()
+                .find(|window| *window != current)
+                .expect("the session's first tab is open")
+        };
+        driver.switch_to_window(window).await?;
+        driver.goto(base_url).await?;
+        driver
+            .execute("localStorage.setItem('leak', '1');", Vec::new())
+            .await?;
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn new_context_sessions_quit_after_tests_using_the_default_context() {
+    let base_url = serve_fixture().await;
+    let outcome = run(
+        runner()
+            .with_session_reuse(SessionReuse::enabled())
+            .with_spare_sessions(0),
+        base_url.as_str(),
+        BrowserTests::sequential()
+            .with(UsesDefaultContext { new_window: true })
+            .with(UsesDefaultContext { new_window: false })
+            .with(Visit::new(0, Duration::ZERO, &Arc::default())),
+    )
+    .await;
+
+    if let Err(error) = &outcome.result {
+        panic!("every test should pass: {error:?}");
+    }
+    assert_that!(preparations(&outcome)).is_equal_to(vec!["created", "created", "created"]);
+    assert_that!(outcome.report.session_resets()).is_equal_to(0);
 }
 
 /// Serves a page loading `/cached.js`, which browsers may cache for an hour. Returns the base URL

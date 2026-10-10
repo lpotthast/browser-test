@@ -188,10 +188,11 @@ pub enum SessionReset {
     /// kept: every test starts with empty caches, e.g. downloads and compiles the app's scripts
     /// and WebAssembly again.
     ///
-    /// Windows a test opens with `WebDriver`'s New Window command open in the browser's default
-    /// context; the reset closes them. The session's first tab stays open on `about:blank`, so a
-    /// test sees two windows. Sessions are created with `WebDriver` `BiDi` enabled
-    /// (`webSocketUrl`).
+    /// The session's first tab stays open in the browser's default context, so a test sees two
+    /// windows. A test that leaves state in the default context, which removing a user context
+    /// doesn't remove, makes its session quit instead of being reset: by opening windows with
+    /// `WebDriver`'s New Window command (they open in the default context), or by navigating the
+    /// first tab. Sessions are created with `WebDriver` `BiDi` enabled (`webSocketUrl`).
     #[default]
     NewContext,
 
@@ -304,7 +305,23 @@ pub(crate) struct SessionBaseline {
     timeouts: TimeoutConfiguration,
     /// The tab the session started with.
     first_tab: WindowHandle,
+    /// The page the first tab started with.
+    first_url: String,
     isolation: Isolation,
+}
+
+/// Why a session was not reset.
+pub(crate) enum ResetError {
+    /// The test left state in the browser's default context, which removing its user context
+    /// doesn't remove ([`SessionReset::NewContext`]). Not a failure: the session quits.
+    DefaultContextUsed(&'static str),
+    Failed(Report),
+}
+
+impl<C: ?Sized + 'static> From<Report<C>> for ResetError {
+    fn from(report: Report<C>) -> Self {
+        Self::Failed(report.into_dynamic())
+    }
 }
 
 /// Where a session's tests run.
@@ -322,6 +339,11 @@ impl SessionBaseline {
             .window()
             .await
             .context("the first tab could not be read")?;
+        let first_url = driver
+            .current_url()
+            .await
+            .context("the page of the first tab could not be read")?
+            .into();
         let timeouts = driver
             .get_timeouts()
             .await
@@ -339,12 +361,13 @@ impl SessionBaseline {
             window_rect,
             timeouts,
             first_tab,
+            first_url,
             isolation,
         })
     }
 
     /// Reset the session for the next test (see [`SessionReset`]).
-    pub(crate) async fn reset(&mut self, driver: &WebDriver) -> Result<(), Report> {
+    pub(crate) async fn reset(&mut self, driver: &WebDriver) -> Result<(), ResetError> {
         match &mut self.isolation {
             Isolation::UserContext(user_context) => {
                 let bidi = driver
@@ -355,12 +378,8 @@ impl SessionBaseline {
                     .remove_user_context(user_context.clone())
                     .await
                     .context("the user context of the test could not be removed")?;
+                check_default_context_unused(driver, &self.first_tab, &self.first_url).await?;
                 *user_context = open_user_context(driver).await?;
-                let current = driver
-                    .window()
-                    .await
-                    .context("the new tab could not be read")?;
-                close_windows_except(driver, &[current, self.first_tab.clone()]).await?;
             }
             Isolation::Manual(kept) => reset_manually(driver, &self.first_tab, *kept).await?,
         }
@@ -539,6 +558,40 @@ fn insert_origin(origins: &mut BTreeSet<String>, url: &str) {
             origins.insert(origin.ascii_serialization());
         }
     }
+}
+
+/// Check that the test of a [`SessionReset::NewContext`] session, whose user context was just
+/// removed with its tabs, left the browser's default context as it was: the first tab on its first
+/// page, and no other windows. Its cookies, storage and caches would outlive the reset.
+async fn check_default_context_unused(
+    driver: &WebDriver,
+    first_tab: &WindowHandle,
+    first_url: &str,
+) -> Result<(), ResetError> {
+    let windows = driver
+        .windows()
+        .await
+        .context("the open windows could not be listed")?;
+    if windows.iter().any(|window| window != first_tab) {
+        return Err(ResetError::DefaultContextUsed(
+            "the test opened windows in the browser's default context (e.g. with WebDriver's New \
+             Window command)",
+        ));
+    }
+    driver
+        .switch_to_window(first_tab.clone())
+        .await
+        .context("the session's first tab could not be selected")?;
+    let url = driver
+        .current_url()
+        .await
+        .context("the page of the first tab could not be read")?;
+    if url.as_str() != first_url {
+        return Err(ResetError::DefaultContextUsed(
+            "the test navigated the session's first tab, in the browser's default context",
+        ));
+    }
+    Ok(())
 }
 
 /// Close every window but `keep`, and select the first of `keep`.

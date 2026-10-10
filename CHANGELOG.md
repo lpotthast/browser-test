@@ -32,7 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The pool keeps as many sessions as tests run at the same time plus spares (by default one per eight parallel tests),
   and quits the others; a session whose reset fails quits. Two resets (`SessionReset`), to cross-check each other:
   `NewContext` (the default) runs every test in a tab of its own WebDriver BiDi user context and removes it (its tabs,
-  cookies, storage, caches, permissions and renderer processes; the `bidi` feature of `thirtyfour` is enabled);
+  cookies, storage, caches, permissions and renderer processes; the `bidi` feature of `thirtyfour` is enabled), and
+  quits a session whose test left state in the browser's default context (New Window, the first tab);
   `SessionReset::manual([CachedData::Http])` resets the session's one tab item by item and keeps only the listed
   cached data, e.g. the HTTP cache with V8's compiled code. Both release pressed keys and buttons and restore the window
   rect and timeouts. Reusable sessions run without Chrome's back/forward cache unless

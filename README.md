@@ -437,8 +437,10 @@ before; run a suite with each to cross-check that its tests don't depend on the 
 isolated browser profiles, like incognito windows), and the reset removes it: its tabs and windows (with their history,
 page state and CDP overrides), cookies, storage of every origin, caches and permissions, and the renderer processes of its
 pages. Complete by construction, whatever a test changed, but nothing is kept: every test downloads and compiles the app's
-scripts and WebAssembly again. The session's first tab stays open on `about:blank`, so a test sees two windows; windows a
-test opens with `WebDriver`'s New Window command (they open in the browser's default context) are closed. Grant
+scripts and WebAssembly again. The session's first tab stays open in the browser's default context, so a test sees two
+windows. A test that leaves state in the default context, which removing a user context doesn't remove, makes its
+session quit instead of being reset: by opening windows with `WebDriver`'s New Window command (they open in the default
+context), or by navigating the first tab. Grant
 permissions through CDP for the test's context: `Browser.grantPermissions` with the `browserContextId` of the current tab
 (`Target.getTargetInfo`).
 

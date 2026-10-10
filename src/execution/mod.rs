@@ -44,7 +44,7 @@ use crate::{
         StepStats, TestOutcome, timing_breakdown,
     },
     scheduler::BrowserTestFailures,
-    session_reuse::{SessionBaseline, configure_reusable_session},
+    session_reuse::{ResetError, SessionBaseline, configure_reusable_session},
     step::StepRecorder,
     test_case::BrowserTestEntry,
 };
@@ -901,10 +901,16 @@ where
             reset_duration,
         );
         if let Err(error) = reset {
-            tracing::warn!(
-                "Resetting the session of browser test '{}' failed, so it quits: {error}",
-                test.name,
-            );
+            match error {
+                ResetError::DefaultContextUsed(reason) => tracing::debug!(
+                    "The session of browser test '{}' quits instead of being reset: {reason}.",
+                    test.name,
+                ),
+                ResetError::Failed(error) => tracing::warn!(
+                    "Resetting the session of browser test '{}' failed, so it quits: {error}",
+                    test.name,
+                ),
+            }
             env.pool.reset_failed(env.keep_starting());
             return Ok(());
         }
