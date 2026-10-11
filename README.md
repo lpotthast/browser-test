@@ -160,15 +160,15 @@ interpret (e.g. `BROWSER_TEST_VISIBLE=ture`) instead of silently ignoring it. Th
 BROWSER_TEST_VISIBLE=1 BROWSER_TEST_PAUSE=1 BROWSER_TEST_DRIVER_OUTPUT=1 cargo test -- --nocapture
 ```
 
-| Variable                                | Read by                     | Effect                                                     |
-|-----------------------------------------|-----------------------------|------------------------------------------------------------|
-| `BROWSER_TEST_VISIBLE`                  | `Visibility::from_env()`    | Show the browser windows instead of running headless.      |
-| `BROWSER_TEST_PAUSE`                    | `Pause::from_env()`         | Ask for confirmation before starting the browser.          |
-| `BROWSER_TEST_DRIVER_OUTPUT`            | `DriverOutput::from_env()`  | Attach recent chromedriver output to errors.               |
-| `BROWSER_TEST_DRIVER_OUTPUT_TAIL_LINES` | `DriverOutput::from_env()`  | Number of output lines kept (default 200).                 |
-| `BROWSER_TEST_PARALLELISM`              | `Parallelism::from_env()`   | Number of tests run at the same time (see below).          |
-| `BROWSER_TEST_FILTER`                   | `TestFilter::from_env()`    | Comma-separated test-name substrings (any match).          |
-| `BROWSER_TEST_GROUP`                    | `TestFilter::from_env()`    | Comma-separated exact logical group names (any match).    |
+| Variable                                | Read by                    | Effect                                                 |
+|-----------------------------------------|----------------------------|--------------------------------------------------------|
+| `BROWSER_TEST_VISIBLE`                  | `Visibility::from_env()`   | Show the browser windows instead of running headless.  |
+| `BROWSER_TEST_PAUSE`                    | `Pause::from_env()`        | Ask for confirmation before starting the browser.      |
+| `BROWSER_TEST_DRIVER_OUTPUT`            | `DriverOutput::from_env()` | Attach recent chromedriver output to errors.           |
+| `BROWSER_TEST_DRIVER_OUTPUT_TAIL_LINES` | `DriverOutput::from_env()` | Number of output lines kept (default 200).             |
+| `BROWSER_TEST_PARALLELISM`              | `Parallelism::from_env()`  | Number of tests run at the same time (see below).      |
+| `BROWSER_TEST_FILTER`                   | `TestFilter::from_env()`   | Comma-separated test-name substrings (any match).      |
+| `BROWSER_TEST_GROUP`                    | `TestFilter::from_env()`   | Comma-separated exact logical group names (any match). |
 
 Use `0`/`1`, `false`/`true`, `no`/`yes`, `off`/`on` or `disabled`/`enabled` for boolean environment flags (ignoring
 case). Each type also has `from_env_var(name)` to read a variable of your choice.

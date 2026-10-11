@@ -5,18 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] - 2026-10-11
 
 ### Added
 
 - Failure reports (module `failure_report`): every error of a failing test carries the frames of the test code that led
   to it (`TestCodeFrames`, innermost first, also for errors created in helpers), panics carry their location (marked
-  "outside the test code" when a dependency raised them) and frames, and a failing test's report lists its last steps with their timing (`RecentSteps`). `thirtyfour` errors print
-  their `WebDriver` message without chromedriver's native stack trace, and messages print without quotes and escapes,
-  also where a report is printed with `Debug`. The runner installs the `rootcause` hooks behind this with its first
-  run. Applications with hooks of their own add them with `failure_report::hooks`, and runners then leave the
-  installation to them. `BrowserTestRunner::with_failure_report_hooks(false)` goes without the hooks. See the README's
-  "Failure Reports".
+  "outside the test code" when a dependency raised them) and frames, and a failing test's report lists its last steps
+  with their timing (`RecentSteps`). `thirtyfour` errors print their `WebDriver` message without chromedriver's native
+  stack trace, and messages print without quotes and escapes, also where a report is printed with `Debug`. The runner
+  installs the `rootcause` hooks behind this with its first run. Applications with hooks of their own add them with
+  `failure_report::hooks`, and runners then leave the installation to them.
+  `BrowserTestRunner::with_failure_report_hooks(false)` goes without the hooks. See the README's "Failure Reports".
 - `BrowserTestRunner::with_chrome_profiles_dir(path)` sets where runs keep the Chrome profiles of their sessions.
   Defaults to `"browser-test-profiles-<uid>"` (Unix, with the user id) or `"browser-test-profiles"` in the system's
   temporary directory.
@@ -59,8 +59,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BrowserTests::filter_tests` and `filter_groups` select by predicate.
 - Async functions taking a context reference implement `BrowserTest`. `BrowserTest::named` gives any test another name,
   keeping its settings. The trait's default name is the Rust type name.
-- `SessionSettings`, returned by the new `BrowserTest::session_settings`, holds what a test needs of its session: timeouts,
-  element-query wait, and whether it needs a fresh session.
+- `SessionSettings`, returned by the new `BrowserTest::session_settings`, holds what a test needs of its session:
+  timeouts, element-query wait, and whether it needs a fresh session.
 - `TestOutcome::is_passed`, `is_failed` and `is_cancelled`, `BrowserTestRunReport::passed`, `failed` and `cancelled`.
 - `Parallelism::max_parallel_tests` is public.
 
@@ -71,7 +71,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `SessionTiming::creation` became `SessionTiming::preparation`, a `SessionPreparation`: `Created` with
   the creation time, or `Reset` with the reset time of a reused session. `BrowserTestRecord::teardown` is `None` for a
   test whose session ran further tests.
-
 - **Breaking:** `BrowserTestRunner::new` requires a `Cancellation`, so that every user decides how runs are cancelled.
   `Cancellation::on_shutdown_signals()` cancels runs on SIGINT (Ctrl-C) or SIGTERM, or Ctrl-C on Windows. The process
   listens for them once, from the first run with tests on, on a thread of its own, so any number of runners and Tokio
@@ -285,7 +284,9 @@ does what it is told. See "Changed" for the renames.
 - Added environment-variable controls for visibility, pauses, and browser-driver output diagnostics.
 - Added re-exports for `async_trait::async_trait`, `chrome_for_testing_manager::Channel` and the `thirtyfour` crate.
 
-[Unreleased]: https://github.com/lpotthast/browser-test/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/lpotthast/browser-test/compare/v0.6.0...HEAD
+
+[0.6.0]: https://github.com/lpotthast/browser-test/compare/v0.5.0...v0.6.0
 
 [0.5.0]: https://github.com/lpotthast/browser-test/compare/v0.4.0...v0.5.0
 

@@ -3,7 +3,6 @@
 use std::{collections::BTreeSet, num::NonZeroUsize, time::Duration};
 
 use futures_util::StreamExt as _;
-
 use rootcause::{Report, prelude::ResultExt as _};
 use thirtyfour::{
     BrowserCapabilitiesHelper as _, CapabilitiesHelper as _, ChromeCapabilities,

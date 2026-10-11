@@ -7,7 +7,7 @@ authors.workspace = true
 license.workspace = true
 readme = "README.md"
 repository.workspace = true
-description = "Small helpers for async browser-driven integration tests."
+description = "Runner for async browser-driven integration tests."
 categories = ["development-tools::testing", "web-programming"]
 keywords = ["browser", "webdriver", "chrome", "testing", "automation"]
 

@@ -5,14 +5,13 @@ mod arguments;
 mod description;
 mod signature;
 
+pub(crate) use arguments::Arguments;
 use heck::ToUpperCamelCase;
 use manyhow::{ErrorMessage, bail, ensure, error_message};
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote, quote_spanned};
-use syn::{ItemFn, Visibility, ext::IdentExt, spanned::Spanned as _};
-
-pub(crate) use arguments::Arguments;
 use signature::{Inputs, TestSignature};
+use syn::{ItemFn, Visibility, ext::IdentExt, spanned::Spanned as _};
 
 /// Struct names that would shadow a name of the standard prelude (Rust 2024) in the test's module:
 /// its types and traits, and the `Option` and `Result` variants, as a unit struct also defines a
