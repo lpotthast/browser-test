@@ -6,8 +6,9 @@ rust-version = "1.89.0"
 publish = false
 
 [dependencies]
-browser-test = { path = "../../browser-test", default-features = false, features = ["rustls"] }
+browser-test = { path = "../../browser-test", default-features = false, features = ["rustls-no-provider"] }
 rootcause = { version = "0.13.0", default-features = false }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"] }
 tokio = { version = "1.52.3", default-features = false, features = ["macros", "rt-multi-thread"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["ansi", "fmt", "registry"] }
 

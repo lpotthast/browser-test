@@ -26,6 +26,8 @@ async fn page_title(driver: &WebDriver, context: &Context) -> Result<(), Report>
 async fn main() -> Result<(), Report<BrowserTestError>> {
     tracing_subscriber::fmt::init();
 
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let context = Context {
         base_url: "https://www.wikipedia.org".into(),
     };

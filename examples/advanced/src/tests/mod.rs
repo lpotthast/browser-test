@@ -4,9 +4,11 @@ use browser_test::thirtyfour::{By, WebDriver};
 use rootcause::Report;
 use rootcause::prelude::ResultExt;
 
+mod edition_link;
 mod search_input;
 mod title;
 
+pub(crate) use edition_link::EditionIsLinked;
 pub(crate) use search_input::SearchInputIsVisible;
 pub(crate) use title::TitleContainsWikipedia;
 
