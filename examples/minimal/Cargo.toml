@@ -10,3 +10,7 @@ browser-test = { path = "../../browser-test", default-features = false, features
 rootcause = { version = "0.13.0", default-features = false }
 tokio = { version = "1.52.3", default-features = false, features = ["macros", "rt-multi-thread"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["ansi", "fmt", "registry"] }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }

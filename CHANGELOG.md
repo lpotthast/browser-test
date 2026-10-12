@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-10-12
+
+### Changed
+
+- Updated `assertr` to version `0.8`.
+- Clearer API documentation.
+
 ## [0.6.0] - 2026-10-11
 
 ### Added
@@ -129,8 +136,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gets a fresh profile in the profiles directory, removed when the session ends, and a starting run removes the
   profiles that killed runs left behind. A run whose profiles cannot be set up fails with the new
   `BrowserTestError::CreateChromeProfiles`. Sessions still start with a focused page: on a profile it did not create
-  itself, `ChromeDriver` starts the page without focus, so the runner brings every new session's page to the front
-  (CDP `Page.bringToFront`).
+  itself, `ChromeDriver` starts the page without focus, so the runner brings every new session's page to the front (CDP
+  `Page.bringToFront`).
 - At most `parallel tests + spare sessions` browsers are open at once, as documented. Sessions still quitting in the
   background did not count towards this bound, so more browsers could be open.
 - With `FailurePolicy::FailFast`, a test that was waiting for its browser session when another test failed started
@@ -189,12 +196,12 @@ does what it is told. See "Changed" for the renames.
   `BrowserTests::sequential()` / `BrowserTests::parallel(Parallelism)` and the chaining `with` / `with_group`, and
   `BrowserTestRunner::with_test_parallelism` is removed. `BrowserTestRecord::slot` is replaced by
   `BrowserTestRecord::group`.
-- **Breaking:** Configuration types have short, consistent names, and every runner option takes its type directly
-  (no `impl Into`):
-  - `BrowserTestVisibility` → `Visibility`, `PauseConfig` → `Pause`, `DriverOutputConfig` → `DriverOutput`,
-    `BrowserTimeouts` → `Timeouts`, `ElementQueryWaitConfig` → `ElementQueryWait` (and
-    `ElementQueryWaitConfigError` → `ElementQueryWaitError`), `BrowserTestParallelism` → `Parallelism`,
-    `BrowserTestFailurePolicy` → `FailurePolicy`.
+- **Breaking:** Configuration types have short, consistent names, and every runner option takes its type directly (no
+  `impl Into`):
+    - `BrowserTestVisibility` → `Visibility`, `PauseConfig` → `Pause`, `DriverOutputConfig` → `DriverOutput`,
+      `BrowserTimeouts` → `Timeouts`, `ElementQueryWaitConfig` → `ElementQueryWait` (and
+      `ElementQueryWaitConfigError` → `ElementQueryWaitError`), `BrowserTestParallelism` → `Parallelism`,
+      `BrowserTestFailurePolicy` → `FailurePolicy`.
 - **Breaking:** The `Resolved*` types (`ResolvedBrowserTestVisibility`, `ResolvedPauseConfig`,
   `ResolvedDriverOutputConfig`) are removed. `from_env()` and `from_env_var(var)` read the environment when they are
   called and return `Result<Option<Self>, InvalidEnvVar>`: `None` for an unset or empty variable, so the caller picks
@@ -220,7 +227,8 @@ does what it is told. See "Changed" for the renames.
 
 ### Removed
 
-- **Breaking:** The deprecated `BrowserTestRunner::with_webdriver_timeouts`, `BrowserTestRunner::with_browser_driver_output`,
+- **Breaking:** The deprecated `BrowserTestRunner::with_webdriver_timeouts`,
+  `BrowserTestRunner::with_browser_driver_output`,
   and `BrowserDriverOutputConfig`.
 
 ## [0.4.0] - 2026-06-17
@@ -236,7 +244,8 @@ does what it is told. See "Changed" for the renames.
 
 ### Changed
 
-- **Breaking:** `PauseConfig::from_env` and `PauseConfig::from_env_var` now store an environment-backed spec and read the
+- **Breaking:** `PauseConfig::from_env` and `PauseConfig::from_env_var` now store an environment-backed spec and read
+  the
   environment when the config is resolved. Previously they read the environment immediately.
 - **Breaking:** `PauseConfig::is_enabled` now resolves the config before returning the enabled state and is no longer a
   `const fn`.
@@ -301,7 +310,9 @@ does what it is told. See "Changed" for the renames.
 - Added environment-variable controls for visibility, pauses, and browser-driver output diagnostics.
 - Added re-exports for `async_trait::async_trait`, `chrome_for_testing_manager::Channel` and the `thirtyfour` crate.
 
-[Unreleased]: https://github.com/lpotthast/browser-test/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/lpotthast/browser-test/compare/v0.6.1...HEAD
+
+[0.6.1]: https://github.com/lpotthast/browser-test/compare/v0.6.0...v0.6.1
 
 [0.6.0]: https://github.com/lpotthast/browser-test/compare/v0.5.0...v0.6.0
 

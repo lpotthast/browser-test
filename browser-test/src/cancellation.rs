@@ -59,17 +59,17 @@ impl Cancellation {
     /// runners send. On Windows, it is Ctrl-C. A second signal exits the process right away, with
     /// status 130, in case the shutdown hangs.
     ///
-    /// The process listens for the signals once, from the first run with tests of any runner using
-    /// this on, on a thread of its own. Until then, the signals end the process as usual. From then on,
-    /// they no longer end the process on their own, for the rest of the process. Call this as
-    /// often as you like: every runner using it is cancelled on the first signal, also those
-    /// running no tests at the time, so that their later runs are cancelled right away. A run
-    /// fails with [`BrowserTestError::ListenForShutdownSignals`] if the signals cannot be listened
-    /// for.
+    /// The process starts listening for the signals on a thread of its own when the first runner
+    /// using this starts a run with tests. Until then, the signals end the process as usual. From
+    /// then on, and for the rest of the process, they no longer end it on their own. You can call
+    /// this as often as you like. The first signal cancels every runner using it, including runners
+    /// that are not running tests at the time, so that their later runs are cancelled right away.
+    /// A run fails with [`BrowserTestError::ListenForShutdownSignals`] if the process cannot listen
+    /// for the signals.
     ///
-    /// This is a convenience for applications that do not handle these signals themselves.
-    /// Handlers of your own would react to every signal next to these. Cancel a token from them
-    /// instead, and pass it with [`Self::from_token`].
+    /// Use this if your application does not handle these signals itself. Handlers of your own
+    /// would react to every signal alongside these. Cancel a token from your handlers instead, and
+    /// pass it with [`Self::from_token`].
     #[must_use]
     pub fn on_shutdown_signals() -> Self {
         Self {
