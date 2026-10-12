@@ -1,6 +1,6 @@
 //! Failure reports that say what went wrong, when, and at which line of test code.
 //!
-//! A failing test's report shows, without anything in the test code:
+//! A failing test's report shows the following, without any extra code in the tests:
 //!
 //! - **Where**: the frames of the test code that led to every error ([`TestCodeFrames`]),
 //!   innermost first. An error created inside a helper (a lookup, a wait) points at the test line
@@ -312,7 +312,7 @@ impl fmt::Display for TestCodeFrames {
 }
 
 /// The readable part of a demangled symbol: its last two path segments, without closures, hashes
-/// and generic arguments; a trait method is named after the implementing type.
+/// and generic arguments. A trait method is named after the implementing type.
 /// `<my_tests::Page<'_> as my_tests::Actions>::css::{{closure}}::h12ab` is `Page::css`.
 fn function_name(symbol: &str) -> String {
     let mut path = String::new();

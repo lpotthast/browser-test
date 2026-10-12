@@ -14,3 +14,7 @@ thiserror = { version = "2.0.18", default-features = false, features = ["std"] }
 tokio = { version = "1.52.3", default-features = false, features = ["macros", "rt-multi-thread"] }
 tracing = { version = "0.1.44", default-features = false, features = ["attributes", "std"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["ansi", "fmt", "registry"] }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }

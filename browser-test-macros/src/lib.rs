@@ -68,7 +68,7 @@ use syn::ItemFn;
 ///
 /// The context can be unsized (`&str`) or borrow from the run (`&Page<'_>`): the generated test
 /// then implements `BrowserTest<Page<'a>>` for every lifetime `'a`. Lifetime parameters are
-/// allowed; type and const parameters, `self` and `&mut` arguments are not. A test without
+/// allowed. Type and const parameters, `self` and `&mut` arguments are not. A test without
 /// arguments implements `BrowserTest<()>`.
 ///
 /// A single `&WebDriver` argument is rejected, as a single argument is the context. Take

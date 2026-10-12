@@ -111,7 +111,7 @@ where
         std::any::type_name::<Self>().into()
     }
 
-    /// What the test checks, in prose, if it says.
+    /// A description of what the test checks, if it has one.
     ///
     /// [`#[browser_test]`](macro@crate::browser_test) returns the function's doc comments. Unlike the
     /// name, the description is not matched by filters. Defaults to `None`.
@@ -421,7 +421,8 @@ where
         self
     }
 
-    /// Add a nested group, which runs its entries as it says, as one entry of this group.
+    /// Add a nested group as one entry of this group. The nested group runs its own entries
+    /// sequentially or in parallel, as it was created.
     ///
     /// Not to be confused with [`Self::with_test_group`], which adds the tests of a logical group
     /// as entries of this group.

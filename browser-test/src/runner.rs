@@ -70,7 +70,13 @@ impl Visibility {
     }
 }
 
-/// Runs [`crate::BrowserTest`] implementations through Chrome for Testing.
+/// Runs browser tests.
+///
+/// Pass the tests to [`Self::run`] as [`BrowserTests`], together with the context every test
+/// receives. The runner downloads Chrome for Testing, starts chromedriver, runs every test in a
+/// `WebDriver` session of its own, and shuts chromedriver down at the end. The builder methods
+/// configure the browser, how sessions are prepared, and what happens when tests fail or run
+/// slowly.
 #[derive(Clone)]
 pub struct BrowserTestRunner {
     channel: Channel,
@@ -264,7 +270,7 @@ impl BrowserTestRunner {
     ///
     /// [`rootcause`] takes one set of hooks per process. An application installing hooks of its
     /// own adds browser-test's to them with [`failure_report::hooks`](crate::failure_report::hooks),
-    /// and runs then install none, whatever this says. Disable it only to go without the hooks.
+    /// and runs then install none, whatever this says. Disable it only if you don't want the hooks.
     #[must_use]
     pub const fn with_failure_report_hooks(mut self, install: bool) -> Self {
         self.failure_report_hooks = install;
@@ -311,7 +317,7 @@ impl BrowserTestRunner {
     /// every test running in a fresh session. Defaults to [`SessionReuse::disabled`].
     ///
     /// Reuse makes a run create about as many sessions as tests run at the same time, plus spares,
-    /// however many tests it has: worthwhile when a run has many short tests. See [`SessionReuse`]
+    /// however many tests it has. This pays off when a run has many short tests. See [`SessionReuse`]
     /// for what the reset restores, and [`SessionSettings::with_fresh_session`] for tests that
     /// need a session no other test ran in.
     #[must_use]
@@ -330,7 +336,7 @@ impl BrowserTestRunner {
     }
 
     /// Add a consumer of the report of every run, e.g. [`crate::StderrSummary`] to print a
-    /// summary of where the run spent its time.
+    /// summary of the run's test results and timings.
     ///
     /// Consumers are called in the order they were added. Without a consumer, the report is
     /// neither printed nor logged. See [`RunReportConsumer`].

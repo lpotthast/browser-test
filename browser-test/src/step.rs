@@ -183,7 +183,7 @@ pub(crate) fn in_test() -> bool {
     CURRENT_TEST.try_with(|_| ()).is_ok()
 }
 
-/// Record where the running test panicked (called by the panic hook; outside a test, it does
+/// Record where the running test panicked (called by the panic hook. Outside a test, it does
 /// nothing). The last panic of a test counts: a panic failing the test ends it, while one before
 /// was caught by the test itself.
 pub(crate) fn record_panic(details: PanicDetails) {
@@ -271,9 +271,13 @@ mod tests {
 
         let first = first.take();
         let second = second.take();
-        assert_that!(first).keys().contains_exactly_in_any_order(["goto"]);
+        assert_that!(first)
+            .keys()
+            .contains_exactly_in_any_order(["goto"]);
         assert_that!(first["goto"].count).is_equal_to(2);
-        assert_that!(second).keys().contains_exactly_in_any_order(["wait"]);
+        assert_that!(second)
+            .keys()
+            .contains_exactly_in_any_order(["wait"]);
         assert_that!(second["wait"].count).is_equal_to(1);
     }
 
@@ -300,7 +304,9 @@ mod tests {
         }));
 
         let steps = recorder.take();
-        assert_that!(steps).keys().contains_exactly_in_any_order(["assert", "wait"]);
+        assert_that!(steps)
+            .keys()
+            .contains_exactly_in_any_order(["assert", "wait"]);
         let recent = recorder
             .recent_steps()
             .expect("the steps are recent")

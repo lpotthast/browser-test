@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-/// Where a browser test run spent its time.
+/// The outcome and timing of every test of a browser test run.
 ///
 /// Handed to the [`crate::RunReportConsumer`]s of the runner at the end of every run. Its `Display`
 /// implementation renders a human-readable summary, as printed by [`crate::StderrSummary`].
@@ -82,7 +82,7 @@ pub struct BrowserTestRecord {
 
     /// Time spent quitting the session after the test. Quitting runs in the background, while the
     /// next test already runs. `None` if the session was kept to run another test (see
-    /// [`crate::SessionReuse`]; resetting it counts towards that test's
+    /// [`crate::SessionReuse`], where resetting it counts towards that test's
     /// [`SessionPreparation::Reset`]), or if it could not be created or set up.
     pub teardown: Option<Duration>,
 

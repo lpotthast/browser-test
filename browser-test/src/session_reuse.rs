@@ -3,7 +3,6 @@
 use std::{collections::BTreeSet, num::NonZeroUsize, time::Duration};
 
 use futures_util::StreamExt as _;
-
 use rootcause::{Report, prelude::ResultExt as _};
 use thirtyfour::{
     BrowserCapabilitiesHelper as _, CapabilitiesHelper as _, ChromeCapabilities,
@@ -30,17 +29,19 @@ pub(crate) const DEFAULT_SESSION_REUSE_ENV: &str = "BROWSER_TEST_SESSION_REUSE";
 /// [`SessionReset`].
 ///
 /// A test that needs a browser no test ran in (e.g. one measuring a first page load, with empty
-/// caches) says so with [`SessionSettings::with_fresh_session`](crate::SessionSettings::with_fresh_session):
-/// the pool gives it a session no test ran in, creating one if none is ready. Afterwards its session returns to the pool like
-/// any other. A session whose reset fails (e.g. its browser crashed) quits.
+/// caches) says so with [`SessionSettings::with_fresh_session`](crate::SessionSettings::with_fresh_session).
+/// The pool gives it a session no test ran in, and creates one if none is ready. Afterwards, its
+/// session returns to the pool like any other. A session whose reset fails (e.g. its browser
+/// crashed) quits.
 ///
 /// With reuse enabled, sessions start Chrome without its back/forward cache
 /// (`--disable-features=BackForwardCache`, merged into a `--disable-features` of your own), unless
-/// [`Self::with_back_forward_cache`] enables it: both resets then behave alike within a test (a
-/// page left is unloaded, going back loads it again), and no cached page keeps a renderer process
-/// alive across tests of a [`SessionReset::Manual`] session. A test with an element query wait of
-/// its own gets a session created for it, which is set up the same way (also running the test in
-/// a user context of its own with [`SessionReset::NewContext`]), and quits after the test.
+/// [`Self::with_back_forward_cache`] enables it. Both resets then behave alike within a test (a
+/// page left is unloaded, and going back loads it again), and no cached page keeps a renderer
+/// process alive across tests of a [`SessionReset::Manual`] session. A test with an element query
+/// wait of its own gets a session created for it. That session is set up the same way (with
+/// [`SessionReset::NewContext`], the test also runs in a user context of its own), and quits
+/// after the test.
 /// Sessions are created with `WebDriver` `BiDi` enabled (`webSocketUrl`), which both resets use.
 ///
 /// The settings ([`Self::with_reset`], [`Self::with_max_tests_per_session`],
@@ -186,46 +187,47 @@ impl SessionReuse {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum SessionReset {
     /// Every test runs in a tab of a user context of its own (`WebDriver` `BiDi`'s isolated
-    /// browser profiles, like incognito windows); the reset removes it. The default.
+    /// browser profiles, like incognito windows). The reset removes it. The default.
     ///
-    /// Complete by construction: removing the context drops its tabs and windows (with their
-    /// history, page state and CDP overrides), cookies, storage of every origin, caches and
-    /// permissions, and the renderer processes of its pages, whatever a test changed. Nothing is
-    /// kept: every test starts with empty caches, e.g. downloads and compiles the app's scripts
-    /// and WebAssembly again.
+    /// Removing the context drops its tabs and windows (with their history, page state and CDP
+    /// overrides), cookies, storage of every origin, caches and permissions, and the renderer
+    /// processes of its pages. This removes everything a test may have changed. In turn, nothing
+    /// is kept. Every test starts with empty caches and, for example, downloads and compiles the
+    /// app's scripts and WebAssembly again.
     ///
     /// The session's first tab stays open in the browser's default context, so a test sees two
-    /// windows. A test that leaves state in the default context, which removing a user context
-    /// doesn't remove, makes its session quit instead of being reset: by opening windows with
-    /// `WebDriver`'s New Window command (they open in the default context), or by navigating the
-    /// first tab.
+    /// windows. Removing a user context leaves the default context untouched. If a test leaves
+    /// state there, its session quits instead of being reset. This happens when a test opens a
+    /// window with `WebDriver`'s New Window command (which opens in the default context), or
+    /// navigates the first tab.
     #[default]
     NewContext,
 
-    /// Every test of a session runs in the session's one tab; the reset clears what tests can
-    /// change, item by item, and keeps the [`CachedData`] listed, which only tests that load the
-    /// same unchanging resources can rely on being safe.
+    /// Every test of a session runs in the session's one tab. The reset clears what tests can
+    /// change, item by item, and keeps the listed [`CachedData`]. Keeping cached data is only safe
+    /// if the tests load resources that don't change during the run.
     ///
     /// The reset:
-    /// - closes every other window (popups, `WebDriver`'s New Window);
-    /// - navigates the tab to an empty page in a new renderer process (a `data:` URL; the test's
-    ///   page and its process go, with the caches in it), and clears its history;
+    /// - closes every other window (popups, `WebDriver`'s New Window),
+    /// - navigates the tab to an empty page in a new renderer process (a `data:` URL, so the test's
+    ///   page and its process go, with the caches in it), and clears its history,
     /// - clears cookies, and the storage (`localStorage`, `sessionStorage`, `IndexedDB`, cache
     ///   storage, service workers, file systems) of every origin a page navigated to since the last
-    ///   reset, in any window or frame, also when no history lists it anymore (`location.replace`);
+    ///   reset, in any window or frame, also when no history lists it anymore (`location.replace`),
     /// - resets permissions granted through CDP, and the CDP emulation overrides (device metrics,
     ///   user agent, geolocation, media, timezone, locale, touch, CPU throttling, idle state,
-    ///   focus emulation, background color, script execution);
+    ///   focus emulation, background color, script execution),
     /// - clears the HTTP cache, unless kept ([`CachedData::Http`]).
     ///
-    /// State it doesn't list survives into the next test: e.g. other CDP domains' settings, Shared
-    /// Storage, Storage Buckets, Interest Groups (the shader cache is kept: compiled GPU shaders,
-    /// invisible to pages). Use [`Self::NewContext`] for tests that change such state, or to
-    /// cross-check.
+    /// State not listed here survives into the next test, e.g. other CDP domains' settings,
+    /// Shared Storage, Storage Buckets and Interest Groups. The shader cache is kept as well. It
+    /// holds compiled GPU shaders and is invisible to pages. Use [`Self::NewContext`] for tests
+    /// that change such state, or to cross-check.
     ///
-    /// The reset learns where pages navigated from `WebDriver` `BiDi` events. A test that subscribes
-    /// to more than a thousand `BiDi` events of its own can push some of them out of the buffer
-    /// they share, and the storage of origins only those named survives.
+    /// The reset learns where pages navigated from `WebDriver` `BiDi` events. A test that
+    /// subscribes to more than a thousand `BiDi` events of its own can push some of these out of
+    /// the buffer they share. The storage of origins that only the lost events named then
+    /// survives.
     Manual(KeptCaches),
 }
 
