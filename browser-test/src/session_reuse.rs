@@ -29,10 +29,13 @@ pub(crate) const DEFAULT_SESSION_REUSE_ENV: &str = "BROWSER_TEST_SESSION_REUSE";
 /// [`SessionReset`].
 ///
 /// A test that needs a browser no test ran in (e.g. one measuring a first page load, with empty
-/// caches) says so with [`SessionSettings::with_fresh_session`](crate::SessionSettings::with_fresh_session).
+/// caches) says so with [`TestSettings::with_fresh_session`](crate::TestSettings::with_fresh_session).
 /// The pool gives it a session no test ran in, and creates one if none is ready. Afterwards, its
 /// session returns to the pool like any other. A session whose reset fails (e.g. its browser
-/// crashed) quits.
+/// crashed) quits. So does one whose reset takes longer than 30 seconds, after the runner closed
+/// its frozen pages, as it does for a test that exceeded its time limit (see
+/// [`BrowserTestRunner::with_time_limit`](crate::BrowserTestRunner::with_time_limit)). A session
+/// whose test timed out is never reset.
 ///
 /// With reuse enabled, sessions start Chrome without its back/forward cache
 /// (`--disable-features=BackForwardCache`, merged into a `--disable-features` of your own), unless
@@ -185,6 +188,7 @@ impl SessionReuse {
 /// differ in how, and in what may be kept: run a suite with each to cross-check that its tests
 /// don't depend on the strategy.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum SessionReset {
     /// Every test runs in a tab of a user context of its own (`WebDriver` `BiDi`'s isolated
     /// browser profiles, like incognito windows). The reset removes it. The default.

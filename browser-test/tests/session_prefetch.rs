@@ -14,7 +14,7 @@ use assertr::prelude::*;
 use browser_test::{
     BrowserTest, BrowserTestError, BrowserTestRunReport, BrowserTestRunner, BrowserTests,
     CachedData, Cancellation, ElementQueryWait, FailurePolicy, Parallelism, SessionPreparation,
-    SessionReset, SessionReuse, SessionSettings, StepExt, TestOutcome, TracingSummary, async_trait,
+    SessionReset, SessionReuse, StepExt, TestOutcome, TestSettings, TracingSummary, async_trait,
     thirtyfour::{ChromiumLikeCapabilities, WebDriver},
 };
 use rootcause::{Report, report};
@@ -103,8 +103,8 @@ impl BrowserTest<str> for Visit {
         format!("visit {}", self.index).into()
     }
 
-    fn session_settings(&self) -> SessionSettings {
-        let settings = SessionSettings::new().with_fresh_session(self.fresh_session);
+    fn settings(&self) -> TestSettings {
+        let settings = TestSettings::new().with_fresh_session(self.fresh_session);
         if self.dedicated {
             settings.with_element_query_wait(ElementQueryWait::new(
                 Duration::from_secs(1),
@@ -419,13 +419,13 @@ async fn nested_groups_limit_what_runs_at_the_same_time() {
     assert_that!(all.max_running.load(Ordering::SeqCst)).is_equal_to(2);
     assert_that!(serial.max_running.load(Ordering::SeqCst)).is_equal_to(1);
     assert_that!(serial.started.lock().unwrap().clone()).is_equal_to(vec![2, 3]);
-    let groups: Vec<Option<&str>> = outcome
+    let paths: Vec<Option<&str>> = outcome
         .report
         .tests
         .iter()
-        .map(|test| test.group.as_deref())
+        .map(|test| test.path.as_deref())
         .collect();
-    assert_that!(groups).is_equal_to(vec![None, None, Some("serial"), Some("serial")]);
+    assert_that!(paths).is_equal_to(vec![None, None, Some("serial"), Some("serial")]);
     assert_that!(outcome.report.groups.len()).is_equal_to(1);
     assert_that!(outcome.report.groups[0].name.as_str()).is_equal_to("serial");
     // The serial group ran its two tests one after another, alongside the other two tests.
@@ -501,6 +501,7 @@ fn preparations(outcome: &Run) -> Vec<&'static str> {
             {
                 SessionPreparation::Created(_) => "created",
                 SessionPreparation::Reset(_) => "reset",
+                _ => "other",
             }
         })
         .collect()
@@ -1066,14 +1067,14 @@ impl BrowserTest<str> for GoesBack {
         "goes back".into()
     }
 
-    fn session_settings(&self) -> SessionSettings {
+    fn settings(&self) -> TestSettings {
         if self.dedicated {
-            SessionSettings::new().with_element_query_wait(ElementQueryWait::new(
+            TestSettings::new().with_element_query_wait(ElementQueryWait::new(
                 Duration::from_secs(1),
                 Duration::from_millis(100),
             ))
         } else {
-            SessionSettings::new()
+            TestSettings::new()
         }
     }
 

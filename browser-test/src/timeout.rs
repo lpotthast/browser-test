@@ -4,7 +4,7 @@ use std::time::Duration;
 ///
 /// Every timeout is optional. A timeout left unset is not updated, so the session keeps the
 /// runner's value (see [`BrowserTestRunner::with_timeouts`](crate::BrowserTestRunner::with_timeouts)),
-/// or else `ChromeDriver`'s default. A test's [`SessionSettings::with_timeouts`](crate::SessionSettings::with_timeouts)
+/// or else `ChromeDriver`'s default. A test's [`TestSettings::with_timeouts`](crate::TestSettings::with_timeouts)
 /// overrides the runner's timeouts one by one: those it sets replace the runner's, the others stay.
 ///
 /// # Examples

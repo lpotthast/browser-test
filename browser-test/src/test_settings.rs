@@ -1,37 +1,43 @@
-//! What a test needs of its session.
+//! What a test needs of the runner.
+
+use std::time::Duration;
 
 use crate::{ElementQueryWait, Timeouts};
 
-/// What a test needs of the session it runs in, returned by
-/// [`BrowserTest::session_settings`](crate::BrowserTest::session_settings).
+/// What a test needs of the runner: settings of the session it runs in, and how long it may run.
+/// Returned by [`BrowserTest::settings`](crate::BrowserTest::settings).
 ///
 /// The default, [`Self::new`], takes everything from the runner. Settings a test sets override the
-/// runner's for that test only.
+/// runner's for that test only. A test wrapping another one forwards all of them at once by
+/// returning the wrapped test's settings.
 ///
 /// # Examples
 ///
 /// ```
 /// use std::time::Duration;
 ///
-/// use browser_test::{ElementQueryWait, SessionSettings, Timeouts};
+/// use browser_test::{ElementQueryWait, TestSettings, Timeouts};
 ///
-/// let settings = SessionSettings::new()
+/// let settings = TestSettings::new()
 ///     .with_timeouts(Timeouts::new().with_page_load(Duration::from_secs(30)))
 ///     .with_element_query_wait(ElementQueryWait::new(
 ///         Duration::from_secs(20),
 ///         Duration::from_millis(100),
 ///     ))
-///     .with_fresh_session(true);
+///     .with_fresh_session(true)
+///     .with_time_limit(Duration::from_secs(10));
 /// assert!(settings.fresh_session());
+/// assert_eq!(settings.time_limit(), Some(Duration::from_secs(10)));
 /// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub struct SessionSettings {
+pub struct TestSettings {
     timeouts: Timeouts,
     element_query_wait: Option<ElementQueryWait>,
     fresh_session: bool,
+    time_limit: Option<Duration>,
 }
 
-impl SessionSettings {
+impl TestSettings {
     /// The runner's settings, unchanged.
     #[must_use]
     pub const fn new() -> Self {
@@ -39,6 +45,7 @@ impl SessionSettings {
             timeouts: Timeouts::new(),
             element_query_wait: None,
             fresh_session: false,
+            time_limit: None,
         }
     }
 
@@ -79,6 +86,16 @@ impl SessionSettings {
         self
     }
 
+    /// Set how long the test's body may run before it fails as timed out, instead of the runner's
+    /// limit ([`BrowserTestRunner::with_time_limit`](crate::BrowserTestRunner::with_time_limit), a
+    /// last resort). Set a limit fitting the test where you know how long it takes, so that a test
+    /// that hangs (e.g. on a page it froze) fails soon. `#[browser_test(time_limit = ...)]` sets it.
+    #[must_use]
+    pub const fn with_time_limit(mut self, limit: Duration) -> Self {
+        self.time_limit = Some(limit);
+        self
+    }
+
     /// The test's timeouts, overriding the runner's. See [`Self::with_timeouts`].
     #[must_use]
     pub const fn timeouts(self) -> Timeouts {
@@ -96,5 +113,35 @@ impl SessionSettings {
     #[must_use]
     pub const fn fresh_session(self) -> bool {
         self.fresh_session
+    }
+
+    /// The test's time limit, if it overrides the runner's. See [`Self::with_time_limit`].
+    #[must_use]
+    pub const fn time_limit(self) -> Option<Duration> {
+        self.time_limit
+    }
+}
+
+/// The runner's settings for tests that don't set their own (see [`TestSettings`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TestDefaults {
+    /// See [`BrowserTestRunner::with_timeouts`](crate::BrowserTestRunner::with_timeouts).
+    pub(crate) timeouts: Timeouts,
+    /// See [`BrowserTestRunner::with_element_query_wait`](crate::BrowserTestRunner::with_element_query_wait).
+    pub(crate) element_query_wait: Option<ElementQueryWait>,
+    /// See [`BrowserTestRunner::with_time_limit`](crate::BrowserTestRunner::with_time_limit).
+    pub(crate) time_limit: Duration,
+}
+
+impl TestDefaults {
+    /// Ten minutes: a last resort against tests that hang, longer than any test should run.
+    pub(crate) const DEFAULT_TIME_LIMIT: Duration = Duration::from_secs(600);
+
+    pub(crate) const fn new() -> Self {
+        Self {
+            timeouts: Timeouts::new(),
+            element_query_wait: None,
+            time_limit: Self::DEFAULT_TIME_LIMIT,
+        }
     }
 }

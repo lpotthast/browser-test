@@ -8,17 +8,19 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use assertr::prelude::*;
 use browser_test::{
     BrowserTest, BrowserTestError, BrowserTestRunReport, BrowserTestRunner, BrowserTests,
-    Cancellation, CancellationToken, FailurePolicy, Parallelism, SessionSettings, StepExt,
-    TestOutcome, async_trait, browser_test,
+    Cancellation, CancellationToken, FailurePolicy, Parallelism, StepExt, TestOutcome,
+    TestSettings, async_trait, browser_test,
     thirtyfour::{By, ChromiumLikeCapabilities, WebDriver, prelude::ElementQueryable},
 };
 use rootcause::{Report, prelude::ResultExt};
 use serial_test::serial;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 type RunnerResult = Result<(), Report<BrowserTestError>>;
 
@@ -61,6 +63,12 @@ enum IntegrationTestError {
 
     #[error("intentional browser test failure")]
     IntentionalFailure,
+
+    #[error("failed to freeze the page")]
+    FreezePage,
+
+    #[error("failed to open a dialog")]
+    OpenDialog,
 
     #[error("failed to focus an element from script")]
     FocusElement,
@@ -315,7 +323,7 @@ impl BrowserTest<IntegrationContext, IntegrationTestError> for PanicTest {
 #[derive(Clone, Copy)]
 enum MetadataPanicHook {
     Name,
-    SessionSettings,
+    Settings,
 }
 
 struct MetadataPanicTest {
@@ -332,12 +340,12 @@ impl BrowserTest<IntegrationContext, IntegrationTestError> for MetadataPanicTest
         Cow::Borrowed("metadata panic")
     }
 
-    fn session_settings(&self) -> SessionSettings {
-        if matches!(self.panic_in, MetadataPanicHook::SessionSettings) {
-            panic!("session settings hook failed");
+    fn settings(&self) -> TestSettings {
+        if matches!(self.panic_in, MetadataPanicHook::Settings) {
+            panic!("settings hook failed");
         }
 
-        SessionSettings::new()
+        TestSettings::new()
     }
 
     async fn run(
@@ -617,7 +625,7 @@ async fn run_all_reports_metadata_hook_panics_and_runs_remaining_page_title_test
                     panic_in: MetadataPanicHook::Name,
                 })
                 .with(MetadataPanicTest {
-                    panic_in: MetadataPanicHook::SessionSettings,
+                    panic_in: MetadataPanicHook::Settings,
                 })
                 .with(page_title_test_with_counter(
                     "page title",
@@ -632,7 +640,7 @@ async fn run_all_reports_metadata_hook_panics_and_runs_remaining_page_title_test
         .contains(BrowserTestError::RunTests { failed_tests: 2 }.to_string());
     assert_that!(err.children().len()).is_equal_to(2);
     assert_that!(format!("{err:?}")).contains("unnamed test at index 0");
-    assert_that!(format!("{err:?}")).contains("session settings hook failed");
+    assert_that!(format!("{err:?}")).contains("settings hook failed");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -784,18 +792,12 @@ async fn cancellation_stops_the_run_and_its_browsers() {
     let profiles_dir = ScratchDir::new("cancellation-profiles");
     let cancellation = CancellationToken::new();
     let started = Arc::new(AtomicUsize::new(0));
-    let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let reported = Arc::clone(&outcomes);
+    let (runner, outcomes) = record_outcomes(
+        runner_with(Cancellation::from_token(cancellation.clone()))
+            .with_chrome_profiles_dir(profiles_dir.path()),
+    );
 
-    let err = runner_with(Cancellation::from_token(cancellation.clone()))
-        .with_chrome_profiles_dir(profiles_dir.path())
-        .with_report_consumer(move |report: &BrowserTestRunReport| {
-            *reported.lock().unwrap() = report
-                .tests
-                .iter()
-                .map(|test| (test.name.clone(), test.outcome))
-                .collect();
-        })
+    let err = runner
         .run(
             &IntegrationContext::default(),
             BrowserTests::sequential()
@@ -824,6 +826,297 @@ async fn cancellation_stops_the_run_and_its_browsers() {
         })
     };
     assert_that!(eventually(|| !leftovers())).is_true();
+}
+
+/// Opens the fixture page and freezes it: its main thread runs an endless chain of microtasks.
+/// Every later `WebDriver` command of the session waits for it.
+struct FreezingTest;
+
+#[async_trait]
+impl BrowserTest<IntegrationContext, IntegrationTestError> for FreezingTest {
+    fn name(&self) -> Cow<'_, str> {
+        Cow::Borrowed("freezing")
+    }
+
+    fn settings(&self) -> TestSettings {
+        TestSettings::new().with_time_limit(Duration::from_secs(3))
+    }
+
+    async fn run(
+        &self,
+        driver: &WebDriver,
+        context: &IntegrationContext,
+    ) -> Result<(), Report<IntegrationTestError>> {
+        driver
+            .goto(context.page_url)
+            .await
+            .context(IntegrationTestError::OpenTestPage)?;
+        driver
+            .execute(
+                "setTimeout(() => {
+                     const spin = () => queueMicrotask(spin);
+                     spin();
+                 });",
+                vec![],
+            )
+            .await
+            .context(IntegrationTestError::FreezePage)?;
+        // Waits for the frozen page.
+        driver
+            .title()
+            .await
+            .context(IntegrationTestError::ReadTitle)?;
+        Ok(())
+    }
+}
+
+/// The name and outcome of every test of a run.
+type Outcomes = Arc<std::sync::Mutex<Vec<(String, TestOutcome)>>>;
+
+/// `runner`, recording the outcomes of the tests of its last run.
+fn record_outcomes(runner: BrowserTestRunner) -> (BrowserTestRunner, Outcomes) {
+    let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let reported = Arc::clone(&outcomes);
+    let runner = runner.with_report_consumer(move |report: &BrowserTestRunReport| {
+        *reported.lock().unwrap() = report
+            .tests
+            .iter()
+            .map(|test| (test.name.clone(), test.outcome))
+            .collect();
+    });
+    (runner, outcomes)
+}
+
+/// A test exceeding its own time limit on a frozen page times out, the page is closed (so its
+/// session quits), the report names it, and the next test runs.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_frozen_page_times_out_and_is_closed() {
+    let (runner, outcomes) = record_outcomes(runner());
+    let start = Instant::now();
+
+    let err = runner
+        .run(
+            &IntegrationContext::default(),
+            BrowserTests::sequential()
+                .with(FreezingTest)
+                .with(page_title_test("after a frozen page")),
+        )
+        .await
+        .expect_err("the frozen test times out");
+
+    let report = format!("{err:?}");
+    assert_that!(&report)
+        .contains("Browser test 'freezing' exceeded its time limit of 3.00s.")
+        .contains("Frozen: its page didn't respond within 2s")
+        .contains(FIXTURE_PAGE_URL);
+    assert_that!(outcomes.lock().unwrap().clone()).is_equal_to(vec![
+        ("freezing".to_owned(), TestOutcome::TimedOut),
+        ("after a frozen page".to_owned(), TestOutcome::Passed),
+    ]);
+    // Without closing the page, quitting its session waits for it.
+    assert_that!(start.elapsed()).is_less_than(Duration::from_secs(60));
+}
+
+/// A test without a time limit of its own exceeding the runner's on pages that respond times out,
+/// and its report says so.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_test_waiting_forever_times_out() {
+    let (runner, outcomes) = record_outcomes(runner().with_time_limit(Duration::from_secs(1)));
+
+    let err = runner
+        .run(
+            &IntegrationContext::default(),
+            BrowserTests::sequential().with(RunForeverTest::new(|| {})),
+        )
+        .await
+        .expect_err("the test times out");
+
+    assert_that!(format!("{err:?}"))
+        .contains("Browser test 'run forever' exceeded its time limit of 1.00s.")
+        .contains("Its pages respond: none of them is frozen.");
+    assert_that!(outcomes.lock().unwrap().clone())
+        .is_equal_to(vec![("run forever".to_owned(), TestOutcome::TimedOut)]);
+}
+
+/// The page `serve_frame_host` serves at `/frame`.
+const FRAME_PAGE: &str = "<!doctype html><title>frame</title>";
+
+/// Serves a page at `/` whose frame comes from another site (`127.0.0.1` rather than `localhost`),
+/// so that it runs in a process of its own, and the frame at `/frame`. Returns the page's URL.
+async fn serve_frame_host() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("binding a local port should succeed");
+    let port = listener
+        .local_addr()
+        .expect("listener should have an address")
+        .port();
+    let host_page = format!(
+        "<!doctype html><title>frame host</title><iframe src=\"http://127.0.0.1:{port}/frame\"></iframe>"
+    );
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let host_page = host_page.clone();
+            tokio::spawn(async move {
+                let mut buffer = [0u8; 4096];
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..read]);
+                let body = if request.starts_with("GET /frame ") {
+                    FRAME_PAGE
+                } else {
+                    host_page.as_str()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            });
+        }
+    });
+    format!("http://localhost:{port}/")
+}
+
+/// Opens `url`, whose frame comes from another site, and freezes the frame: its main thread runs
+/// an endless chain of microtasks. Every later `WebDriver` command in the frame waits for it.
+struct FreezingFrameTest {
+    url: String,
+}
+
+#[async_trait]
+impl BrowserTest<IntegrationContext, IntegrationTestError> for FreezingFrameTest {
+    fn name(&self) -> Cow<'_, str> {
+        Cow::Borrowed("freezing frame")
+    }
+
+    fn settings(&self) -> TestSettings {
+        TestSettings::new().with_time_limit(Duration::from_secs(3))
+    }
+
+    async fn run(
+        &self,
+        driver: &WebDriver,
+        _context: &IntegrationContext,
+    ) -> Result<(), Report<IntegrationTestError>> {
+        driver
+            .goto(&self.url)
+            .await
+            .context(IntegrationTestError::OpenTestPage)?;
+        driver
+            .enter_frame(0)
+            .await
+            .context(IntegrationTestError::FreezePage)?;
+        driver
+            .execute(
+                "setTimeout(() => {
+                     const spin = () => queueMicrotask(spin);
+                     spin();
+                 });",
+                vec![],
+            )
+            .await
+            .context(IntegrationTestError::FreezePage)?;
+        // Waits for the frozen frame.
+        driver
+            .execute("return document.title;", vec![])
+            .await
+            .context(IntegrationTestError::ReadTitle)?;
+        Ok(())
+    }
+}
+
+/// A frozen frame of another site (an out-of-process `iframe`) is found and closed as well, and
+/// the next test runs.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_frozen_frame_of_another_site_is_closed() {
+    let url = serve_frame_host().await;
+    let (runner, outcomes) = record_outcomes(runner());
+    let start = Instant::now();
+
+    let err = runner
+        .run(
+            &IntegrationContext::default(),
+            BrowserTests::sequential()
+                .with(FreezingFrameTest { url })
+                .with(page_title_test("after a frozen frame")),
+        )
+        .await
+        .expect_err("the frozen test times out");
+
+    assert_that!(format!("{err:?}"))
+        .contains("Browser test 'freezing frame' exceeded its time limit of 3.00s.")
+        .contains("Frozen: its page didn't respond within 2s")
+        .contains("/frame (a frame)");
+    assert_that!(outcomes.lock().unwrap().clone()).is_equal_to(vec![
+        ("freezing frame".to_owned(), TestOutcome::TimedOut),
+        ("after a frozen frame".to_owned(), TestOutcome::Passed),
+    ]);
+    // Without closing the frame, quitting its session waits for it until it is abandoned.
+    assert_that!(start.elapsed()).is_less_than(Duration::from_secs(30));
+}
+
+/// Opens the fixture page, opens an `alert`, and waits for it to be closed, which never happens.
+struct DialogTest;
+
+#[async_trait]
+impl BrowserTest<IntegrationContext, IntegrationTestError> for DialogTest {
+    fn name(&self) -> Cow<'_, str> {
+        Cow::Borrowed("dialog")
+    }
+
+    fn settings(&self) -> TestSettings {
+        TestSettings::new().with_time_limit(Duration::from_secs(3))
+    }
+
+    async fn run(
+        &self,
+        driver: &WebDriver,
+        context: &IntegrationContext,
+    ) -> Result<(), Report<IntegrationTestError>> {
+        driver
+            .goto(context.page_url)
+            .await
+            .context(IntegrationTestError::OpenTestPage)?;
+        driver
+            .execute("setTimeout(() => alert('waiting for you'));", vec![])
+            .await
+            .context(IntegrationTestError::OpenDialog)?;
+        std::future::pending().await
+    }
+}
+
+/// A test timing out while a dialog is open says so, rather than calling its page frozen, and the
+/// next test runs.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_dialog_is_named_rather_than_a_frozen_page() {
+    let (runner, outcomes) = record_outcomes(runner());
+
+    let err = runner
+        .run(
+            &IntegrationContext::default(),
+            BrowserTests::sequential()
+                .with(DialogTest)
+                .with(page_title_test("after a dialog")),
+        )
+        .await
+        .expect_err("the test times out");
+
+    assert_that!(format!("{err:?}"))
+        .contains("Browser test 'dialog' exceeded its time limit of 3.00s.")
+        .contains("A dialog is open, which its page waits for: waiting for you")
+        .does_not_contain("Frozen");
+    assert_that!(outcomes.lock().unwrap().clone()).is_equal_to(vec![
+        ("dialog".to_owned(), TestOutcome::TimedOut),
+        ("after a dialog".to_owned(), TestOutcome::Passed),
+    ]);
 }
 
 /// Run by `sigint_cancels_the_run` and `sigterm_cancels_the_run` in a child process. Does nothing

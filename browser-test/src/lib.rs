@@ -14,6 +14,7 @@ mod error;
 mod execution;
 pub mod failure_report;
 mod filter;
+mod frozen_pages;
 mod pause;
 mod profile;
 mod progress;
@@ -22,9 +23,9 @@ mod report_consumer;
 mod runner;
 mod scheduler;
 mod session_reuse;
-mod session_settings;
 mod step;
 mod test_case;
+mod test_settings;
 #[cfg(test)]
 mod test_support;
 mod timeout;
@@ -45,9 +46,9 @@ pub use report_consumer::{RunReportConsumer, StderrSummary, StdoutSummary, Traci
 pub use runner::{BrowserTestRunner, Visibility};
 pub use scheduler::{FailurePolicy, Parallelism};
 pub use session_reuse::{CachedData, KeptCaches, SessionReset, SessionReuse};
-pub use session_settings::SessionSettings;
 pub use step::{Step, StepExt};
 pub use test_case::{BrowserTest, BrowserTests, NamedTest, TestGroup};
+pub use test_settings::TestSettings;
 pub use timeout::Timeouts;
 pub use wait::ElementQueryWait;
 

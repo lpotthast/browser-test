@@ -5,6 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-10-13
+
+### Added
+
+- Time limits: a test whose body runs longer than its time limit fails with the new `BrowserTestError::TimedOut` and
+  `TestOutcome::TimedOut` (counted as failed, shown as `[timed out]` in the run summary). Tests set a limit of their own
+  with the new `TestSettings::with_time_limit`, or with the new `time_limit` argument of `#[browser_test]`, e.g.
+  `#[browser_test(time_limit = Duration::from_secs(10))]`. The others get the runner's, a last resort set with
+  `BrowserTestRunner::with_time_limit(limit)`. The limit covers the test's body only, not preparing its session.
+- Frozen pages: once a test exceeds its time limit, the runner checks the pages and cross-origin frames of its session
+  through Chrome's `DevTools` endpoint. A frozen one (its main thread never yields, e.g. to an endless chain of
+  microtasks) blocks every further `WebDriver` command of its session, even quitting it, so it is closed. The test's
+  report lists the closed pages and frames. A dialog (`alert`, `confirm`, `prompt`, `beforeunload`) blocks its page
+  as well, but not the session: the report names it with its text instead, and it is left open. A session whose test
+  timed out is never reused.
+- `BrowserTestRecord::path`: the names of the named `BrowserTests` a test runs in, joined with ` / `.
+- `BrowserTestError::PrepareSession`, for a test whose session could not be created, ended before the test started,
+  or did not accept the test's timeouts.
+
+### Changed
+
+- **Breaking:** Tests time out after 10 minutes by default, so a test that runs longer now fails. Raise the limit with
+  `BrowserTestRunner::with_time_limit`, or give the test a limit of its own. Before, a hanging test could keep its run
+  waiting forever.
+- **Breaking:** `SessionSettings` became `TestSettings`, and `BrowserTest::session_settings` became
+  `BrowserTest::settings`. It also holds the test's time limit, so a wrapper that forwards `settings` forwards every
+  setting of the wrapped test.
+- **Breaking:** `BrowserTestRecord::group` is only the name of the test's `TestGroup`, the name
+  `TestFilter::with_group` selects it by. Before, it also held the names of the named `BrowserTests` the test runs in,
+  which are in the new `path` now.
+- **Breaking:** A failed run always returns `BrowserTestError::RunTests`, with the failures as child reports. Before, a
+  `FailurePolicy::FailFast` run in which only one test could run at a time returned the failed test's report directly.
+- **Breaking:** A test whose session can't be prepared fails with the new `BrowserTestError::PrepareSession` rather
+  than `BrowserTestError::RunTest`, so that such failures can be told apart from failures of the test. Its outcome is
+  still `TestOutcome::Failed`.
+- **Breaking:** `SessionPreparation`, `FailurePolicy` and `SessionReset` are `#[non_exhaustive]`, so that they can gain
+  variants without a breaking change.
+- Resetting a reused session (see `SessionReuse`) takes at most 30 seconds. A session whose reset takes longer has its
+  frozen pages closed, like a test that timed out, and quits instead of running further tests.
+- The message of `BrowserTestError::RunTests` reads "One or more browser tests failed, panicked or timed out (N
+  failed)."
+
+### Fixed
+
+- A failure to quit the session of a test that failed is no longer lost: it is a child of the test's report, as it
+  already failed a test that passed. Quitting a session that ran no test, or that was released after a reset, logs a
+  warning when it fails.
+- After a `FailurePolicy::FailFast` stop, tests in groups marked `run_always` still get spare sessions and reset ones,
+  instead of each waiting for a new browser.
+- After a `FailurePolicy::FailFast` stop, a test waiting for its session gives up right away, instead of waiting for a
+  browser that then quits unused. A test with an element query wait of its own still waits for its session to be
+  created.
+- A test that was running when the run was cancelled no longer stays on the progress board, which went on warning that
+  it was still running.
+- `browser-test-macros` now requires `quote` 1.0.35 and `proc-macro2` 1.0.91, the oldest versions its dependencies build
+  with.
+
 ## [0.6.1] - 2026-10-12
 
 ### Changed
@@ -310,7 +367,9 @@ does what it is told. See "Changed" for the renames.
 - Added environment-variable controls for visibility, pauses, and browser-driver output diagnostics.
 - Added re-exports for `async_trait::async_trait`, `chrome_for_testing_manager::Channel` and the `thirtyfour` crate.
 
-[Unreleased]: https://github.com/lpotthast/browser-test/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/lpotthast/browser-test/compare/v0.7.0...HEAD
+
+[0.7.0]: https://github.com/lpotthast/browser-test/compare/v0.6.1...v0.7.0
 
 [0.6.1]: https://github.com/lpotthast/browser-test/compare/v0.6.0...v0.6.1
 

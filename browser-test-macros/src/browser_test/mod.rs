@@ -72,6 +72,18 @@ pub(crate) fn expand(args: Arguments, mut function: ItemFn) -> manyhow::Result<T
     let crate_path = crate_path()?;
     let function_name = function.sig.ident.unraw().to_string();
     let name = struct_name(&function.sig.ident, &function_name)?;
+    // Only a test with a time limit has settings of its own. Spanned at the expression, where one
+    // of another type is reported.
+    let settings = args.time_limit.map(|limit| {
+        let settings = quote_spanned! {limit.span()=>
+            #crate_path::TestSettings::new().with_time_limit(#limit)
+        };
+        quote! {
+            fn settings(&self) -> #crate_path::TestSettings {
+                #settings
+            }
+        }
+    });
     let test_name = args.name.map_or_else(
         // Qualified, as the caller's module may define macros of these names.
         || quote!(::core::concat!(::core::module_path!(), "::", #function_name)),
@@ -141,6 +153,8 @@ pub(crate) fn expand(args: Arguments, mut function: ItemFn) -> manyhow::Result<T
             fn description(&self) -> ::std::option::Option<::std::borrow::Cow<'_, str>> {
                 #description
             }
+
+            #settings
 
             fn run<'__self, '__driver, '__context, '__future>(
                 &'__self self,

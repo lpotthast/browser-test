@@ -1,3 +1,7 @@
+use std::time::Duration;
+
+use crate::report::FormatDuration;
+
 /// Error contexts reported by browser-test runner operations.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -13,6 +17,14 @@ pub enum BrowserTestError {
         test_name: String,
     },
 
+    /// The `WebDriver` session of a browser test could not be prepared: it could not be created,
+    /// ended before the test started, or did not accept the test's timeouts. The test did not run.
+    #[error("The browser session of browser test '{test_name}' could not be prepared.")]
+    PrepareSession {
+        /// The test name reported by [`crate::BrowserTest::name`].
+        test_name: String,
+    },
+
     /// A browser test panicked while running in its `WebDriver` session.
     #[error("Browser test '{test_name}' panicked: {message}")]
     Panic {
@@ -22,13 +34,22 @@ pub enum BrowserTestError {
         message: String,
     },
 
-    /// One or more browser tests failed or panicked. Each failure is a child report.
-    ///
-    /// Returned for every failed run, except [`crate::FailurePolicy::FailFast`] runs in which only
-    /// one test can run at a time. These return the failed test's report directly.
-    #[error("One or more browser tests failed or panicked ({failed_tests} failed).")]
+    /// A browser test ran longer than its time limit (see
+    /// [`BrowserTestRunner::with_time_limit`](crate::BrowserTestRunner::with_time_limit) and
+    /// [`TestSettings::with_time_limit`](crate::TestSettings::with_time_limit)).
+    #[error("Browser test '{test_name}' exceeded its time limit of {}.", FormatDuration(*limit))]
+    TimedOut {
+        /// The test name reported by [`crate::BrowserTest::name`].
+        test_name: String,
+        /// The time limit it exceeded.
+        limit: Duration,
+    },
+
+    /// One or more browser tests failed, panicked, or timed out. Each failure is a child report, in
+    /// test order. Returned for every run in which a test failed.
+    #[error("One or more browser tests failed, panicked or timed out ({failed_tests} failed).")]
     RunTests {
-        /// Number of failed or panicked tests collected as child reports.
+        /// Number of failed, panicked, or timed out tests collected as child reports.
         failed_tests: usize,
     },
 
@@ -81,7 +102,18 @@ mod tests {
         let err = BrowserTestError::RunTests { failed_tests: 2 };
 
         assert_that!(err.to_string())
-            .is_equal_to("One or more browser tests failed or panicked (2 failed).");
+            .is_equal_to("One or more browser tests failed, panicked or timed out (2 failed).");
+    }
+
+    #[test]
+    fn timed_out_error_displays_test_name_and_limit() {
+        let err = BrowserTestError::TimedOut {
+            test_name: "login".to_owned(),
+            limit: Duration::from_secs(30),
+        };
+
+        assert_that!(err.to_string())
+            .is_equal_to("Browser test 'login' exceeded its time limit of 30.00s.");
     }
 
     #[test]

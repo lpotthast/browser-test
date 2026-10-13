@@ -1,4 +1,9 @@
-use std::{fmt, path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    fmt,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use chrome_for_testing_manager::{
     CancellationToken, Channel, ChromeBinary, ChromeForTesting, ChromeForTestingConfig,
@@ -7,9 +12,11 @@ use chrome_for_testing_manager::{
 use rootcause::{Report, prelude::ResultExt};
 use thirtyfour::{ChromeCapabilities, error::WebDriverResult};
 
+#[cfg(doc)]
+use crate::TestSettings;
 use crate::{
     BrowserTestError, BrowserTests, Cancellation, DriverOutput, ElementQueryWait, FailurePolicy,
-    Pause, ProgressWarnings, SessionReuse, SessionSettings, Timeouts,
+    Pause, ProgressWarnings, SessionReuse, Timeouts,
     cancellation::cancelled_result,
     driver_output::{DriverOutputCapture, attach_browser_driver_output_to_result},
     env::{InvalidEnvVar, env_flag},
@@ -18,6 +25,7 @@ use crate::{
     profile::{ChromeProfilesDir, RunProfiles},
     report::BrowserTestRunReport,
     report_consumer::RunReportConsumer,
+    test_settings::TestDefaults,
 };
 
 pub(crate) const DEFAULT_VISIBLE_ENV: &str = "BROWSER_TEST_VISIBLE";
@@ -83,7 +91,7 @@ pub struct BrowserTestRunner {
     visibility: Visibility,
     pause: Pause,
     failure_policy: FailurePolicy,
-    session_defaults: SessionSettings,
+    test_defaults: TestDefaults,
     chrome_capabilities_setups: Vec<Arc<ChromeCapabilitiesSetup>>,
     driver_output: DriverOutput,
     chrome_for_testing_cache_dir: Option<PathBuf>,
@@ -104,7 +112,7 @@ impl fmt::Debug for BrowserTestRunner {
             .field("visibility", &self.visibility)
             .field("pause", &self.pause)
             .field("failure_policy", &self.failure_policy)
-            .field("session_defaults", &self.session_defaults)
+            .field("test_defaults", &self.test_defaults)
             .field(
                 "chrome_capabilities_setup_count",
                 &self.chrome_capabilities_setups.len(),
@@ -137,7 +145,7 @@ impl BrowserTestRunner {
             visibility: Visibility::Headless,
             pause: Pause::disabled(),
             failure_policy: FailurePolicy::FailFast,
-            session_defaults: SessionSettings::new(),
+            test_defaults: TestDefaults::new(),
             chrome_capabilities_setups: Vec::new(),
             driver_output: DriverOutput::disabled(),
             chrome_for_testing_cache_dir: None,
@@ -197,20 +205,20 @@ impl BrowserTestRunner {
     /// Set the `WebDriver` timeouts of every test. Unset by default, keeping `ChromeDriver`'s.
     ///
     /// A test overrides them one by one with
-    /// [`SessionSettings::with_timeouts`].
+    /// [`TestSettings::with_timeouts`].
     #[must_use]
     pub const fn with_timeouts(mut self, timeouts: Timeouts) -> Self {
-        self.session_defaults = self.session_defaults.with_timeouts(timeouts);
+        self.test_defaults.timeouts = timeouts;
         self
     }
 
     /// Set how element queries poll in every test. Unset by default, keeping `thirtyfour`'s
     /// default poller.
     ///
-    /// A test overrides it with [`SessionSettings::with_element_query_wait`].
+    /// A test overrides it with [`TestSettings::with_element_query_wait`].
     #[must_use]
     pub const fn with_element_query_wait(mut self, wait: ElementQueryWait) -> Self {
-        self.session_defaults = self.session_defaults.with_element_query_wait(wait);
+        self.test_defaults.element_query_wait = Some(wait);
         self
     }
 
@@ -306,7 +314,7 @@ impl BrowserTestRunner {
     /// create them in visible runs as well.
     ///
     /// Spare sessions use the runner's element query wait. A test overriding it with
-    /// [`SessionSettings::with_element_query_wait`] gets a session created when its turn comes.
+    /// [`TestSettings::with_element_query_wait`] gets a session created when its turn comes.
     #[must_use]
     pub const fn with_spare_sessions(mut self, spare_sessions: usize) -> Self {
         self.spare_sessions = Some(spare_sessions);
@@ -318,7 +326,7 @@ impl BrowserTestRunner {
     ///
     /// Reuse makes a run create about as many sessions as tests run at the same time, plus spares,
     /// however many tests it has. This pays off when a run has many short tests. See [`SessionReuse`]
-    /// for what the reset restores, and [`SessionSettings::with_fresh_session`] for tests that
+    /// for what the reset restores, and [`TestSettings::with_fresh_session`] for tests that
     /// need a session no other test ran in.
     #[must_use]
     pub const fn with_session_reuse(mut self, session_reuse: SessionReuse) -> Self {
@@ -332,6 +340,27 @@ impl BrowserTestRunner {
     #[must_use]
     pub const fn with_progress_warnings(mut self, progress_warnings: ProgressWarnings) -> Self {
         self.progress_warnings = progress_warnings;
+        self
+    }
+
+    /// Fail every test without a time limit of its own ([`TestSettings::with_time_limit`]) whose
+    /// body runs longer than `limit`, with [`BrowserTestError::TimedOut`] and the outcome
+    /// [`TestOutcome::TimedOut`](crate::TestOutcome::TimedOut). Defaults to 10 minutes: a last
+    /// resort against tests that hang, longer than any test should run. Tests whose duration you
+    /// know set a limit of their own.
+    ///
+    /// The limit covers the test's body ([`BrowserTest::run`](crate::BrowserTest::run)) only, not
+    /// preparing its session. A body that exceeds it is dropped at its next `.await`. One that
+    /// blocks its thread without awaiting can't be stopped.
+    ///
+    /// Once a test exceeds its limit, the runner checks its pages: a page whose main thread never
+    /// yields (e.g. to an endless chain of microtasks) blocks every further `WebDriver` command of
+    /// its session, even quitting it. Such frozen pages are closed, and the report lists them. A
+    /// dialog its page waits for is named in the report instead, and left open. A session whose
+    /// test timed out is never reused.
+    #[must_use]
+    pub const fn with_time_limit(mut self, limit: Duration) -> Self {
+        self.test_defaults.time_limit = limit;
         self
     }
 
@@ -515,7 +544,7 @@ impl BrowserTestRunner {
         let config = ExecutionConfig {
             chrome,
             visible: self.visibility.is_visible(),
-            session_defaults: self.session_defaults,
+            test_defaults: self.test_defaults,
             chrome_capabilities_setups: &self.chrome_capabilities_setups,
             profiles,
             cancellation,
@@ -595,11 +624,11 @@ mod tests {
         assert_that!(runner.failure_policy).is_equal_to(FailurePolicy::RunAll);
         assert_that!(runner.visibility).is_equal_to(Visibility::Visible);
         assert_that!(runner.pause.is_enabled()).is_true();
-        assert_that!(runner.session_defaults).is_equal_to(
-            SessionSettings::new()
-                .with_timeouts(timeouts)
-                .with_element_query_wait(wait),
-        );
+        assert_that!(runner.test_defaults).is_equal_to(TestDefaults {
+            timeouts,
+            element_query_wait: Some(wait),
+            time_limit: TestDefaults::DEFAULT_TIME_LIMIT,
+        });
         assert_that!(runner.chrome_capabilities_setups.len()).is_equal_to(1);
         assert_that!(runner.chrome_for_testing_cache_dir)
             .is_equal_to(Some(PathBuf::from("/tmp/browser-test-cft-cache")));

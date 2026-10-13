@@ -12,6 +12,8 @@ use syn::ItemFn;
 /// Turn an async function into a browser test: a unit struct implementing `BrowserTest`.
 ///
 /// ```
+/// use std::time::Duration;
+///
 /// use browser_test::{BrowserTest, BrowserTests, browser_test, thirtyfour::WebDriver};
 /// use rootcause::Report;
 ///
@@ -23,7 +25,7 @@ use syn::ItemFn;
 /// }
 ///
 /// /// Opens the page itself, through the session's `WebDriver`.
-/// #[browser_test(name = "navigation::home")]
+/// #[browser_test(name = "navigation::home", time_limit = Duration::from_secs(10))]
 /// async fn opens_home_page(driver: &WebDriver, base_url: &str) -> Result<(), Report> {
 ///     driver.goto(base_url).await?;
 ///     Ok(())
@@ -32,6 +34,8 @@ use syn::ItemFn;
 /// assert!(ShowsGreeting.name().ends_with("::shows_greeting"));
 /// assert_eq!(ShowsGreeting.description().as_deref(), Some("The home page greets the visitor."));
 /// assert_eq!(OpensHomePage.name(), "navigation::home");
+/// assert_eq!(OpensHomePage.settings().time_limit(), Some(Duration::from_secs(10)));
+/// assert_eq!(ShowsGreeting.settings().time_limit(), None);
 ///
 /// let tests: BrowserTests<str> = BrowserTests::sequential()
 ///     .with(ShowsGreeting)
@@ -53,9 +57,10 @@ use syn::ItemFn;
 ///   one that stays the same when the function moves to another module.
 /// - **Description**: `BrowserTest::description` returns the doc comments, as written, without the
 ///   space after each `///`. Paragraphs and indentation are kept. `None` without doc comments.
-/// - **Session settings**: the runner's. Implement `BrowserTest` yourself, with
-///   `BrowserTest::session_settings`, for tests that need their own timeouts, element query wait,
-///   or a fresh session.
+/// - **Settings**: `BrowserTest::settings` takes everything from the runner, except the time limit
+///   `time_limit = ...` sets, if given (any expression of type `std::time::Duration`). Implement
+///   `BrowserTest` yourself, with `BrowserTest::settings`, for tests that need their own timeouts,
+///   element query wait, or a fresh session.
 ///
 /// # Signature
 ///

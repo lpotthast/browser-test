@@ -15,8 +15,8 @@ proc-macro = true
 heck = "0.5"
 manyhow = "0.14"
 proc-macro-crate = "3.4"
-proc-macro2 = "1"
-quote = "1"
+proc-macro2 = "1.0.91"
+quote = "1.0.35"
 syn = { version = "3", features = ["full", "visit-mut"] }
 
 [dev-dependencies]

@@ -143,7 +143,7 @@ checksum = "51bd8d7b925146b37a30598dfd8d1162c24f45a27fba4a61174e238c48cd5560"
 
 [[package]]
 name = "browser-test"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "assertr",
  "async-trait",
@@ -152,19 +152,21 @@ dependencies = [
  "chrome-for-testing-manager",
  "futures-util",
  "nix",
+ "reqwest",
  "rootcause",
  "serde_json",
  "serial_test",
  "thirtyfour",
  "thiserror",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "url",
 ]
 
 [[package]]
 name = "browser-test-macros"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "browser-test",
  "heck",
@@ -358,9 +360,9 @@ checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
 name = "deranged"
-version = "0.5.8"
+version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
+checksum = "9e9de72ce2ad1f90dc62fa25f0f430ef85eb4b0d8fa0be4f30373bc40a21d28e"
 dependencies = [
  "serde_core",
 ]
@@ -1526,9 +1528,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-native-certs"
-version = "0.8.4"
+version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dab5152771c58876a2146916e53e35057e1a4dfa2b9df0f0305b07f611fdea4d"
+checksum = "4a073f5dc7469f984c52ad2752b63b0807745133b6de880b7b64c1ac4c48aec4"
 dependencies = [
  "openssl-probe",
  "rustls-pki-types",

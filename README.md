@@ -20,8 +20,8 @@ The runner does not start your web app. Your test must do that before the tests 
 `cargo leptos serve`, Docker Compose, a static fixture page or whatever else fits. It then passes the app's URL, or
 whatever else the tests need, to the runner as the context.
 
-For testing ([`leptos`](https://leptos.dev)) apps, I built ([
-`leptos-browser-test`](https://crates.io/crates/leptos-browser-test)), which can start and manage a Leptos app under
+For testing [Leptos](https://leptos.dev) apps, I built
+[`leptos-browser-test`](https://crates.io/crates/leptos-browser-test), which can start and manage a Leptos app under
 test for you.
 
 ## Contents
@@ -49,17 +49,18 @@ test for you.
 - Measures sessions, test bodies and the steps you mark, and can print a summary of the slowest tests and steps after
   each run. It warns when a test or a session takes unusually long.
 - Helps with local debugging: visible browser windows, a pause before tests start, and recent chromedriver output
-  attached sto errors.
+  attached to errors.
 
 ## Getting Started
 
 ### Installation
 
-Add `browser-test` to the crate that holds your browser tests. E.g. when implement them as integration tests:
+Add `browser-test` to the crate that holds your browser tests. For example, when you implement them as integration
+tests:
 
 ```toml
 [dev-dependencies]
-browser-test = "0.6"
+browser-test = "0.7"
 rootcause = "0.13"
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
 ```
@@ -81,14 +82,8 @@ Only add `thirtyfour` as a direct dependency if you need to manage that dependen
 This test opens Wikipedia and checks the page title.
 
 ```rust,no_run
-use std::time::Duration;
-
-use browser_test::thirtyfour::{ChromiumLikeCapabilities, WebDriver};
-use browser_test::{
-    BrowserTestError, BrowserTestRunner, BrowserTests, Cancellation, Channel, ChromeBinary,
-    DriverOutput, ElementQueryWait, FailurePolicy, Pause, ProgressWarnings, SessionReuse,
-    StderrSummary, Timeouts, Visibility, browser_test,
-};
+use browser_test::thirtyfour::WebDriver;
+use browser_test::{BrowserTestError, BrowserTestRunner, BrowserTests, Cancellation, browser_test};
 use rootcause::{Report, report};
 
 struct Context {
@@ -116,29 +111,6 @@ async fn main() -> Result<(), Report<BrowserTestError>> {
     };
 
     BrowserTestRunner::new(Cancellation::on_shutdown_signals())
-        // The browser.
-        .with_channel(Channel::Stable)
-        .with_visibility(Visibility::Visible)
-        .with_headless_chrome_binary(ChromeBinary::ChromeHeadlessShell)
-        .with_chrome_for_testing_cache_dir("target/chrome-for-testing")
-        .with_chrome_profiles_dir("target/browser-test-profiles")
-        .with_chrome_capabilities(|caps| caps.add_arg("--window-size=1280,800"))
-        // The sessions the tests run in.
-        .with_timeouts(Timeouts::new().with_page_load(Duration::from_secs(10)))
-        .with_element_query_wait(ElementQueryWait::new(
-            Duration::from_secs(10),
-            Duration::from_millis(500),
-        ))
-        .with_spare_sessions(1)
-        .with_session_reuse(SessionReuse::enabled())
-        // Failures, slow tests and debugging.
-        .with_failure_policy(FailurePolicy::RunAll)
-        .with_progress_warnings(ProgressWarnings::default())
-        .with_pause(Pause::enabled())
-        .with_driver_output(DriverOutput::tail_lines(200))
-        .with_failure_report_hooks(true)
-        // What happens with the report of each run.
-        .with_report_consumer(StderrSummary)
         .run(&context, BrowserTests::sequential().with(PageTitle))
         .await
 }
@@ -146,12 +118,11 @@ async fn main() -> Result<(), Report<BrowserTestError>> {
 
 `#[browser_test]` turns `page_title` into a unit struct named `PageTitle` that implements `BrowserTest<Context>` (see
 [Writing Tests](#writing-tests)). You add it to a `BrowserTests` collection and pass that to the runner together with
-the context. `run` returns an error if the runner itself fails, a test returns an error or a test panics. The error is
-a `Report<BrowserTestError>` with the details.
+the context. `run` returns an error if the runner itself fails, a test returns an error, panics or times out, or the
+run is cancelled. The error is a `Report<BrowserTestError>` with the details.
 
-To show what can be configured, the example sets every runner option. None of them are required, and
-`BrowserTestRunner::new(...)` followed by `run` is enough to get started. Each option is documented on
-[`BrowserTestRunner`].
+The runner works without further settings. [Configuring the Runner](#configuring-the-runner) shows every option, and
+each one is documented on [`BrowserTestRunner`].
 
 A few things to keep in mind:
 
@@ -161,7 +132,9 @@ A few things to keep in mind:
   chromedriver and its browsers and removes their profiles. A run that is interrupted without being cancelled can
   leave them running. `Cancellation::on_shutdown_signals()` cancels on Ctrl-C or SIGTERM,
   `Cancellation::from_token(token)` cancels when your own token is cancelled, and `Cancellation::disabled()` never
-  cancels. The runner also shuts chromedriver down when a run ends with an error or a panic.
+  cancels. The runner also shuts chromedriver down when a run ends with an error or a panic. With
+  `on_shutdown_signals()`, from the first run with tests on, Ctrl-C cancels runs instead of ending the process. A
+  second Ctrl-C ends the process right away.
 - The runner logs through `tracing`. Install a subscriber, for example from `tracing-subscriber`, to see its output.
 
 ### Cargo Features
@@ -181,7 +154,7 @@ process-default provider. No crate in your dependency graph may enable `reqwest/
 
 ```toml
 [dev-dependencies]
-browser-test = { version = "0.6", default-features = false, features = ["rustls-no-provider"] }
+browser-test = { version = "0.7", default-features = false, features = ["rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # Only if you depend on `thirtyfour` directly.
 thirtyfour = { version = "0.37", default-features = false, features = ["reqwest"] }
@@ -220,8 +193,45 @@ test it is given, so apply the filter with `BrowserTests::filter`.
 
 ## Configuring the Runner
 
-[First Test](#first-test) shows every runner option. Some of them can be read from environment variables,
-which makes them easy to switch on for a single run:
+Every option has a default, so set only the ones you need. This runner sets all of them:
+
+```rust,no_run
+use std::time::Duration;
+
+use browser_test::thirtyfour::ChromiumLikeCapabilities;
+use browser_test::{
+    BrowserTestRunner, Cancellation, Channel, ChromeBinary, DriverOutput, ElementQueryWait,
+    FailurePolicy, Pause, ProgressWarnings, SessionReuse, StderrSummary, Timeouts, Visibility,
+};
+
+let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals())
+    // The browser.
+    .with_channel(Channel::Stable)
+    .with_visibility(Visibility::Headless)
+    .with_headless_chrome_binary(ChromeBinary::ChromeHeadlessShell)
+    .with_chrome_for_testing_cache_dir("target/chrome-for-testing")
+    .with_chrome_profiles_dir("target/browser-test-profiles")
+    .with_chrome_capabilities(|caps| caps.add_arg("--window-size=1280,800"))
+    // The sessions the tests run in.
+    .with_timeouts(Timeouts::new().with_page_load(Duration::from_secs(10)))
+    .with_element_query_wait(ElementQueryWait::new(
+        Duration::from_secs(10),
+        Duration::from_millis(500),
+    ))
+    .with_spare_sessions(1)
+    .with_session_reuse(SessionReuse::enabled())
+    // Failures, slow tests and debugging.
+    .with_failure_policy(FailurePolicy::RunAll)
+    .with_time_limit(Duration::from_secs(300))
+    .with_progress_warnings(ProgressWarnings::default())
+    .with_pause(Pause::disabled())
+    .with_driver_output(DriverOutput::tail_lines(200))
+    .with_failure_report_hooks(true)
+    // What happens with the report of each run.
+    .with_report_consumer(StderrSummary);
+```
+
+Some options can be read from environment variables, which makes them easy to switch on for a single run:
 
 ```rust,no_run
 use browser_test::{BrowserTestRunner, Cancellation, DriverOutput, Pause, Visibility};
@@ -309,6 +319,22 @@ async fn goto(driver: &WebDriver, url: &str) -> WebDriverResult<()> {
 ```
 
 The runner also warns when a test or a session takes unusually long (see [`ProgressWarnings`]).
+
+A test that runs longer than its time limit fails. Give tests whose duration you know a limit of their own, e.g.
+`#[browser_test(time_limit = Duration::from_secs(10))]` (or `TestSettings::with_time_limit`), so that one that hangs
+fails soon. The others get the runner's, a last resort that defaults to 10 minutes
+(`BrowserTestRunner::with_time_limit`). The runner then checks the test's pages: a page whose main thread never yields
+(e.g. to an endless chain of microtasks) would block every further command of its session, even quitting it. Such a
+frozen page is closed, and the test's report names it:
+
+```text
+ ● Browser test 'virtual_list' exceeded its time limit of 10.00s.
+ ╰ Frozen: its page didn't respond within 2s (its main thread never yields, e.g. to an endless chain of microtasks), so it was closed:
+     http://127.0.0.1:4200/atoms/virtual-list
+```
+
+A dialog (e.g. an `alert`) blocks its page as well, but not the session. The report names it instead, and leaves it
+open.
 
 ## Failure Reports
 

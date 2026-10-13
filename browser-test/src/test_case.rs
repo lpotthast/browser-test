@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use rootcause::Report;
 use thirtyfour::WebDriver;
 
-use crate::{Parallelism, SessionSettings, TestFilter};
+use crate::{Parallelism, TestFilter, TestSettings};
 
 /// A browser test: a named async body run in a `WebDriver` session, with the run's context.
 ///
@@ -17,9 +17,8 @@ use crate::{Parallelism, SessionSettings, TestFilter};
 ///   comments.
 /// - An `async fn` taking `&Context` is a test as it is, named by its Rust path. Use
 ///   [`Self::named`] to name it.
-/// - Implement the trait, with [`async_trait`](crate::async_trait), for tests with session
-///   settings of their own ([`Self::session_settings`]), tests with parameters, and wrappers around
-///   other tests.
+/// - Implement the trait, with [`async_trait`](crate::async_trait), for tests with settings of
+///   their own ([`Self::settings`]), tests with parameters, and wrappers around other tests.
 ///
 /// `Context` is what [`BrowserTestRunner::run`](crate::BrowserTestRunner::run) gives every test,
 /// e.g. the app's base URL. `TestError` is the error type of the [`Report`] a failing test
@@ -30,7 +29,7 @@ use crate::{Parallelism, SessionSettings, TestFilter};
 /// ```
 /// use std::{borrow::Cow, time::Duration};
 ///
-/// use browser_test::{BrowserTest, SessionSettings, Timeouts, async_trait, thirtyfour::WebDriver};
+/// use browser_test::{BrowserTest, TestSettings, Timeouts, async_trait, thirtyfour::WebDriver};
 /// use rootcause::Report;
 ///
 /// /// Loads the first page with empty caches, so that its load time is that of a first visit.
@@ -44,8 +43,8 @@ use crate::{Parallelism, SessionSettings, TestFilter};
 ///         format!("first visit of {}", self.path).into()
 ///     }
 ///
-///     fn session_settings(&self) -> SessionSettings {
-///         SessionSettings::new()
+///     fn settings(&self) -> TestSettings {
+///         TestSettings::new()
 ///             .with_timeouts(Timeouts::new().with_page_load(Duration::from_secs(5)))
 ///             .with_fresh_session(true)
 ///     }
@@ -60,13 +59,13 @@ use crate::{Parallelism, SessionSettings, TestFilter};
 /// # Wrapping tests
 ///
 /// A test running another one, e.g. to check something after every test, must forward
-/// [`Self::name`], [`Self::description`] and [`Self::session_settings`] to it, or the wrapped
+/// [`Self::name`], [`Self::description`] and [`Self::settings`] to it, or the wrapped
 /// test's are lost:
 ///
 /// ```
 /// use std::borrow::Cow;
 ///
-/// use browser_test::{BrowserTest, SessionSettings, async_trait, thirtyfour::WebDriver};
+/// use browser_test::{BrowserTest, TestSettings, async_trait, thirtyfour::WebDriver};
 /// use rootcause::Report;
 ///
 /// /// Runs a test, then checks that its page logged no error.
@@ -82,8 +81,8 @@ use crate::{Parallelism, SessionSettings, TestFilter};
 ///         self.0.description()
 ///     }
 ///
-///     fn session_settings(&self) -> SessionSettings {
-///         self.0.session_settings()
+///     fn settings(&self) -> TestSettings {
+///         self.0.settings()
 ///     }
 ///
 ///     async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
@@ -119,15 +118,16 @@ where
         None
     }
 
-    /// What the test needs of its session: timeouts, element query wait, or a session no other
-    /// test ran in. Defaults to [`SessionSettings::new`], the runner's settings.
+    /// What the test needs of the runner: timeouts, element query wait, a session no other test
+    /// ran in, or a time limit. Defaults to [`TestSettings::new`], the runner's settings.
+    /// `#[browser_test(time_limit = ...)]` sets a time limit.
     ///
     /// The runner reads the settings once, before the test runs.
-    fn session_settings(&self) -> SessionSettings {
-        SessionSettings::new()
+    fn settings(&self) -> TestSettings {
+        TestSettings::new()
     }
 
-    /// This test under the name `name`, with its behavior, description and session settings.
+    /// This test under the name `name`, with its behavior, description and settings.
     ///
     /// ```
     /// use browser_test::{BrowserTest, BrowserTests};
@@ -217,8 +217,8 @@ where
         self.test.description()
     }
 
-    fn session_settings(&self) -> SessionSettings {
-        self.test.session_settings()
+    fn settings(&self) -> TestSettings {
+        self.test.settings()
     }
 
     async fn run(&self, driver: &WebDriver, context: &Context) -> Result<(), Report<TestError>> {
@@ -775,7 +775,7 @@ mod tests {
     }
 
     #[test]
-    fn naming_preserves_description_and_session_settings() {
+    fn naming_preserves_description_and_settings() {
         use std::time::Duration;
 
         use crate::{ElementQueryWait, Timeouts};
@@ -786,14 +786,15 @@ mod tests {
             fn description(&self) -> Option<Cow<'_, str>> {
                 Some("described".into())
             }
-            fn session_settings(&self) -> SessionSettings {
-                SessionSettings::new()
+            fn settings(&self) -> TestSettings {
+                TestSettings::new()
                     .with_timeouts(Timeouts::new().with_implicit_wait(Duration::ZERO))
                     .with_element_query_wait(ElementQueryWait::new(
                         Duration::from_secs(1),
                         Duration::from_millis(10),
                     ))
                     .with_fresh_session(true)
+                    .with_time_limit(Duration::from_secs(5))
             }
             async fn run(&self, _: &WebDriver, (): &()) -> Result<(), Report> {
                 Ok(())
@@ -802,6 +803,6 @@ mod tests {
         let test = Settings.named("renamed");
         assert_eq!(test.name(), "renamed");
         assert_eq!(test.description(), Settings.description());
-        assert_eq!(test.session_settings(), Settings.session_settings());
+        assert_eq!(test.settings(), Settings.settings());
     }
 }

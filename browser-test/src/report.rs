@@ -63,12 +63,16 @@ pub struct BrowserTestRecord {
     /// The test's name.
     pub name: String,
 
-    /// Whether the test passed.
+    /// How the test ended: passed, failed, panicked, timed out or cancelled.
     pub outcome: TestOutcome,
 
-    /// The containing group's name, prefixed by enclosing named execution groups with ` / `.
-    /// For tests in a [`crate::TestGroup`], ends with that logical group's name. Logical groups
-    /// share their parent's execution policy and have no separate [`GroupRecord`] wall time.
+    /// The names of the named [`crate::BrowserTests`] the test runs in, outermost first, joined
+    /// with ` / `, as in the [`GroupRecord::name`] of the innermost one. `None` if it runs in no
+    /// named group.
+    pub path: Option<String>,
+
+    /// The name of the test's [`crate::TestGroup`], if it is in one. The name
+    /// [`TestFilter::with_group`](crate::TestFilter::with_group) selects it by.
     pub group: Option<String>,
 
     /// How the test's session was prepared (created, or reset after an earlier test), and how long
@@ -114,8 +118,10 @@ pub enum TestOutcome {
     /// The test panicked.
     Panicked,
 
-    /// The test was running when the run was cancelled. Its body time is the time until then,
-    /// and its steps are not recorded.
+    /// The test ran longer than its time limit.
+    TimedOut,
+
+    /// The test was running when the run was cancelled. Its steps are not recorded.
     Cancelled,
 }
 
@@ -126,10 +132,10 @@ impl TestOutcome {
         matches!(self, Self::Passed)
     }
 
-    /// Whether the test failed or panicked.
+    /// Whether the test failed, panicked or timed out.
     #[must_use]
     pub const fn is_failed(self) -> bool {
-        matches!(self, Self::Failed | Self::Panicked)
+        matches!(self, Self::Failed | Self::Panicked | Self::TimedOut)
     }
 
     /// Whether the test was cancelled while it ran.
@@ -157,6 +163,7 @@ pub struct SessionTiming {
 
 /// How the session of a test was prepared, and how long that took (successful or not).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum SessionPreparation {
     /// The session was created: a new browser started, and its page brought to the front.
     Created(Duration),
@@ -217,7 +224,7 @@ impl BrowserTestRunReport {
             .count()
     }
 
-    /// Number of tests that failed or panicked.
+    /// Number of tests that failed, panicked or timed out.
     #[must_use]
     pub fn failed(&self) -> usize {
         self.tests
@@ -428,6 +435,7 @@ impl Display for Describe<'_> {
             TestOutcome::Passed => {}
             TestOutcome::Failed => f.write_str(" [failed]")?,
             TestOutcome::Panicked => f.write_str(" [panicked]")?,
+            TestOutcome::TimedOut => f.write_str(" [timed out]")?,
             TestOutcome::Cancelled => f.write_str(" [cancelled]")?,
         }
         f.write_str(" (")?;
@@ -511,6 +519,7 @@ mod tests {
             index,
             name: name.to_owned(),
             outcome: TestOutcome::Passed,
+            path: None,
             group: None,
             session: Some(session),
             body: Some(Duration::from_millis(body_ms)),

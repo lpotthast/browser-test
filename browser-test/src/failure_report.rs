@@ -16,6 +16,7 @@
 //! leaves the installation to it.
 
 use std::{
+    any::Any,
     collections::{HashMap, VecDeque},
     fmt,
     path::{Path, PathBuf},
@@ -128,6 +129,17 @@ pub(crate) fn install(report_hooks: bool) {
 pub(crate) struct PanicDetails {
     pub(crate) location: Option<String>,
     pub(crate) frames: Option<TestCodeFrames>,
+}
+
+/// The message of a panic, from its payload.
+pub(crate) fn panic_payload_message(payload: &(dyn Any + Send + 'static)) -> String {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        return (*message).to_owned();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "<non-string panic payload>".to_owned()
 }
 
 /// The test root: frames of files below it are test code, unless they belong to a dependency
@@ -736,5 +748,12 @@ mod tests {
             "my_tests::pages::Actions::eval::<()>::{{closure}}"
         ))
         .is_equal_to("Actions::eval");
+    }
+
+    #[test]
+    fn panic_payload_message_handles_common_payload_types() {
+        assert_that!(panic_payload_message(&"static")).is_equal_to("static");
+        assert_that!(panic_payload_message(&"owned".to_owned())).is_equal_to("owned");
+        assert_that!(panic_payload_message(&42usize)).is_equal_to("<non-string panic payload>");
     }
 }

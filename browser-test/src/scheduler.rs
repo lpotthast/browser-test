@@ -92,14 +92,14 @@ impl Parallelism {
 
 /// How [`crate::BrowserTestRunner`] handles failed browser tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum FailurePolicy {
     /// Stop starting tests after the first failed test.
     ///
     /// Tests in groups marked [`crate::BrowserTests::run_always`] still run. Tests that already
     /// started when the failure occurred run to completion, and their failures are reported too.
-    /// A test still waiting for its browser session doesn't start.
-    /// If only one test can run at a time, its failure is returned as is. Otherwise, failures are
-    /// returned as child reports of a [`crate::BrowserTestError::RunTests`] report.
+    /// A test still waiting for its browser session doesn't start. The failures are returned as
+    /// child reports of one [`crate::BrowserTestError::RunTests`] report.
     #[default]
     FailFast,
 
@@ -116,17 +116,6 @@ pub(crate) struct BrowserTestFailures {
 impl BrowserTestFailures {
     pub(crate) fn push(&mut self, test_index: usize, failure: Report<BrowserTestError>) {
         self.failures.push((test_index, failure));
-    }
-
-    /// The first failure as is, for sequential fail-fast runs, which stop after it.
-    pub(crate) fn into_first_result(mut self) -> Result<(), Report<BrowserTestError>> {
-        if self.failures.len() > 1 {
-            return self.into_result();
-        }
-        match self.failures.pop() {
-            None => Ok(()),
-            Some((_test_index, failure)) => Err(failure),
-        }
     }
 
     pub(crate) fn into_result(mut self) -> Result<(), Report<BrowserTestError>> {
@@ -226,30 +215,5 @@ mod tests {
         assert_that!(err.to_string())
             .contains(BrowserTestError::RunTests { failed_tests: 2 }.to_string());
         assert_that!(err.children().len()).is_equal_to(2);
-    }
-
-    #[test]
-    fn browser_test_failures_first_result_returns_single_failure_unwrapped() {
-        let mut failures = BrowserTestFailures::default();
-        failures.push(
-            0,
-            Report::new(BrowserTestError::RunTest {
-                test_name: "login".to_owned(),
-            }),
-        );
-
-        let err = failures
-            .into_first_result()
-            .expect_err("a failure should fail");
-
-        assert_that!(err.current_context().clone()).is_equal_to(BrowserTestError::RunTest {
-            test_name: "login".to_owned(),
-        });
-        assert_that!(err.children().len()).is_equal_to(0);
-    }
-
-    #[test]
-    fn browser_test_failures_first_result_is_ok_when_empty() {
-        assert_that!(BrowserTestFailures::default().into_first_result()).is_ok();
     }
 }

@@ -27,12 +27,14 @@ async-trait = { version = "0.1.83", default-features = false }
 backtrace = { version = "0.3.76", default-features = false, features = ["std"] }
 browser-test-macros.workspace = true
 chrome-for-testing-manager = { version = "0.14.0", default-features = false, features = ["thirtyfour"] }
-futures-util = { version = "0.3.32", default-features = false, features = ["std"] }
+futures-util = { version = "0.3.32", default-features = false, features = ["sink", "std"] }
+reqwest = { version = "0.13.5", default-features = false }
 rootcause.workspace = true
 serde_json = { version = "1.0.145", default-features = false, features = ["std"] }
 thirtyfour = { version = "0.37.0", default-features = false, features = ["bidi", "cdp", "reqwest"] }
 thiserror = { version = "2.0.17", default-features = false, features = ["std"] }
-tokio = { version = "1.48.0", default-features = false, features = ["io-std", "io-util", "macros", "rt", "signal", "sync", "time"] }
+tokio = { version = "1.48.0", default-features = false, features = ["io-std", "io-util", "macros", "net", "rt", "signal", "sync", "time"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect"] }
 tracing = { version = "0.1.41", default-features = false, features = ["std"] }
 url = { version = "2.5.8", default-features = false, features = ["std"] }
 
