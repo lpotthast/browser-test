@@ -4,7 +4,9 @@ extern crate self as browser_test;
 
 pub use async_trait::async_trait;
 pub use browser_test_macros::browser_test;
-pub use chrome_for_testing_manager::{CancellationToken, Channel, ChromeBinary};
+pub use chrome_for_testing_manager::{
+    CancellationToken, Channel, ChromeBinary, Version, VersionRequest,
+};
 pub use rootcause;
 pub use thirtyfour;
 

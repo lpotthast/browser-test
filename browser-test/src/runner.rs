@@ -5,6 +5,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(doc)]
+use chrome_for_testing_manager::Version;
 use chrome_for_testing_manager::{
     CancellationToken, Channel, ChromeBinary, ChromeForTesting, ChromeForTestingConfig,
     VersionRequest,
@@ -87,7 +89,7 @@ impl Visibility {
 /// slowly.
 #[derive(Clone)]
 pub struct BrowserTestRunner {
-    channel: Channel,
+    version: VersionRequest,
     visibility: Visibility,
     pause: Pause,
     failure_policy: FailurePolicy,
@@ -109,7 +111,7 @@ pub struct BrowserTestRunner {
 impl fmt::Debug for BrowserTestRunner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BrowserTestRunner")
-            .field("channel", &self.channel)
+            .field("version", &self.version)
             .field("visibility", &self.visibility)
             .field("pause", &self.pause)
             .field("failure_policy", &self.failure_policy)
@@ -143,7 +145,7 @@ impl BrowserTestRunner {
     #[must_use]
     pub fn new(cancellation: Cancellation) -> Self {
         Self {
-            channel: Channel::Stable,
+            version: VersionRequest::LatestIn(Channel::Stable),
             visibility: Visibility::Headless,
             pause: Pause::disabled(),
             failure_policy: FailurePolicy::FailFast,
@@ -163,10 +165,34 @@ impl BrowserTestRunner {
         }
     }
 
-    /// Select the Chrome release channel. Defaults to [`Channel::Stable`].
+    /// Run the latest Chrome of `channel`. Defaults to [`Channel::Stable`].
+    ///
+    /// Short for [`Self::with_version`] with [`VersionRequest::LatestIn`]. Whichever of the two is
+    /// called last decides the version.
     #[must_use]
-    pub fn with_channel(mut self, channel: Channel) -> Self {
-        self.channel = channel;
+    pub fn with_channel(self, channel: Channel) -> Self {
+        self.with_version(VersionRequest::LatestIn(channel))
+    }
+
+    /// Select the version of Chrome (and chromedriver) to run: the latest of a [`Channel`], or a
+    /// fixed [`Version`] to pin, e.g. so that every run of a CI pipeline uses the same browser.
+    /// Defaults to the latest of [`Channel::Stable`].
+    ///
+    /// A version that Chrome for Testing does not provide for the platform (or for the
+    /// [headless binary](Self::with_headless_chrome_binary)) fails the run with
+    /// [`BrowserTestError::LaunchChromeForTesting`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use browser_test::{BrowserTestRunner, Cancellation, Version};
+    ///
+    /// let version: Version = "147.0.7727.56".parse().expect("valid version");
+    /// let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals()).with_version(version);
+    /// ```
+    #[must_use]
+    pub fn with_version(mut self, version: impl Into<VersionRequest>) -> Self {
+        self.version = version.into();
         self
     }
 
@@ -490,7 +516,7 @@ impl BrowserTestRunner {
         // A launch failure carries the driver's recent output itself.
         let chrome = ChromeForTesting::launch(
             ChromeForTestingConfig::builder()
-                .version(VersionRequest::LatestIn(self.channel.clone()))
+                .version(self.version.clone())
                 .chrome_binary(self.chrome_binary_for_run())
                 .cache_dir_opt(self.chrome_for_testing_cache_dir.clone())
                 .cancellation(cancellation.clone())
@@ -608,7 +634,7 @@ mod tests {
     };
 
     use assertr::prelude::*;
-    use chrome_for_testing_manager::{DriverOutputLine, DriverOutputSource};
+    use chrome_for_testing_manager::{DriverOutputLine, DriverOutputSource, Version};
     use thirtyfour::ChromiumLikeCapabilities;
 
     use super::*;
@@ -619,6 +645,7 @@ mod tests {
         let runner = BrowserTestRunner::new(Cancellation::disabled());
 
         assert_that!(runner.failure_policy).is_equal_to(FailurePolicy::FailFast);
+        assert_that!(runner.version.clone()).is_equal_to(VersionRequest::LatestIn(Channel::Stable));
         assert_that!(runner.visibility).is_equal_to(Visibility::Headless);
         assert_that!(runner.pause.is_enabled()).is_false();
         assert_that!(runner.driver_output_capture_for_run()).is_none();
@@ -632,6 +659,7 @@ mod tests {
 
         let runner = BrowserTestRunner::new(Cancellation::disabled())
             .with_failure_policy(FailurePolicy::RunAll)
+            .with_channel(Channel::Beta)
             .with_visibility(Visibility::Visible)
             .with_pause(Pause::enabled())
             .with_timeouts(timeouts)
@@ -641,6 +669,7 @@ mod tests {
             .with_chrome_profiles_dir("target/profiles");
 
         assert_that!(runner.failure_policy).is_equal_to(FailurePolicy::RunAll);
+        assert_that!(runner.version.clone()).is_equal_to(VersionRequest::LatestIn(Channel::Beta));
         assert_that!(runner.visibility).is_equal_to(Visibility::Visible);
         assert_that!(runner.pause.is_enabled()).is_true();
         assert_that!(runner.test_defaults).is_equal_to(TestDefaults {
@@ -653,6 +682,19 @@ mod tests {
             .is_equal_to(Some(PathBuf::from("/tmp/browser-test-cft-cache")));
         assert_that!(runner.chrome_profiles_dir)
             .is_equal_to(ChromeProfilesDir::new("target/profiles"));
+    }
+
+    #[test]
+    fn the_last_version_or_channel_wins() {
+        let version: Version = "147.0.7727.56".parse().expect("valid version");
+        let runner = BrowserTestRunner::new(Cancellation::disabled()).with_version(version);
+        assert_that!(runner.version.clone()).is_equal_to(VersionRequest::Fixed(version));
+
+        let runner = runner.with_channel(Channel::Dev);
+        assert_that!(runner.version.clone()).is_equal_to(VersionRequest::LatestIn(Channel::Dev));
+
+        let runner = runner.with_version(Channel::Canary);
+        assert_that!(runner.version).is_equal_to(VersionRequest::LatestIn(Channel::Canary));
     }
 
     #[test]

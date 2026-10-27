@@ -236,11 +236,13 @@ use browser_test::thirtyfour::ChromiumLikeCapabilities;
 use browser_test::{
     BrowserTestRunner, Cancellation, Channel, ChromeBinary, DriverOutput, ElementQueryWait,
     FailurePolicy, Pause, ProgressWarnings, SessionReuse, StderrSummary, TestFilter, Timeouts,
-    Visibility,
+    VersionRequest, Visibility,
 };
 
 let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals())
-    // The browser.
+    // The browser. `with_version` takes the latest of a channel or a fixed `Version`, and
+    // `with_channel(channel)` is short for its first form. The last of the two wins.
+    .with_version(VersionRequest::LatestIn(Channel::Stable))
     .with_channel(Channel::Stable)
     .with_visibility(Visibility::Headless)
     .with_headless_chrome_binary(ChromeBinary::ChromeHeadlessShell)
