@@ -331,6 +331,15 @@ impl BrowserTest<IntegrationContext> for MetadataPanicTest {
     }
 }
 
+/// The number of failed tests of the error of a run in which tests failed. `None` for another
+/// error.
+fn failed_tests(err: &Report<BrowserTestError>) -> Option<usize> {
+    match err.current_context() {
+        BrowserTestError::RunTests { failed_tests, .. } => Some(*failed_tests),
+        _ => None,
+    }
+}
+
 /// [`runner_with`] runs that are never cancelled.
 fn runner() -> BrowserTestRunner {
     runner_with(Cancellation::disabled())
@@ -536,8 +545,7 @@ async fn run_all_reports_intentional_failure_and_runs_page_title_test() {
         .await;
     let err = result.expect_err("run-all should report the intentional failure");
 
-    assert_that!(err.to_string())
-        .contains(BrowserTestError::RunTests { failed_tests: 1 }.to_string());
+    assert_that!(failed_tests(&err)).is_equal_to(Some(1));
     assert_that!(err).has_child_count(1);
     let reported: Vec<_> = report
         .tests
@@ -626,8 +634,7 @@ async fn run_all_reports_metadata_hook_panics_and_runs_remaining_page_title_test
         .expect_err("run-all should report metadata hook panics");
 
     assert_that!(started.load(Ordering::SeqCst)).is_equal_to(1);
-    assert_that!(err.to_string())
-        .contains(BrowserTestError::RunTests { failed_tests: 3 }.to_string());
+    assert_that!(failed_tests(&err)).is_equal_to(Some(3));
     assert_that!(err).has_child_count(3);
     assert_that!(format!("{err:?}")).contains("unnamed test at index 0");
     assert_that!(format!("{err:?}")).contains("tags hook failed");
@@ -659,8 +666,7 @@ async fn parallel_run_all_reports_panic_and_runs_remaining_page_title_tests() {
         .expect_err("run-all should report the intentional panic");
 
     assert_that!(started.load(Ordering::SeqCst)).is_equal_to(3);
-    assert_that!(err.to_string())
-        .contains(BrowserTestError::RunTests { failed_tests: 1 }.to_string());
+    assert_that!(failed_tests(&err)).is_equal_to(Some(1));
     assert_that!(err).has_child_count(1);
 }
 
@@ -688,8 +694,7 @@ async fn parallel_fail_fast_waits_for_running_page_title_test_without_starting_m
         .await
         .expect_err("fail-fast should report the intentional failure");
 
-    assert_that!(err.to_string())
-        .contains(BrowserTestError::RunTests { failed_tests: 1 }.to_string());
+    assert_that!(failed_tests(&err)).is_equal_to(Some(1));
     assert_that!(err).has_child_count(1);
     assert_that!(started.load(Ordering::SeqCst)).is_equal_to(2);
 }
@@ -922,10 +927,16 @@ async fn a_filter_selecting_no_test_fails_the_run() {
         )
         .await
         .expect_err("the filter selects no test");
-    assert_that!(err.current_context()).is_equal_to(&BrowserTestError::NoTestSelected {
-        name_patterns: Vec::new(),
-        tag_patterns: vec!["button,focus".to_owned()],
-    });
+    let BrowserTestError::NoTestSelected {
+        name_patterns,
+        tag_patterns,
+        ..
+    } = err.current_context()
+    else {
+        panic!("expected NoTestSelected, got {err:?}");
+    };
+    assert_that!(name_patterns).is_empty();
+    assert_that!(tag_patterns).contains_exactly(["button,focus"]);
     assert_that!(outcomes.lock().unwrap().clone()).is_empty();
 }
 

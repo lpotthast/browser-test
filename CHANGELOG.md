@@ -49,6 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `with_group` with `with_tag`, `with_groups_from_env_var` with `with_tag_pattern_from_env_var`, `BROWSER_TEST_GROUP`
   with `BROWSER_TEST_TAG`, and `filter_groups` with a `TestFilter` selecting tags. `#[browser_test]` rejects empty and
   duplicate tags. A test wrapping another one should forward `BrowserTest::tags` as well.
+- **Breaking:** The variants of `BrowserTestError` with fields (`RunTest`, `PrepareSession`, `Panic`, `TimedOut`,
+  `RunTests` and `NoTestSelected`) are `#[non_exhaustive]`, so that they can gain fields without a breaking change.
+  Match them with `..`, e.g. `BrowserTestError::RunTests { failed_tests, .. }`. They can no longer be constructed
+  outside of `browser-test`.
 - **Breaking:** `BrowserTestRunReport` became `RunReport` and `BrowserTestRecord` became `TestRecord`, in line with
   `SuiteRecord`, `TestOutcome` and `RunReportConsumer`. `StepStats::count` is a `usize`, like every other count of the
   report.
