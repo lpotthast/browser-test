@@ -7,7 +7,6 @@
 mod browser_test;
 
 use proc_macro2::TokenStream;
-use syn::ItemFn;
 
 /// Turn an async function into a browser test: a unit struct implementing `BrowserTest`.
 ///
@@ -98,8 +97,9 @@ use syn::ItemFn;
 #[manyhow::manyhow]
 #[proc_macro_attribute]
 pub fn browser_test(
-    args: browser_test::Arguments,
-    function: ItemFn,
+    args: TokenStream,
+    item: TokenStream,
+    dummy: &mut TokenStream,
 ) -> manyhow::Result<TokenStream> {
-    browser_test::expand(args, function)
+    browser_test::expand(args, item, dummy)
 }

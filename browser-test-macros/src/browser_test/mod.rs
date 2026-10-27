@@ -5,13 +5,13 @@ mod arguments;
 mod description;
 mod signature;
 
-pub(crate) use arguments::Arguments;
+use arguments::Arguments;
 use heck::ToUpperCamelCase;
 use manyhow::{ErrorMessage, bail, ensure, error_message};
 use proc_macro2::{Ident, TokenStream};
-use quote::{format_ident, quote, quote_spanned};
+use quote::{ToTokens as _, format_ident, quote, quote_spanned};
 use signature::{Inputs, TestSignature};
-use syn::{ItemFn, Visibility, ext::IdentExt, spanned::Spanned as _};
+use syn::{Attribute, ItemFn, Visibility, ext::IdentExt, spanned::Spanned as _};
 
 /// Struct names that would shadow a name of the standard prelude (Rust 2024) in the test's module:
 /// its types and traits, and the `Option` and `Result` variants, as a unit struct also defines a
@@ -62,14 +62,42 @@ const RESERVED_NAMES: &[&str] = &[
     "Vec",
 ];
 
-pub(crate) fn expand(args: Arguments, mut function: ItemFn) -> manyhow::Result<TokenStream> {
+/// The expansion of `#[browser_test]` on `item`, with `args`. On an error, `dummy` holds the
+/// function and its struct, so that neither the struct's uses nor the function's body report
+/// errors of their own.
+pub(crate) fn expand(
+    args: TokenStream,
+    item: TokenStream,
+    dummy: &mut TokenStream,
+) -> manyhow::Result<TokenStream> {
+    let function = match syn::parse2::<ItemFn>(item.clone()) {
+        Ok(function) => function,
+        Err(error) => {
+            *dummy = item;
+            bail!(
+                error.span(),
+                "`#[browser_test]` must be applied to an `async fn`"
+            );
+        }
+    };
+    let args = syn::parse2::<Arguments>(args);
+    let crate_path = crate_path();
+    *dummy = expand_dummy(function.clone(), crate_path.as_ref().ok());
+    expand_test(args?, &crate_path?, function)
+}
+
+/// The test of `function`, with `args`.
+fn expand_test(
+    args: Arguments,
+    crate_path: &TokenStream,
+    mut function: ItemFn,
+) -> manyhow::Result<TokenStream> {
     let TestSignature {
         result,
         context,
         generics,
         inputs,
     } = TestSignature::parse(&function.sig)?;
-    let crate_path = crate_path()?;
     let function_name = function.sig.ident.unraw().to_string();
     let name = struct_name(&function.sig.ident, &function_name)?;
     // Only a test with tags has tags of its own.
@@ -97,23 +125,10 @@ pub(crate) fn expand(args: Arguments, mut function: ItemFn) -> manyhow::Result<T
         || quote!(::core::concat!(::core::module_path!(), "::", #function_name)),
         |name| quote!(#name),
     );
-    // The struct documents the test. The body keeps every other attribute: one meant for the
-    // function, e.g. `#[expect(...)]` or `#[tracing::instrument]`, could fail on the struct.
-    let docs: Vec<_> = function
-        .attrs
-        .extract_if(.., |attr| attr.path().is_ident("doc"))
-        .collect();
-    let description = description::expand(&docs);
-    // Conditional compilation must guard every generated item, including the implementation.
-    let cfgs: Vec<_> = function
-        .attrs
-        .iter()
-        .filter(|attr| attr.path().is_ident("cfg"))
-        .cloned()
-        .collect();
-    // The function keeps its name, which failure reports and `#[tracing::instrument]` show, and
-    // the struct gets its visibility.
-    let visibility = std::mem::replace(&mut function.vis, Visibility::Inherited);
+    let attributes = StructAttributes::take(&mut function);
+    let description = description::expand(&attributes.docs);
+    let cfgs = &attributes.cfgs;
+    let test_struct = attributes.test_struct(&name);
     let body = &function.sig.ident;
     let (impl_generics, _, where_clause) = generics.split_for_impl();
     let call_args = match inputs {
@@ -130,15 +145,7 @@ pub(crate) fn expand(args: Arguments, mut function: ItemFn) -> manyhow::Result<T
         ::std::boxed::Box::pin(#crate_path::__private::run_body(#body(#call_args), #into_dynamic))
     };
     Ok(quote! {
-        #(#docs)*
-        #(#cfgs)*
-        #[derive(
-            ::std::fmt::Debug,
-            ::std::clone::Clone,
-            ::std::marker::Copy,
-            ::std::default::Default,
-        )]
-        #visibility struct #name;
+        #test_struct
 
         #function
 
@@ -168,6 +175,105 @@ pub(crate) fn expand(args: Arguments, mut function: ItemFn) -> manyhow::Result<T
             }
         }
     })
+}
+
+/// What the attribute expands to besides an error: `function` and its struct, implementing
+/// `BrowserTest` for every context if `crate_path` is known.
+fn expand_dummy(mut function: ItemFn, crate_path: Option<&TokenStream>) -> TokenStream {
+    let name = struct_name(&function.sig.ident, &function.sig.ident.unraw().to_string()).ok();
+    let attributes = StructAttributes::take(&mut function);
+    // A free function with a receiver is an error of its own.
+    let function = function.sig.receiver().is_none().then(|| {
+        quote! {
+            #[allow(dead_code)]
+            #function
+        }
+    });
+    let Some(name) = name else {
+        return function.into_token_stream();
+    };
+    let test_struct = attributes.test_struct(&name);
+    let cfgs = &attributes.cfgs;
+    let implementation = crate_path.map(|crate_path| {
+        quote! {
+            #(#cfgs)*
+            impl<__BrowserTestContext> #crate_path::BrowserTest<__BrowserTestContext> for #name
+            where
+                __BrowserTestContext: ?::core::marker::Sized + ::core::marker::Sync,
+            {
+                fn run<'__browser_test>(
+                    &'__browser_test self,
+                    _: &'__browser_test #crate_path::thirtyfour::WebDriver,
+                    _: &'__browser_test __BrowserTestContext,
+                ) -> #crate_path::TestFuture<'__browser_test> {
+                    ::core::unreachable!()
+                }
+            }
+        }
+    });
+    quote! {
+        #[allow(dead_code)]
+        #test_struct
+
+        #function
+
+        #implementation
+    }
+}
+
+/// The attributes of a test's function that belong to its struct.
+struct StructAttributes {
+    /// The doc comments, which document the test.
+    docs: Vec<Attribute>,
+    /// The `#[cfg]`s, which must guard every generated item, including the implementation.
+    cfgs: Vec<Attribute>,
+    /// The function's visibility.
+    visibility: Visibility,
+}
+
+impl StructAttributes {
+    /// Takes the struct's attributes from `function`. The function keeps every other attribute:
+    /// one meant for the function, e.g. `#[expect(...)]` or `#[tracing::instrument]`, could fail on
+    /// the struct. It keeps its name, which failure reports and `#[tracing::instrument]` show, and
+    /// the struct gets its visibility.
+    fn take(function: &mut ItemFn) -> Self {
+        let docs = function
+            .attrs
+            .extract_if(.., |attr| attr.path().is_ident("doc"))
+            .collect();
+        let cfgs = function
+            .attrs
+            .iter()
+            .filter(|attr| attr.path().is_ident("cfg"))
+            .cloned()
+            .collect();
+        let visibility = std::mem::replace(&mut function.vis, Visibility::Inherited);
+        Self {
+            docs,
+            cfgs,
+            visibility,
+        }
+    }
+
+    /// The declaration of the test's struct, `name`.
+    fn test_struct(&self, name: &Ident) -> TokenStream {
+        let Self {
+            docs,
+            cfgs,
+            visibility,
+        } = self;
+        quote! {
+            #(#docs)*
+            #(#cfgs)*
+            #[derive(
+                ::std::fmt::Debug,
+                ::std::clone::Clone,
+                ::std::marker::Copy,
+                ::std::default::Default,
+            )]
+            #visibility struct #name;
+        }
+    }
 }
 
 /// The path to `browser-test`, under the name the caller's `Cargo.toml` gives it.
@@ -208,7 +314,7 @@ mod tests {
     use assertr::prelude::*;
     use manyhow::ToTokensError;
 
-    use super::{Arguments, expand};
+    use super::{Arguments, crate_path, expand_test};
 
     #[test]
     fn invalid_signatures_explain_the_unsupported_part() {
@@ -271,7 +377,7 @@ mod tests {
             ),
         ] {
             let function = syn::parse_str(source).unwrap();
-            let error = expand(Arguments::default(), function)
+            let error = expand_test(Arguments::default(), &crate_path().unwrap(), function)
                 .unwrap_err()
                 .into_token_stream();
             assert_that!(error.to_string()).contains(message);
