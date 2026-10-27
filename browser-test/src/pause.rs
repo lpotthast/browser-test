@@ -276,7 +276,7 @@ mod tests {
         let mut line = Some(line);
         let cancelled = read_pending_or(|| Ok(line.take().expect("started once")));
         // Polled once, then dropped, as a cancelled pause is.
-        assert_that!(futures_util::poll!(std::pin::pin!(cancelled)).is_pending()).is_true();
+        assert_that!(futures_util::poll!(std::pin::pin!(cancelled))).is_pending();
 
         line_sender
             .send(Ok(Some("y\n".to_owned())))

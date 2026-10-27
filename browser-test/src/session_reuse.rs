@@ -748,10 +748,7 @@ mod tests {
         ] {
             insert_origin(&mut origins, url);
         }
-        assert_that!(origins.into_iter().collect::<Vec<_>>()).is_equal_to(vec![
-            "file://".to_owned(),
-            "http://127.0.0.1:3000".to_owned(),
-        ]);
+        assert_that!(origins).contains_exactly(["file://", "http://127.0.0.1:3000"]);
     }
 
     #[test]

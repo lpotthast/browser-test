@@ -405,7 +405,7 @@ mod tests {
 
             assert_that!(custom_setup_called.load(Ordering::SeqCst)).is_equal_to(1);
             assert_that!(caps.is_headless()).is_false();
-            assert_that!(caps.has_arg("--window-size=800,600")).is_true();
+            assert_that!(caps.args()).contains("--window-size=800,600");
         }
 
         #[test]

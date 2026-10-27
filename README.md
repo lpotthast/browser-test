@@ -60,7 +60,7 @@ tests:
 
 ```toml
 [dev-dependencies]
-browser-test = "0.7"
+browser-test = "0.8"
 rootcause = "0.13"
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
 ```
@@ -154,10 +154,10 @@ process-default provider. No crate in your dependency graph may enable `reqwest/
 
 ```toml
 [dev-dependencies]
-browser-test = { version = "0.7", default-features = false, features = ["rustls-no-provider"] }
+browser-test = { version = "0.8", default-features = false, features = ["rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # Only if you depend on `thirtyfour` directly.
-thirtyfour = { version = "0.37", default-features = false, features = ["reqwest"] }
+thirtyfour = { version = "0.38", default-features = false, features = ["reqwest"] }
 ```
 
 ```rust,ignore

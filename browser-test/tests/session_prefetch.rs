@@ -210,27 +210,23 @@ async fn later_tests_find_their_session_ready() {
     )
     .await;
 
-    assert_that!(outcome.result.is_ok()).is_true();
+    assert_that!(outcome.result).is_ok();
     assert_that!(consumed.lock().unwrap().clone()).is_equal_to(vec![("first", 3), ("second", 3)]);
     assert_that!(outcome.report.sessions_created()).is_equal_to(3);
     for (creation, wait) in &session_timings(&outcome)[1..] {
         // Created while the previous test ran.
-        assert_that!(*wait < *creation / 2)
+        assert_that!(*wait)
             .with_detail_message(format!(
                 "waited {wait:?} for a session created in {creation:?}"
             ))
-            .is_true();
+            .is_less_than(*creation / 2);
     }
-    assert_that!(
-        outcome
-            .report
-            .tests
-            .iter()
-            .all(|test| test.teardown.is_some() && test.steps["goto"].count == 1)
-    )
-    .is_true();
-    assert_that!(outcome.report.session_wait_time() < outcome.report.session_creation_time())
-        .is_true();
+    for test in &outcome.report.tests {
+        assert_that!(test.teardown).is_some();
+        assert_that!(test.steps["goto"].count).is_equal_to(1);
+    }
+    assert_that!(outcome.report.session_wait_time())
+        .is_less_than(outcome.report.session_creation_time());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -246,13 +242,13 @@ async fn without_spare_sessions_tests_wait_for_their_session() {
     )
     .await;
 
-    assert_that!(outcome.result.is_ok()).is_true();
+    assert_that!(outcome.result).is_ok();
     for (creation, wait) in session_timings(&outcome) {
-        assert_that!(wait >= creation / 2)
+        assert_that!(wait)
             .with_detail_message(format!(
                 "waited {wait:?} for a session created in {creation:?}"
             ))
-            .is_true();
+            .is_greater_or_equal_to(creation / 2);
     }
 }
 
@@ -274,7 +270,7 @@ async fn parallel_tests_start_in_order_on_bounded_slots() {
     )
     .await;
 
-    assert_that!(outcome.result.is_ok()).is_true();
+    assert_that!(outcome.result).is_ok();
     // Tests take slots in order, but a test whose session is ready may start before an earlier
     // test whose browser is still starting. So only the set of started tests is fixed.
     let mut started = tracker.started.lock().unwrap().clone();
@@ -302,9 +298,9 @@ async fn fail_fast_does_not_start_tests_whose_session_is_ready() {
     )
     .await;
 
-    assert_that!(outcome.result.is_err()).is_true();
+    assert_that!(outcome.result).is_err();
     assert_that!(tracker.started.lock().unwrap().clone()).is_equal_to(vec![0]);
-    assert_that!(outcome.report.tests.len()).is_equal_to(1);
+    assert_that!(outcome.report.tests).has_length(1);
     assert_that!(outcome.report.not_started).is_equal_to(2);
     assert_that!(outcome.report.tests[0].outcome).is_equal_to(TestOutcome::Failed);
 }
@@ -334,9 +330,9 @@ async fn fail_fast_does_not_start_tests_waiting_for_their_session() {
     )
     .await;
 
-    assert_that!(outcome.result.is_err()).is_true();
+    assert_that!(outcome.result).is_err();
     assert_that!(tracker.started.lock().unwrap().clone()).is_equal_to(vec![0, 1]);
-    assert_that!(outcome.report.tests.len()).is_equal_to(2);
+    assert_that!(outcome.report.tests).has_length(2);
 }
 
 /// Stores a value in `localStorage` and a cookie, or checks that neither exists.
@@ -393,7 +389,7 @@ async fn every_test_gets_a_fresh_browser() {
         )
         .await;
 
-    assert_that!(result.is_ok()).is_true();
+    assert_that!(result).is_ok();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -415,7 +411,7 @@ async fn nested_groups_limit_what_runs_at_the_same_time() {
 
     let outcome = run(runner(), base_url.as_str(), tests).await;
 
-    assert_that!(outcome.result.is_ok()).is_true();
+    assert_that!(outcome.result).is_ok();
     assert_that!(all.max_running.load(Ordering::SeqCst)).is_equal_to(2);
     assert_that!(serial.max_running.load(Ordering::SeqCst)).is_equal_to(1);
     assert_that!(serial.started.lock().unwrap().clone()).is_equal_to(vec![2, 3]);
@@ -426,10 +422,10 @@ async fn nested_groups_limit_what_runs_at_the_same_time() {
         .map(|test| test.path.as_deref())
         .collect();
     assert_that!(paths).is_equal_to(vec![None, None, Some("serial"), Some("serial")]);
-    assert_that!(outcome.report.groups.len()).is_equal_to(1);
+    assert_that!(outcome.report.groups).has_length(1);
     assert_that!(outcome.report.groups[0].name.as_str()).is_equal_to("serial");
     // The serial group ran its two tests one after another, alongside the other two tests.
-    assert_that!(outcome.report.groups[0].duration >= body * 2).is_true();
+    assert_that!(outcome.report.groups[0].duration).is_greater_or_equal_to(body * 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -449,7 +445,7 @@ async fn run_all_runs_the_rest_of_a_sequential_group_after_a_failure() {
     )
     .await;
 
-    assert_that!(outcome.result.is_err()).is_true();
+    assert_that!(outcome.result).is_err();
     assert_that!(tracker.started.lock().unwrap().clone()).is_equal_to(vec![0, 1]);
     let outcomes: Vec<TestOutcome> = outcome
         .report
@@ -483,7 +479,7 @@ async fn fail_fast_still_runs_run_always_groups() {
     )
     .await;
 
-    assert_that!(outcome.result.is_err()).is_true();
+    assert_that!(outcome.result).is_err();
     assert_that!(tracker.started.lock().unwrap().clone()).is_equal_to(vec![0, 2]);
 }
 
@@ -592,10 +588,10 @@ impl BrowserTest<str> for Clean {
     }
 
     async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
-        assert_that!(driver.windows().await?.len()).is_equal_to(self.windows);
+        assert_that!(driver.windows().await?).has_length(self.windows);
         // An empty page: `about:blank` in a new user context, a `data:` URL after a manual reset.
         let url = driver.current_url().await?.to_string();
-        assert_that!(["about:blank", "data:text/html,"]).contains(url.as_str());
+        assert_that!(url.as_str()).is_one_of(["about:blank", "data:text/html,"]);
         assert_that!(Some(driver.get_window_rect().await?))
             .is_equal_to(self.initial_rect.lock().unwrap().clone());
 
@@ -686,7 +682,7 @@ async fn assert_reset_keeps_no_state(reset: SessionReset, second_window: bool, w
     assert_that!(outcome.report.session_resets()).is_equal_to(1);
     // The reused session's teardown is its reset, reported with the next test.
     assert_that!(outcome.report.tests[0].teardown).is_none();
-    assert_that!(outcome.report.tests[1].teardown.is_some()).is_true();
+    assert_that!(outcome.report.tests[1].teardown).is_some();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -856,7 +852,7 @@ async fn quits_of_released_sessions_are_measured() {
     )
     .await;
 
-    assert_that!(outcome.result.is_ok()).is_true();
+    assert_that!(outcome.result).is_ok();
     assert_that!(preparations(&outcome)).is_equal_to(vec!["created", "created"]);
     assert_that!(outcome.report.released_session_teardown).is_greater_than(Duration::ZERO);
     assert_that!(outcome.report.session_teardown_time())
@@ -1040,7 +1036,7 @@ async fn script_requests(reset: SessionReset) -> usize {
             .with(LoadsCachedScript(2)),
     )
     .await;
-    assert_that!(outcome.result.is_ok()).is_true();
+    assert_that!(outcome.result).is_ok();
     assert_that!(preparations(&outcome)).is_equal_to(vec!["created", "reset"]);
     requests.load(Ordering::SeqCst)
 }
@@ -1108,7 +1104,7 @@ async fn restored_from_back_forward_cache(reuse: SessionReuse, dedicated: bool) 
         }),
     )
     .await;
-    assert_that!(outcome.result.is_ok()).is_true();
+    assert_that!(outcome.result).is_ok();
     restored.lock().unwrap().expect("the test ran")
 }
 
@@ -1147,7 +1143,7 @@ async fn reused_sessions_run_tests_while_more_tests_need_them() {
     )
     .await;
 
-    assert_that!(outcome.result.is_ok()).is_true();
+    assert_that!(outcome.result).is_ok();
     // Two running tests plus two spares at most; every further test reuses one of them.
     assert_that!(outcome.report.sessions_created()).is_less_or_equal_to(4);
     assert_that!(outcome.report.session_resets()).is_greater_or_equal_to(4);
@@ -1178,7 +1174,7 @@ async fn fresh_session_tests_get_a_session_no_test_ran_in() {
     )
     .await;
 
-    assert_that!(outcome.result.is_err()).is_true();
+    assert_that!(outcome.result).is_err();
     // One session runs 0, 1 (failing) and 2. 3 needs a fresh one, so the pool creates it. 4 takes
     // the reset session of 2; 3's session isn't needed anymore and quits.
     assert_that!(preparations(&outcome))
@@ -1203,6 +1199,6 @@ async fn sessions_run_at_most_their_maximum_of_tests() {
     )
     .await;
 
-    assert_that!(outcome.result.is_ok()).is_true();
+    assert_that!(outcome.result).is_ok();
     assert_that!(preparations(&outcome)).is_equal_to(vec!["created", "reset", "created"]);
 }

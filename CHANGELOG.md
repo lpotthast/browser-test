@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-10-27
+
+### Changed
+
+- **Breaking:** Updated `thirtyfour` to version `0.38`.
+- Updated `chrome-for-testing-manager` to version `0.15`.
+- Updated `assertr` to version `0.9`.
+
 ## [0.7.0] - 2026-10-13
 
 ### Added
@@ -367,7 +375,9 @@ does what it is told. See "Changed" for the renames.
 - Added environment-variable controls for visibility, pauses, and browser-driver output diagnostics.
 - Added re-exports for `async_trait::async_trait`, `chrome_for_testing_manager::Channel` and the `thirtyfour` crate.
 
-[Unreleased]: https://github.com/lpotthast/browser-test/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/lpotthast/browser-test/compare/v0.8.0...HEAD
+
+[0.8.0]: https://github.com/lpotthast/browser-test/compare/v0.7.0...v0.8.0
 
 [0.7.0]: https://github.com/lpotthast/browser-test/compare/v0.6.1...v0.7.0
 

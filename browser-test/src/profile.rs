@@ -505,13 +505,13 @@ mod tests {
         assert_that!(first_path.clone()).is_not_equal_to(second_path.clone());
 
         drop(first);
-        assert_that!(first_path.exists()).is_false();
-        assert_that!(second_path.is_dir()).is_true();
+        assert_that!(first_path).does_not_exist();
+        assert_that!(second_path).is_a_directory();
 
         let run_path = run.dir.path().to_owned();
         drop(second);
         drop(run);
-        assert_that!(run_path.exists()).is_false();
+        assert_that!(run_path).does_not_exist();
         assert_that!(entry_count(profiles_dir.path())).is_equal_to(0);
     }
 
@@ -524,7 +524,7 @@ mod tests {
 
         let _next = profiles_dir.create_run();
 
-        assert_that!(alive.dir.path().is_dir()).is_true();
+        assert_that!(alive.dir.path()).is_a_directory();
     }
 
     #[cfg(unix)]
@@ -544,7 +544,7 @@ mod tests {
 
         let _next = profiles_dir.create_run();
 
-        assert_that!(killed.exists()).is_false();
+        assert_that!(killed).does_not_exist();
     }
 
     #[test]
@@ -569,11 +569,11 @@ mod tests {
 
         let next = profiles_dir.create_run();
 
-        assert_that!(abandoned.exists()).is_false();
-        assert_that!(without_lock.exists()).is_false();
-        assert_that!(alive.dir.path().is_dir()).is_true();
-        assert_that!(foreign.is_dir()).is_true();
-        assert_that!(staging.is_dir()).is_true();
+        assert_that!(abandoned).does_not_exist();
+        assert_that!(without_lock).does_not_exist();
+        assert_that!(alive.dir.path()).is_a_directory();
+        assert_that!(foreign).is_a_directory();
+        assert_that!(staging).is_a_directory();
         assert_that!(entry_count(base)).is_equal_to(4);
 
         drop(alive);
@@ -604,7 +604,7 @@ mod tests {
 
         let _run = profiles_dir.create_run();
 
-        assert_that!(unknown.is_dir()).is_true();
+        assert_that!(unknown).is_a_directory();
     }
 
     #[test]
@@ -639,12 +639,12 @@ mod tests {
         ] {
             let mut caps = ChromeCapabilities::new();
             caps.add_arg(configured).expect("arg should be added");
-            assert_that!(profile.configure(&mut caps).is_err()).is_true();
+            assert_that!(profile.configure(&mut caps)).is_err();
         }
         let mut caps = ChromeCapabilities::new();
         caps.add_arg("--user-data-dir-like=x")
             .expect("arg should be added");
-        assert_that!(profile.configure(&mut caps).is_ok()).is_true();
+        assert_that!(profile.configure(&mut caps)).is_ok();
     }
 
     #[test]
@@ -652,7 +652,7 @@ mod tests {
         let profiles_dir = TestProfilesDir::at("target/browser-test-profile-tests-relative");
         let run = profiles_dir.create_run();
 
-        assert_that!(run.dir.path().is_absolute()).is_true();
+        assert_that!(run.dir.path()).is_absolute();
     }
 
     #[cfg(unix)]

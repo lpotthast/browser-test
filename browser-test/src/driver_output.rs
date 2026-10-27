@@ -391,9 +391,9 @@ mod tests {
         ))));
 
         tail_lines.set("lots");
-        assert_that!(DriverOutput::from_env().is_err()).is_true();
+        assert_that!(DriverOutput::from_env()).is_err();
         tail_lines.set("0");
-        assert_that!(DriverOutput::from_env().is_err()).is_true();
+        assert_that!(DriverOutput::from_env()).is_err();
 
         env.set("0");
         assert_that!(DriverOutput::from_env()).is_equal_to(Ok(Some(DriverOutput::disabled())));
@@ -417,7 +417,7 @@ mod tests {
 
         assert_that!(snapshot.total_lines).is_equal_to(5);
         assert_that!(snapshot.tail_capacity).is_equal_to(2);
-        assert_that!(snapshot.tail_lines.len()).is_equal_to(2);
+        assert_that!(snapshot.tail_lines).has_length(2);
         assert_that!(&snapshot.tail_lines[0].line.line).is_equal_to("two");
         assert_that!(snapshot.tail_lines[0].sequence).is_equal_to(1);
         assert_that!(&snapshot.tail_lines[1].line.line).is_equal_to("three");
@@ -431,7 +431,7 @@ mod tests {
 
         capture.push(line(DriverOutputSource::Stdout, "one"));
 
-        assert_that!(capture.snapshot().tail_lines.len()).is_equal_to(1);
+        assert_that!(capture.snapshot().tail_lines).has_length(1);
     }
 
     #[test]
@@ -447,8 +447,8 @@ mod tests {
 
         attach_browser_driver_output(&mut report, Some(&capture));
 
-        assert_that!(report.attachments().len()).is_equal_to(initial_attachment_count + 1);
-        assert_that!(report.children().len()).is_equal_to(0);
+        assert_that!(report).has_attachment_count(initial_attachment_count + 1);
+        assert_that!(report).has_child_count(0);
         assert_that!(report.to_string()).contains("Recent browser driver output");
         assert_that!(report.to_string()).contains("parallel tests may interleave lines");
     }

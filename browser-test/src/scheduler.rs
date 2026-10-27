@@ -170,10 +170,10 @@ mod tests {
         assert_that!(Parallelism::from_env()).is_equal_to(Ok(Some(Parallelism::parallel(4))));
 
         env.set("many");
-        assert_that!(Parallelism::from_env().is_err()).is_true();
+        assert_that!(Parallelism::from_env()).is_err();
 
         env.set("0");
-        assert_that!(Parallelism::from_env().is_err()).is_true();
+        assert_that!(Parallelism::from_env()).is_err();
     }
 
     #[test]
@@ -214,6 +214,6 @@ mod tests {
 
         assert_that!(err.to_string())
             .contains(BrowserTestError::RunTests { failed_tests: 2 }.to_string());
-        assert_that!(err.children().len()).is_equal_to(2);
+        assert_that!(err).has_child_count(2);
     }
 }

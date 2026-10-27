@@ -241,7 +241,10 @@ fn record_step(kind: &'static str, detail: Option<&str>, start: Instant, finishe
 
 #[cfg(test)]
 mod tests {
-    use assertr::prelude::*;
+    use assertr::{
+        matchers::{each, string},
+        prelude::*,
+    };
 
     use super::*;
 
@@ -271,13 +274,9 @@ mod tests {
 
         let first = first.take();
         let second = second.take();
-        assert_that!(first)
-            .keys()
-            .contains_exactly_in_any_order(["goto"]);
+        assert_that!(first).keys().contains_exactly(["goto"]);
         assert_that!(first["goto"].count).is_equal_to(2);
-        assert_that!(second)
-            .keys()
-            .contains_exactly_in_any_order(["wait"]);
+        assert_that!(second).keys().contains_exactly(["wait"]);
         assert_that!(second["wait"].count).is_equal_to(1);
     }
 
@@ -298,7 +297,7 @@ mod tests {
                 async { panic!("assertion failed") }.step("assert"),
             ))
             .await;
-            assert!(panicked.is_err());
+            assert_that!(panicked).is_err();
             // Never polled.
             drop(async {}.step("unpolled"));
         }));
@@ -306,16 +305,18 @@ mod tests {
         let steps = recorder.take();
         assert_that!(steps)
             .keys()
-            .contains_exactly_in_any_order(["assert", "wait"]);
+            .contains_exactly(["assert", "wait"]);
         let recent = recorder
             .recent_steps()
             .expect("the steps are recent")
             .to_string();
         let lines: Vec<_> = recent.lines().skip(1).collect();
-        assert_that!(lines.len()).is_equal_to(2);
-        assert_that!(lines[0]).contains(" wait (");
-        assert_that!(lines[1]).contains(" assert (");
-        assert_that!(lines.iter().all(|line| line.ends_with(", unfinished)"))).is_true();
+        assert_that!(lines)
+            .contains_exactly_matching(matchers![
+                string::contains(" wait ("),
+                string::contains(" assert ("),
+            ])
+            .matches(each(string::ends_with(", unfinished)")));
     }
 
     #[test]

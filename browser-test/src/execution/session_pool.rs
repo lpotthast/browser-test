@@ -459,14 +459,14 @@ mod tests {
         pool.deliver(Delivery::Pool, Ok(ticket(created).0));
 
         // The first test takes the spare, and the pool creates the next one.
-        assert_that!(pool.take(false, false, || true).await.is_some()).is_true();
+        assert_that!(pool.take(false, false, || true).await).is_some();
         assert_that!(requested(&mut requests)).is_equal_to(1);
         pool.deliver(Delivery::Pool, Ok(ticket(created).0));
         pool.test_finished();
 
         // While the first test's session quits, two browsers are open: the next test takes the
         // spare, and the pool creates no further one until the session ended.
-        assert_that!(pool.take(false, false, || true).await.is_some()).is_true();
+        assert_that!(pool.take(false, false, || true).await).is_some();
         assert_that!(requested(&mut requests)).is_equal_to(0);
         pool.session_ended(true);
         assert_that!(requested(&mut requests)).is_equal_to(1);

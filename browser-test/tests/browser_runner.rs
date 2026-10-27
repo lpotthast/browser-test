@@ -452,7 +452,7 @@ async fn failure_reports_name_browser_test_functions() {
         .skip(1)
         .take_while(|line| line.contains("tests/browser_runner.rs"))
         .collect();
-    assert_that!(test_code.len()).is_equal_to(2);
+    assert_that!(test_code).has_length(2);
     assert_that!(test_code[0]).ends_with("browser_runner::find_missing");
     assert_that!(test_code[1]).ends_with("browser_runner::missing_element");
 }
@@ -564,7 +564,7 @@ async fn run_all_reports_intentional_failure_and_runs_page_title_test() {
 
     assert_that!(err.to_string())
         .contains(BrowserTestError::RunTests { failed_tests: 1 }.to_string());
-    assert_that!(err.children().len()).is_equal_to(1);
+    assert_that!(err).has_child_count(1);
 }
 
 /// Implements `run` by hand, and panics before returning its future.
@@ -608,7 +608,7 @@ async fn run_all_reports_panics_outside_test_bodies_and_runs_remaining_tests() {
         .expect_err("run-all should report the panic");
 
     assert_that!(started.load(Ordering::SeqCst)).is_equal_to(1);
-    assert_that!(err.children().len()).is_equal_to(1);
+    assert_that!(err).has_child_count(1);
     assert_that!(format!("{err:?}")).contains("no future");
 }
 
@@ -638,7 +638,7 @@ async fn run_all_reports_metadata_hook_panics_and_runs_remaining_page_title_test
     assert_that!(started.load(Ordering::SeqCst)).is_equal_to(1);
     assert_that!(err.to_string())
         .contains(BrowserTestError::RunTests { failed_tests: 2 }.to_string());
-    assert_that!(err.children().len()).is_equal_to(2);
+    assert_that!(err).has_child_count(2);
     assert_that!(format!("{err:?}")).contains("unnamed test at index 0");
     assert_that!(format!("{err:?}")).contains("settings hook failed");
 }
@@ -670,7 +670,7 @@ async fn parallel_run_all_reports_panic_and_runs_remaining_page_title_tests() {
     assert_that!(started.load(Ordering::SeqCst)).is_equal_to(3);
     assert_that!(err.to_string())
         .contains(BrowserTestError::RunTests { failed_tests: 1 }.to_string());
-    assert_that!(err.children().len()).is_equal_to(1);
+    assert_that!(err).has_child_count(1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -699,7 +699,7 @@ async fn parallel_fail_fast_waits_for_running_page_title_test_without_starting_m
 
     assert_that!(err.to_string())
         .contains(BrowserTestError::RunTests { failed_tests: 1 }.to_string());
-    assert_that!(err.children().len()).is_equal_to(1);
+    assert_that!(err).has_child_count(1);
     assert_that!(started.load(Ordering::SeqCst)).is_equal_to(2);
 }
 
@@ -1288,7 +1288,7 @@ impl ChildRun {
             if let Some(status) = child.process.try_wait().expect("child should be waitable") {
                 panic!("child run exited before its test ran: {status}");
             }
-            assert_that!(Instant::now() < deadline).is_true();
+            assert_that!(Instant::now()).is_less_than(deadline);
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         child
@@ -1333,7 +1333,7 @@ impl ChildRun {
             if let Some(status) = self.process.try_wait().expect("child should be waitable") {
                 return status;
             }
-            assert_that!(Instant::now() < deadline).is_true();
+            assert_that!(Instant::now()).is_less_than(deadline);
             std::thread::sleep(Duration::from_millis(50));
         }
     }

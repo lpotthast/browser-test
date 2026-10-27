@@ -103,9 +103,9 @@ mod tests {
         assert_that!(error.to_string()).contains("BROWSER_TEST_ENV_TEST is set to \"ture\"");
 
         env.set("four");
-        assert_that!(env_positive_number(TEST_VAR).is_err()).is_true();
+        assert_that!(env_positive_number(TEST_VAR)).is_err();
         env.set("0");
-        assert_that!(env_positive_number(TEST_VAR).is_err()).is_true();
+        assert_that!(env_positive_number(TEST_VAR)).is_err();
         env.set(" 4 ");
         assert_that!(env_positive_number(TEST_VAR)).is_equal_to(Ok(NonZeroUsize::new(4)));
     }

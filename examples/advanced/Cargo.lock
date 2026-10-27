@@ -70,12 +70,6 @@ dependencies = [
 
 [[package]]
 name = "base64"
-version = "0.22.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
-
-[[package]]
-name = "base64"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
@@ -97,7 +91,7 @@ dependencies = [
 
 [[package]]
 name = "browser-test"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "backtrace",
@@ -133,7 +127,7 @@ dependencies = [
 
 [[package]]
 name = "browser-test-macros"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "heck",
  "manyhow",
@@ -190,9 +184,9 @@ dependencies = [
 
 [[package]]
 name = "chrome-for-testing"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "765d772349ea7ae21285a6edb71d896955ee856bdc8328995ae3901b281bea1f"
+checksum = "6844fe176c7eabd2aa5d0249367232113c0eac96f6a2b8699513210c57ed1cc9"
 dependencies = [
  "reqwest",
  "rootcause",
@@ -204,9 +198,9 @@ dependencies = [
 
 [[package]]
 name = "chrome-for-testing-manager"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "710d074444f5e2aaedd741cd8491a54f423223dffe85ae49ee05d4214b944bd3"
+checksum = "816803846361fd6d19ed34c1013d11f2d71c089cf2d6962f2c8e54bf23aae036"
 dependencies = [
  "chrome-for-testing",
  "directories",
@@ -512,9 +506,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi",
  "rand_core",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -623,7 +619,7 @@ version = "0.1.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ddc03d96684f9226b8a787cdb71488417b53ab5ea8fdb1dac946cb9431cc8bff"
 dependencies = [
- "base64 0.23.1",
+ "base64",
  "bytes",
  "futures-channel",
  "futures-util",
@@ -1117,7 +1113,7 @@ version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
 dependencies = [
- "base64 0.23.1",
+ "base64",
  "bytes",
  "futures-core",
  "http",
@@ -1553,13 +1549,13 @@ dependencies = [
 
 [[package]]
 name = "thirtyfour"
-version = "0.37.8"
+version = "0.38.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a9c6d349d6b4a7243df43b9852fd0f93ef113c23ada67201374c1af904b1263"
+checksum = "4ee66d96cfd32e01668efd6ec62caf5f7000438d771a9d673bf0c727bc05fbb6"
 dependencies = [
  "arc-swap",
  "async-trait",
- "base64 0.22.1",
+ "base64",
  "bytes",
  "cfg-if",
  "const_format",
@@ -1568,6 +1564,7 @@ dependencies = [
  "indexmap",
  "pastey",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "serde_repr",
@@ -1578,6 +1575,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "url",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -1728,7 +1726,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tungstenite",
- "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -1915,9 +1912,9 @@ dependencies = [
 
 [[package]]
 name = "typed-path"
-version = "0.12.3"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
+checksum = "9ce898823d8cd0f028662d2f349694b1af0a5cc9be83f1d213a00d3147445e1e"
 
 [[package]]
 name = "typenum"
@@ -2069,18 +2066,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-roots"
-version = "0.26.11"
+version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
-dependencies = [
- "webpki-roots 1.0.9",
-]
-
-[[package]]
-name = "webpki-roots"
-version = "1.0.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
+checksum = "f5f280bbb2b287bc8e7de7e3852945a0ff50d1bbcb5ed42b6c7a568c546df171"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -2282,15 +2270,18 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "8.6.0"
+version = "9.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+checksum = "ec2e3161de27091f18a831d9494e9c53378a34833af5c1dda35ad85849da18d6"
 dependencies = [
  "crc32fast",
  "flate2",
+ "getrandom 0.4.3",
  "indexmap",
  "memchr",
+ "nix",
  "typed-path",
+ "windows-sys 0.61.2",
  "zopfli",
 ]
 

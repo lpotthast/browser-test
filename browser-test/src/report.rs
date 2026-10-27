@@ -650,7 +650,7 @@ mod tests {
 
         let steps = report.slowest_steps();
 
-        assert_that!(steps.len()).is_equal_to(2);
+        assert_that!(steps).has_length(2);
         assert_that!(steps[0].0.as_str()).is_equal_to("goto");
         assert_that!(steps[0].1).is_equal_to(StepStats {
             count: 3,
@@ -712,6 +712,6 @@ mod tests {
         assert_that!(summary.as_str()).contains("  groups:\n        1.20s  after all");
         let broken = summary.find("broken").expect("summary lists the slow test");
         let works = summary.find("works").expect("summary lists the fast test");
-        assert_that!(broken < works).is_true();
+        assert_that!(broken).is_less_than(works);
     }
 }

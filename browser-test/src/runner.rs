@@ -602,7 +602,7 @@ mod tests {
         assert_that!(runner.failure_policy).is_equal_to(FailurePolicy::FailFast);
         assert_that!(runner.visibility).is_equal_to(Visibility::Headless);
         assert_that!(runner.pause.is_enabled()).is_false();
-        assert_that!(runner.driver_output_capture_for_run().is_none()).is_true();
+        assert_that!(runner.driver_output_capture_for_run()).is_none();
         assert_that!(runner.chrome_profiles_dir).is_equal_to(ChromeProfilesDir::in_temp_dir());
     }
 
@@ -649,7 +649,7 @@ mod tests {
         assert_that!(Visibility::from_env()).is_equal_to(Ok(None));
 
         env.set("visible");
-        assert_that!(Visibility::from_env().is_err()).is_true();
+        assert_that!(Visibility::from_env()).is_err();
     }
 
     #[test]
@@ -715,7 +715,7 @@ mod tests {
 
         let result = runner.run(&(), BrowserTests::<()>::sequential()).await;
 
-        assert_that!(result.is_ok()).is_true();
+        assert_that!(result).is_ok();
         assert_that!(calls.load(Ordering::SeqCst)).is_equal_to(0);
     }
 
@@ -732,6 +732,6 @@ mod tests {
         assert_that!(error.current_context().clone()).is_equal_to(BrowserTestError::RunTest {
             test_name: "login".to_owned(),
         });
-        assert_that!(error.children().len()).is_equal_to(1);
+        assert_that!(error).has_child_count(1);
     }
 }

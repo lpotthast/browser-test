@@ -283,6 +283,6 @@ mod tests {
         board.enter(test, "browser test 'slow test'", Phase::QuittingSession);
         assert_that!(board.activities.lock().unwrap()[&test].warnings).is_equal_to(0);
         board.clear(test);
-        assert_that!(board.activities.lock().unwrap().contains_key(&test)).is_false();
+        assert_that!(*board.activities.lock().unwrap()).does_not_contain_key(&test);
     }
 }
