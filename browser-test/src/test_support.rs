@@ -2,7 +2,8 @@ use std::{
     borrow::Cow,
     env,
     ffi::{OsStr, OsString},
-    sync::{Mutex, MutexGuard},
+    marker::PhantomData,
+    sync::{Mutex, MutexGuard, PoisonError},
 };
 
 use rootcause::Report;
@@ -12,32 +13,43 @@ use crate::{BrowserTest, TestSettings};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-pub(crate) struct EnvVarGuard {
+/// Restores an environment variable on drop and serializes environment access across tests.
+///
+/// [`EnvVarGuard::new`] takes the environment lock. [`EnvVarGuard::also`] guards a further
+/// variable under the lock of an existing guard, which it borrows, so it cannot outlive that lock.
+pub(crate) struct EnvVarGuard<'lock> {
     name: &'static str,
     original: Option<OsString>,
     _lock: Option<MutexGuard<'static, ()>>,
+    _borrowed_lock: PhantomData<&'lock ()>,
 }
 
-impl EnvVarGuard {
+impl EnvVarGuard<'static> {
     pub(crate) fn new(name: &'static str) -> Self {
-        let lock = ENV_LOCK
-            .lock()
-            .expect("environment lock should not be poisoned");
-        let original = env::var_os(name);
-        Self {
-            name,
-            original,
-            _lock: Some(lock),
-        }
-    }
-
-    /// Guard another variable while a guard created with [`Self::new`] holds the environment
-    /// lock.
-    pub(crate) fn new_unlocked(name: &'static str) -> Self {
+        // A test that panics while holding the lock poisons it. Its guards still restore the
+        // environment while unwinding, so later tests can safely proceed.
+        let lock = ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         Self {
             name,
             original: env::var_os(name),
+            _lock: Some(lock),
+            _borrowed_lock: PhantomData,
+        }
+    }
+}
+
+impl EnvVarGuard<'_> {
+    /// Guard another variable under the environment lock this guard holds.
+    #[expect(
+        clippy::unused_self,
+        reason = "the borrow of `self` keeps the lock alive for the returned guard"
+    )]
+    pub(crate) fn also(&self, name: &'static str) -> EnvVarGuard<'_> {
+        EnvVarGuard {
+            name,
+            original: env::var_os(name),
             _lock: None,
+            _borrowed_lock: PhantomData,
         }
     }
 
@@ -56,7 +68,7 @@ impl EnvVarGuard {
     }
 }
 
-impl Drop for EnvVarGuard {
+impl Drop for EnvVarGuard<'_> {
     fn drop(&mut self) {
         // SAFETY: ENV_LOCK serializes environment mutations in this crate's tests.
         unsafe {

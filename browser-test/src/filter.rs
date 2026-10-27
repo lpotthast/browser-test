@@ -340,7 +340,7 @@ mod tests {
     #[test]
     fn environment_patterns_are_trimmed_and_empty_ones_ignored() {
         let names = EnvVarGuard::new(DEFAULT_NAME_FILTER_ENV);
-        let tags = EnvVarGuard::new_unlocked(DEFAULT_TAG_FILTER_ENV);
+        let tags = names.also(DEFAULT_TAG_FILTER_ENV);
         names.remove();
         tags.remove();
         assert_that!(TestFilter::from_env())

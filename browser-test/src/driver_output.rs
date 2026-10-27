@@ -379,7 +379,7 @@ mod tests {
     #[test]
     fn from_env_reads_flag_and_tail_lines() {
         let env = EnvVarGuard::new(DEFAULT_BROWSER_DRIVER_OUTPUT_ENV);
-        let tail_lines = EnvVarGuard::new_unlocked("BROWSER_TEST_DRIVER_OUTPUT_TAIL_LINES");
+        let tail_lines = env.also("BROWSER_TEST_DRIVER_OUTPUT_TAIL_LINES");
 
         env.set("1");
         tail_lines.set("12");
