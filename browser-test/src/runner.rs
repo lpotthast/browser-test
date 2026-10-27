@@ -20,7 +20,10 @@ use crate::{
     BrowserTestError, Cancellation, DriverOutput, ElementQueryWait, FailurePolicy, Pause,
     ProgressWarnings, SessionReuse, TestFilter, TestSuite, Timeouts,
     cancellation::cancelled_result,
-    driver_output::{DriverOutputCapture, attach_browser_driver_output_to_result},
+    driver_output::{
+        DriverOutputCapture, attach_browser_driver_output_to_result,
+        every_failure_has_session_output,
+    },
     env::{InvalidEnvVar, env_flag},
     execution::{ChromeCapabilitiesSetup, Execution, ExecutionConfig, execute_tests},
     pause::{self, PauseDecision},
@@ -271,8 +274,9 @@ impl BrowserTestRunner {
         self
     }
 
-    /// Capture recent browser-driver output and attach it to the error of a failed run, which
-    /// holds the errors of its failed tests. Defaults to [`DriverOutput::disabled`].
+    /// Capture recent browser-driver output and attach it to the errors of failed tests: the lines
+    /// of each test's session while it ran. A run that failed otherwise gets its last lines. See
+    /// [`DriverOutput`]. Defaults to [`DriverOutput::disabled`].
     #[must_use]
     pub const fn with_driver_output(mut self, driver_output: DriverOutput) -> Self {
         self.driver_output = driver_output;
@@ -571,7 +575,14 @@ impl BrowserTestRunner {
             .map(|capture| capture.follow(&chrome));
 
         let execution = self
-            .run_tests(&chrome, &profiles, cancellation, context, tests)
+            .run_tests(
+                &chrome,
+                &profiles,
+                cancellation,
+                driver_output.as_ref(),
+                context,
+                tests,
+            )
             .await;
         report.tests = execution.records;
         report.suites = execution.suites;
@@ -592,11 +603,21 @@ impl BrowserTestRunner {
             output_follower.finish().await;
         }
 
+        // Failed tests carry the output of their sessions. The run's adds what happened outside of
+        // them, e.g. while a session couldn't be created or the driver shut down.
+        let needs_run_output = shutdown_result.is_err()
+            || test_result
+                .as_ref()
+                .is_err_and(|report| !every_failure_has_session_output(report));
         let result = match shutdown_result {
             Ok(()) => test_result,
             Err(shutdown_error) => merge_shutdown_result(test_result, shutdown_error),
         };
-        attach_browser_driver_output_to_result(result, driver_output.as_ref())
+        if needs_run_output {
+            attach_browser_driver_output_to_result(result, driver_output.as_ref())
+        } else {
+            result
+        }
     }
 
     fn chrome_binary_for_run(&self) -> ChromeBinary {
@@ -620,6 +641,7 @@ impl BrowserTestRunner {
         chrome: &ChromeForTesting,
         profiles: &RunProfiles,
         cancellation: &CancellationToken,
+        driver_output: Option<&DriverOutputCapture>,
         context: &Context,
         tests: TestSuite<Context>,
     ) -> Execution
@@ -637,6 +659,7 @@ impl BrowserTestRunner {
             progress_warnings: self.progress_warnings,
             spare_sessions: self.spare_sessions_for_run(),
             session_reuse: self.session_reuse,
+            driver_output,
         };
         execute_tests(&config, context, tests).await
     }
@@ -800,8 +823,8 @@ mod tests {
             "first run",
         ));
 
-        assert_that!(first.snapshot().total_lines).is_equal_to(1);
-        assert_that!(second.snapshot().total_lines).is_equal_to(0);
+        assert_that!(first.position()).is_equal_to(1);
+        assert_that!(second.position()).is_equal_to(0);
     }
 
     #[tokio::test]

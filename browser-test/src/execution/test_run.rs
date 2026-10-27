@@ -14,6 +14,7 @@ use tracing::Instrument as _;
 use super::{Env, plan::QueuedTest, worker::Job};
 use crate::{
     BrowserTestError,
+    driver_output::{DriverOutputSnapshot, attach_session_output},
     failure_report::{
         PanicDetails, PanicLocation, RecentSteps, TestCodeFramesHandler, panic_payload_message,
         without_own_location,
@@ -35,6 +36,8 @@ pub(super) struct JobRun {
     recent_steps: Option<RecentSteps>,
     /// How the test failed, if it did.
     failure: Option<Failure>,
+    /// Where the driver's output of the test starts, and the id of its session, if captured.
+    driver_output: Option<(usize, String)>,
     pub(super) quit_start: Option<Instant>,
 }
 
@@ -74,8 +77,20 @@ where
         teardown: Option<Duration>,
     ) {
         let test = self.assigned_test(run.index);
-        let (outcome, result) =
-            test_outcome(&test.name, run.failure, run.recent_steps, session_result);
+        // Only now: the output of quitting the session is included, and caught up with.
+        let failed = run.failure.is_some() || session_result.is_err();
+        let driver_output = run
+            .driver_output
+            .filter(|_| failed)
+            .zip(self.config.driver_output)
+            .and_then(|((start, session_id), capture)| capture.session_output(start, &session_id));
+        let (outcome, result) = test_outcome(
+            &test.name,
+            run.failure,
+            run.recent_steps,
+            driver_output,
+            session_result,
+        );
         let session = SessionTiming {
             preparation: run.preparation,
             wait: run.wait,
@@ -108,6 +123,10 @@ where
         steps: BTreeMap::new(),
         recent_steps: None,
         failure: None,
+        driver_output: env
+            .config
+            .driver_output
+            .map(|capture| (capture.position(), session.session_id().to_string())),
         quit_start: None,
     };
     let timeouts = test.ready().timeouts;
@@ -131,8 +150,8 @@ where
 
 /// The outcome of a test that ended with `failure`, if any, and whose session ended with
 /// `session_result`. A failure's report says where the test failed
-/// ([`TestCodeFrames`](crate::failure_report::TestCodeFrames)) and what it did before
-/// (`recent_steps`).
+/// ([`TestCodeFrames`](crate::failure_report::TestCodeFrames)), what it did before
+/// (`recent_steps`), and what its session's driver printed meanwhile (`driver_output`).
 ///
 /// An error of `session_result` comes from quitting the session after the test: a failed test
 /// keeps it as a child of its report, and a test that passed fails with it.
@@ -140,6 +159,7 @@ fn test_outcome(
     name: &str,
     failure: Option<Failure>,
     recent_steps: Option<RecentSteps>,
+    driver_output: Option<DriverOutputSnapshot>,
     session_result: Result<(), Report<ChromeForTestingError>>,
 ) -> (TestOutcome, Result<(), Report<BrowserTestError>>) {
     let quit_error = session_result.err().map(Report::into_dynamic);
@@ -162,7 +182,7 @@ fn test_outcome(
         Some(steps) => report.attach_custom::<rootcause::handlers::Display, _>(steps),
         None => report,
     };
-    (outcome, Err(report))
+    (outcome, Err(attach_session_output(report, driver_output)))
 }
 
 /// The outcome of the test `name` that failed with `failure`, and its report.
@@ -261,4 +281,9 @@ async fn run_body<Context>(
             })
         }
     };
+    if run.failure.is_some()
+        && let Some(capture) = env.config.driver_output
+    {
+        capture.catch_up().await;
+    }
 }

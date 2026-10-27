@@ -43,6 +43,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The warning that a test is still running names the innermost step that is running, with its detail and for how long,
   e.g. `Still running browser test 'login' after 30.00s, in step wait_for_text #status for 28.12s.` Before, a step that
   hangs was only logged once the test's time limit dropped it.
+- With `DriverOutput` enabled, the report of a failed test shows chromedriver's output while it ran and its session
+  quit, without the lines of other sessions. Before, only the run's error showed the last lines of the run, which
+  mostly were the last tests' sessions quitting. The run's error still shows them if it failed otherwise, e.g. as a
+  session couldn't be created or chromedriver didn't shut down. Lines skipped because capturing fell behind are marked
+  where they were skipped, and the count of captured lines no longer includes them.
 
 ### Changed
 

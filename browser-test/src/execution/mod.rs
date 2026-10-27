@@ -43,6 +43,7 @@ use self::{
 };
 use crate::{
     BrowserTestError, FailurePolicy, ProgressWarnings, SessionReuse, TestSuite,
+    driver_output::DriverOutputCapture,
     profile::RunProfiles,
     progress::{Activity, ProgressBoard},
     report::{
@@ -72,6 +73,9 @@ pub(crate) struct ExecutionConfig<'a> {
     /// Spare sessions kept ready. `None`: [`default_spare_sessions`].
     pub(crate) spare_sessions: Option<usize>,
     pub(crate) session_reuse: SessionReuse,
+    /// The capture of the driver's output, whose lines of a failed test's session its report
+    /// shows.
+    pub(crate) driver_output: Option<&'a DriverOutputCapture>,
 }
 
 /// What executing a test tree produced.
