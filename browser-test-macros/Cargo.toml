@@ -5,8 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
+readme = "README.md"
 repository.workspace = true
 description = "Attribute macros for browser-test."
+categories = ["development-tools::testing", "web-programming"]
+keywords = ["browser", "webdriver", "chrome", "testing", "automation"]
 
 [lib]
 proc-macro = true
