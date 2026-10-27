@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Tests in `TestSuite::unfiltered` suites always run, e.g. checks of the whole run. A run whose filter selects none of
   the other tests fails with `BrowserTestError::NoTestSelected`, so that a mistyped filter can't pass unnoticed.
 - `InvalidEnvVar::details`, e.g. why a regular expression is invalid.
+- `rootcause` is re-exported, like `thirtyfour`, as tests return its reports. Import it as `browser_test::rootcause`
+  instead of depending on it directly, so that tests and the runner always use the same version. Updating `rootcause`
+  or `thirtyfour` to a new breaking version is a breaking change of `browser-test`.
 
 ### Changed
 

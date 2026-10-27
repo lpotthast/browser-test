@@ -127,7 +127,6 @@ name = "browser-test-minimal-example"
 version = "0.1.0"
 dependencies = [
  "browser-test",
- "rootcause",
  "rustls",
  "tokio",
  "tracing-subscriber",

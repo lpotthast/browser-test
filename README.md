@@ -62,30 +62,31 @@ tests:
 ```toml
 [dev-dependencies]
 browser-test = "0.8"
-rootcause = "0.13"
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
 ```
 
-Tests return `rootcause` reports as their errors, and Tokio provides the async runtime.
-
-`browser-test` uses `thirtyfour` as its `WebDriver` client and re-exports it. Import it through the re-export, so that
-your tests and the runner always use the same version:
+Tokio provides the async runtime. `browser-test` re-exports the crates its API is built on: `thirtyfour`, its
+`WebDriver` client, and `rootcause`, whose reports tests return as their errors. Import them through the re-exports, so
+that your tests and the runner always use the same versions:
 
 ```rust
 use browser_test::{BrowserTest, BrowserTestRunner, TestSuite};
+use browser_test::rootcause::{Report, prelude::*};
 use browser_test::thirtyfour::{By, WebDriver, prelude::*};
 ```
 
-Only add `thirtyfour` as a direct dependency if you need to manage that dependency yourself.
+Only add them as direct dependencies if you need to, e.g. for `rootcause` extension crates, and then keep their
+versions in line with the ones `browser-test` uses. Updating either of them to a new breaking version (e.g. `thirtyfour`
+`0.38` to `0.39`) is a breaking change of `browser-test`.
 
 ### First Test
 
 This test opens Wikipedia and checks the page title.
 
 ```rust,no_run
+use browser_test::rootcause::{Report, report};
 use browser_test::thirtyfour::WebDriver;
 use browser_test::{BrowserTestError, BrowserTestRunner, Cancellation, TestSuite, browser_test};
-use rootcause::{Report, report};
 
 struct Context {
     base_url: String,
@@ -197,7 +198,7 @@ unless anchored: `BROWSER_TEST_NAME='keyboard|^checkout::'` selects tests whose 
 and mark suites that must always run, e.g. checks of the whole run, `unfiltered()`:
 
 ```rust,no_run
-# use rootcause::Report;
+# use browser_test::rootcause::Report;
 # #[browser_test::browser_test]
 # async fn server_did_not_panic() -> Result<(), Report> { Ok(()) }
 # fn component_tests() -> browser_test::TestSuite { browser_test::TestSuite::sequential() }
