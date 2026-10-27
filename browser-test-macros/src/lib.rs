@@ -80,8 +80,11 @@ use syn::ItemFn;
 ///
 /// The context can be unsized (`&str`) or borrow from the run (`&Page<'_>`): the generated test
 /// then implements `BrowserTest<Page<'a>>` for every lifetime `'a`. Lifetime parameters are
-/// allowed. Type and const parameters, `self` and `&mut` arguments are not. A test without
-/// arguments implements `BrowserTest<()>`.
+/// allowed. Type and const parameters, `self` and `&mut` arguments are not.
+///
+/// A test without arguments implements `BrowserTest<Context>` for every context, so that it joins
+/// any suite. A suite of only such tests may need its context named where nothing else infers it,
+/// e.g. `TestSuite::<()>::sequential()`.
 ///
 /// A single `&WebDriver` argument is rejected, as a single argument is the context. Take
 /// `(driver: &WebDriver, context: &Context)`, with `&()` for a run without context.

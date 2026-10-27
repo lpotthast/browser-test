@@ -12,9 +12,11 @@ use syn::{
 pub(super) struct TestSignature {
     /// The declared return type, e.g. `Result<(), Report>` or an alias of it.
     pub(super) result: Type,
-    /// The type behind the context reference, `()` without one. Its elided lifetimes are named.
+    /// The type behind the context reference, its elided lifetimes named. Without one, a type
+    /// parameter, so that the test joins suites of every context.
     pub(super) context: Type,
-    /// The function's lifetime parameters and those named in `context`.
+    /// The function's lifetime parameters, those named in `context`, and the type parameter of a
+    /// test without a context.
     pub(super) generics: Generics,
     /// The arguments the function takes.
     pub(super) inputs: Inputs,
@@ -89,13 +91,20 @@ impl TestSignature {
             bail!(signature, "browser tests must return Result<(), Report>");
         };
 
-        let mut context = context.unwrap_or_else(|| syn::parse_quote!(()));
         let mut generics = signature.generics.clone();
-        generics.params.extend(
-            name_elided_lifetimes(&mut context)
-                .into_iter()
-                .map(GenericParam::Lifetime),
-        );
+        let context = if let Some(mut context) = context {
+            generics.params.extend(
+                name_elided_lifetimes(&mut context)
+                    .into_iter()
+                    .map(GenericParam::Lifetime),
+            );
+            context
+        } else {
+            generics.params.push(syn::parse_quote!(
+                __BrowserTestContext: ?::core::marker::Sized + ::core::marker::Sync
+            ));
+            syn::parse_quote!(__BrowserTestContext)
+        };
         Ok(Self {
             result: (**result).clone(),
             context,

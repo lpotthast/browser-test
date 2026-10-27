@@ -158,11 +158,15 @@ fn generated_tests_implement_the_trait_with_distinct_module_qualified_names() {
     accepts_nested(NestedReference);
     accepts_higher_ranked(HigherRanked);
     assert_that!(BorrowedPage.name()).is_equal_to("macros::borrowed_page");
-    assert_that!(Type.name()).is_equal_to("macros::type");
+    // A test without arguments implements `BrowserTest` for every context, which calls name.
+    assert_that!(BrowserTest::<()>::name(&Type)).is_equal_to("macros::type");
     assert_that!(other::BorrowedPage.name()).is_equal_to("macros::other::borrowed_page");
-    assert_that!(shadowed_macros::NamedByItsPath.name())
+    assert_that!(BrowserTest::<()>::name(&shadowed_macros::NamedByItsPath))
         .is_equal_to("macros::shadowed_macros::named_by_its_path");
     let _: TestSuite<str> = TestSuite::sequential().with(RawDriver);
+    // Tests without arguments join suites of every context.
+    let _: TestSuite<str> = TestSuite::sequential().with(NoContext).with(RawDriver);
+    let _: TestSuite<Page<'_>> = TestSuite::sequential().with(NoContext).with(BorrowedPage);
     // Tests of different error types share a suite.
     let _: TestSuite = TestSuite::sequential()
         .with(TypedError)
@@ -171,9 +175,10 @@ fn generated_tests_implement_the_trait_with_distinct_module_qualified_names() {
 
 #[test]
 fn tags_select_generated_tests() {
-    assert_that!(HandlesKeyboardEvents.tags()).contains_exactly(["smoke", "keyboard"]);
-    assert_that!(NoContext.tags()).contains_exactly(["smoke"]);
-    assert_that!(FunctionAttributes.tags()).is_empty();
+    assert_that!(BrowserTest::<()>::tags(&HandlesKeyboardEvents))
+        .contains_exactly(["smoke", "keyboard"]);
+    assert_that!(BrowserTest::<()>::tags(&NoContext)).contains_exactly(["smoke"]);
+    assert_that!(BrowserTest::<()>::tags(&FunctionAttributes)).is_empty();
     let tests = TestSuite::sequential()
         .with(HandlesKeyboardEvents)
         .with(NoContext)
@@ -191,19 +196,19 @@ fn tags_select_generated_tests() {
 
 #[test]
 fn names_and_descriptions_are_independent() {
-    let test = HandlesKeyboardEvents;
+    let test: &dyn BrowserTest = &HandlesKeyboardEvents;
     assert_that!(test.name()).is_equal_to("keyboard::events");
     assert_that!(test.description().as_deref())
         .is_equal_to(Some("Keyboard events reach their handler."));
     assert_that!(
-        TestSuite::sequential()
-            .with(test)
+        TestSuite::<()>::sequential()
+            .with(HandlesKeyboardEvents)
             .filter(&TestFilter::new().with_name("keyboard::events"))
             .is_empty()
     )
     .is_false();
     assert_that!(
-        TestSuite::sequential()
+        TestSuite::<()>::sequential()
             .with(HandlesKeyboardEvents)
             .filter(&TestFilter::new().with_name("Keyboard events reach"))
             .is_empty()
@@ -214,9 +219,9 @@ fn names_and_descriptions_are_independent() {
         "The page title matches the expected title.\n\n",
         "    Indented Markdown stays indented.",
     )));
-    assert_that!(ComputedDocumentation.description().as_deref())
+    assert_that!(BrowserTest::<()>::description(&ComputedDocumentation).as_deref())
         .is_equal_to(Some("Computed documentation."));
-    assert_that!(NoContext.description()).is_none();
+    assert_that!(BrowserTest::<()>::description(&NoContext)).is_none();
 }
 
 #[tokio::test]

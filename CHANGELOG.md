@@ -80,6 +80,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `async_trait` re-export was removed. Remove `#[async_trait]` from hand-written implementations and replace
   `async fn run(&self, driver: &WebDriver, context: &Context) -> Result<(), Report> { ... }` with
   `fn run<'a>(&'a self, driver: &'a WebDriver, context: &'a Context) -> TestFuture<'a> { Box::pin(async move { ... }) }`.
+- **Breaking:** A `#[browser_test]` function without arguments implements `BrowserTest<Context>` for every context
+  instead of only `BrowserTest<()>`, so that it joins suites of any context. Calling its methods directly names the
+  context, e.g. `BrowserTest::<()>::name(&MyTest)`, and a suite of only such tests may need its context named where
+  nothing else infers it, e.g. `TestSuite::<()>::sequential()`.
 - **Breaking:** Updated `thirtyfour` to version `0.38`.
 - Updated `chrome-for-testing-manager` to version `0.15`.
 - Updated `assertr` to version `0.9`.
