@@ -40,6 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `TestCodeFrames::frames` and `RecentSteps::steps` read the attachments of failure reports, e.g. to present failures
   as annotations in CI: every `TestCodeFrame` has its `file`, `line` and `function`, every `RecentStep` its `kind`,
   `detail` and timing.
+- The warning that a test is still running names the innermost step that is running, with its detail and for how long,
+  e.g. `Still running browser test 'login' after 30.00s, in step wait_for_text #status for 28.12s.` Before, a step that
+  hangs was only logged once the test's time limit dropped it.
 
 ### Changed
 

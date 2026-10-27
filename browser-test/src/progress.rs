@@ -2,11 +2,14 @@
 
 use std::{
     collections::BTreeMap,
-    sync::{Mutex, PoisonError},
+    sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
 
-use crate::{report::FormatDuration, step::DEFAULT_SLOW_STEP};
+use crate::{
+    report::FormatDuration,
+    step::{DEFAULT_SLOW_STEP, StepRecorder},
+};
 
 /// When [`crate::BrowserTestRunner`] warns that a test run seems not to progress fast enough.
 ///
@@ -59,7 +62,9 @@ impl ProgressWarnings {
     }
 
     /// Warn when a test body is still running after `threshold`, and again every time
-    /// `threshold` passes. Defaults to 30 seconds.
+    /// `threshold` passes. A warning names the innermost [`crate::Step`] that is running, if any,
+    /// and for how long: a step that never ends is otherwise only logged once the test's time limit
+    /// drops it. Defaults to 30 seconds.
     #[must_use]
     pub const fn with_test_running(mut self, threshold: Duration) -> Self {
         self.test_running = Some(threshold);
@@ -167,6 +172,31 @@ struct ActivityStatus {
     phase: Phase,
     since: Instant,
     warnings: u32,
+    /// The steps of a running test, whose running step warnings name.
+    steps: Option<Arc<StepRecorder>>,
+}
+
+impl ActivityStatus {
+    /// The warning that the activity is still in its phase after `elapsed`.
+    fn still_in_phase(&self, elapsed: Duration) -> String {
+        let doing = match self.phase {
+            Phase::CreatingSession => "creating",
+            Phase::RunningTest => "running",
+            Phase::ResettingSession => "resetting the session of",
+            Phase::QuittingSession => "quitting the session of",
+        };
+        let step = self
+            .steps
+            .as_ref()
+            .and_then(|steps| steps.running_step())
+            .map(|step| format!(", in step {step}"))
+            .unwrap_or_default();
+        format!(
+            "Still {doing} {} after {}{step}.",
+            self.subject,
+            FormatDuration(elapsed)
+        )
+    }
 }
 
 /// What the runner is currently doing, for the watchdog.
@@ -178,16 +208,43 @@ pub(crate) struct ProgressBoard {
 impl ProgressBoard {
     /// Record that `activity` entered `phase`. `subject` names it in warnings.
     pub(crate) fn enter(&self, activity: Activity, subject: impl Into<String>, phase: Phase) {
+        self.insert(activity, subject.into(), phase, None);
+    }
+
+    /// Record that `activity` started running its test, whose steps `steps` records. Warnings
+    /// name the step that is running.
+    pub(crate) fn enter_running_test(
+        &self,
+        activity: Activity,
+        subject: impl Into<String>,
+        steps: &Arc<StepRecorder>,
+    ) {
+        self.insert(
+            activity,
+            subject.into(),
+            Phase::RunningTest,
+            Some(Arc::clone(steps)),
+        );
+    }
+
+    fn insert(
+        &self,
+        activity: Activity,
+        subject: String,
+        phase: Phase,
+        steps: Option<Arc<StepRecorder>>,
+    ) {
         self.activities
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(
                 activity,
                 ActivityStatus {
-                    subject: subject.into(),
+                    subject,
                     phase,
                     since: Instant::now(),
                     warnings: 0,
+                    steps,
                 },
             );
     }
@@ -212,18 +269,11 @@ impl ProgressBoard {
             let elapsed = now.saturating_duration_since(status.since);
             if is_overdue(elapsed, threshold, status.warnings) {
                 status.warnings += 1;
-                let doing = match status.phase {
-                    Phase::CreatingSession => "creating",
-                    Phase::RunningTest => "running",
-                    Phase::ResettingSession => "resetting the session of",
-                    Phase::QuittingSession => "quitting the session of",
-                };
                 tracing::warn!(
                     subject = %status.subject,
                     elapsed_ms = elapsed.as_millis(),
-                    "Still {doing} {} after {}.",
-                    status.subject,
-                    FormatDuration(elapsed),
+                    "{}",
+                    status.still_in_phase(elapsed),
                 );
             }
         }
@@ -312,5 +362,29 @@ mod tests {
         assert_that!(board.activities.lock().unwrap()[&test].warnings).is_equal_to(0);
         board.clear(test);
         assert_that!(*board.activities.lock().unwrap()).does_not_contain_key(&test);
+    }
+
+    #[test]
+    fn warnings_about_running_tests_name_the_running_step() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("current-thread runtime should build");
+        let board = ProgressBoard::default();
+        let test = Activity::Test(1);
+        let steps = StepRecorder::new(None);
+        board.enter_running_test(test, "browser test 'login'", &steps);
+        let warning =
+            || board.activities.lock().unwrap()[&test].still_in_phase(Duration::from_secs(30));
+        assert_that!(warning())
+            .is_equal_to("Still running browser test 'login' after 30.00s.".to_owned());
+
+        runtime.block_on(steps.scope(async {
+            use crate::StepExt as _;
+            let mut wait = Box::pin(std::future::pending::<()>().step("wait").detail("#status"));
+            assert_that!(futures_util::poll!(wait.as_mut()).is_pending()).is_true();
+            assert_that!(warning()).starts_with(
+                "Still running browser test 'login' after 30.00s, in step wait #status for ",
+            );
+        }));
     }
 }

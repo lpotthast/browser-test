@@ -19,7 +19,7 @@ use crate::{
         without_own_location,
     },
     frozen_pages::{PageCheck, close_frozen_pages},
-    progress::{Activity, Phase},
+    progress::Activity,
     report::{SessionPreparation, SessionTiming, StepStats, TestOutcome, TestRecord},
     step::StepRecorder,
 };
@@ -214,12 +214,12 @@ async fn run_body<Context>(
 {
     let name = test.name.as_str();
     tracing::debug!("Executing browser test: {name}");
-    env.board.enter(
+    let recorder = StepRecorder::new(env.config.progress_warnings.slow_step());
+    env.board.enter_running_test(
         Activity::Test(test.index),
         format!("browser test '{name}'"),
-        Phase::RunningTest,
+        &recorder,
     );
-    let recorder = StepRecorder::new(env.config.progress_warnings.slow_step());
     let span = tracing::info_span!(
         "browser_test",
         test = %name,
