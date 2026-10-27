@@ -75,7 +75,7 @@ where
     let pooled = matches!(request.delivery, Delivery::Pool);
     run_session(env, request).await;
     if pooled {
-        env.pool.session_ended(env.keep_starting());
+        env.pool.session_ended();
     }
 }
 
@@ -262,7 +262,7 @@ where
             Some(delivery) => env.pool.deliver(delivery, Ok(ticket)),
             // Dropped if the pool has enough sessions: the job channel closes, and the session
             // quits below.
-            None => env.pool.deliver_reset(ticket, env.keep_starting()),
+            None => env.pool.deliver_reset(ticket),
         }
         // An error means no test needs this session anymore.
         let Ok(job) = job_rx.await else {
@@ -279,7 +279,7 @@ where
             && !run.timed_out()
             && baseline.is_some()
             && config.session_reuse.allows_another_test(tests_run)
-            && env.pool.claim_reset(env.keep_starting());
+            && env.pool.claim_reset();
         // Let the next test start while this session quits or is reset.
         let _ = job.body_done.send(());
         let test = env.assigned_test(run.index);
@@ -307,7 +307,7 @@ where
             reset_duration,
         );
         if !was_reset {
-            env.pool.reset_failed(env.keep_starting());
+            env.pool.reset_failed();
             end.released = Some(Instant::now());
             return Ok(());
         }

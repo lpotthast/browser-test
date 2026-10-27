@@ -18,10 +18,7 @@
 use std::{
     future::Future,
     pin::{Pin, pin},
-    sync::{
-        Arc, Mutex, PoisonError,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
 
@@ -127,7 +124,6 @@ where
         config,
         context,
         tests: prepared,
-        keep_starting: AtomicBool::new(true),
         failures: Mutex::default(),
         records: Mutex::default(),
         suites: Mutex::default(),
@@ -146,7 +142,7 @@ where
         ),
     };
 
-    env.pool.replenish(true);
+    env.pool.replenish();
     let execution = async {
         run_suite(&env, &root).await;
         env.pool.close();
@@ -204,7 +200,6 @@ where
     config: &'c ExecutionConfig<'c>,
     context: &'c Context,
     tests: Vec<QueuedTest<Context>>,
-    keep_starting: AtomicBool,
     failures: Mutex<BrowserTestFailures>,
     records: Mutex<Vec<TestRecord>>,
     suites: Mutex<Vec<(usize, SuiteRecord)>>,
@@ -223,26 +218,10 @@ where
         &self.tests[index]
     }
 
-    /// Whether further tests start: the run neither stopped on a failure nor was cancelled.
-    fn keep_starting(&self) -> bool {
-        self.keep_starting.load(Ordering::SeqCst) && !self.is_cancelled()
-    }
-
-    fn is_cancelled(&self) -> bool {
-        self.config.cancellation.is_cancelled()
-    }
-
-    /// Whether a test starts: unless the run stopped on a failure, or, also for tests that run
-    /// always, was cancelled.
-    fn may_start(&self, run_always: bool) -> bool {
-        self.keep_starting() || (run_always && !self.is_cancelled())
-    }
-
     /// With [`FailurePolicy::FailFast`], start no further tests (after a failure).
     fn stop_starting_on_fail_fast(&self) {
         if self.config.failure_policy == FailurePolicy::FailFast {
-            self.keep_starting.store(false, Ordering::SeqCst);
-            self.pool.stopped();
+            self.pool.stop();
         }
     }
 
@@ -353,7 +332,7 @@ where
 {
     match node {
         // Tests not started because of fail-fast or a cancellation are not recorded.
-        Node::Test(index) if env.may_start(env.tests[*index].placement.run_always) => {
+        Node::Test(index) if env.pool.may_start(env.tests[*index].placement.run_always) => {
             run_test(env, *index).await;
         }
         Node::Test(_) => {}
@@ -385,11 +364,7 @@ where
     let pooled = prepared.uses_pool(env.pool.default_wait);
     let ticket = if pooled {
         // Tests not started because of fail-fast or a cancellation are not recorded.
-        let Some(ticket) = env
-            .pool
-            .take(prepared.fresh_session, run_always, || env.keep_starting())
-            .await
-        else {
+        let Some(ticket) = env.pool.take(prepared.fresh_session, run_always).await else {
             return;
         };
         ticket
@@ -397,7 +372,7 @@ where
         env.pool.dedicated(prepared.element_query_wait).await
     };
     let wait = requested.elapsed();
-    if !env.may_start(run_always) {
+    if !env.pool.may_start(run_always) {
         // A test failed, or the run was cancelled, while this one waited for its session: it
         // doesn't start, like the tests after it. Its session quits.
         if pooled && ticket.is_ok() {

@@ -57,6 +57,9 @@ pub(super) struct SessionPool {
     requests: mpsc::UnboundedSender<Option<WorkerRequest>>,
     /// Ends the wait of tests for sessions: a cancelled run drops the sessions on their way.
     cancellation: CancellationToken,
+    /// Cancelled once no further tests start, except those that run always: a failure stopped the
+    /// run (see [`Self::stop`]), or it was cancelled.
+    stop: CancellationToken,
 }
 
 struct PoolState {
@@ -172,6 +175,7 @@ impl SessionPool {
             spare,
             default_wait,
             requests,
+            stop: cancellation.child_token(),
             cancellation,
         }
     }
@@ -180,12 +184,27 @@ impl SessionPool {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Whether further tests start: the run neither stopped on a failure nor was cancelled.
+    pub(super) fn keep_starting(&self) -> bool {
+        !self.stop.is_cancelled()
+    }
+
+    /// Whether a test starts: unless the run stopped on a failure, or, also for tests that run
+    /// always, was cancelled.
+    pub(super) fn may_start(&self, run_always: bool) -> bool {
+        if run_always {
+            !self.cancellation.is_cancelled()
+        } else {
+            self.keep_starting()
+        }
+    }
+
     /// The upcoming tests that will still start: all of them while tests keep starting, only
     /// those that run always once a failure stopped the run, and none once it is cancelled.
-    fn starting(&self, state: &PoolState, keep_starting: bool) -> Upcoming {
+    fn starting(&self, state: &PoolState) -> Upcoming {
         if self.cancellation.is_cancelled() {
             Upcoming::default()
-        } else if keep_starting {
+        } else if self.keep_starting() {
             state.upcoming
         } else {
             state.upcoming_always
@@ -198,12 +217,12 @@ impl SessionPool {
     /// Waiting tests get their sessions right away. Spares are only created while fewer sessions
     /// are alive than tests can run at the same time plus spares, counting those still quitting:
     /// a spare that can't be created yet is once a session ended ([`Self::session_ended`]).
-    pub(super) fn replenish(&self, keep_starting: bool) {
-        self.replenish_locked(&mut self.lock(), keep_starting);
+    pub(super) fn replenish(&self) {
+        self.replenish_locked(&mut self.lock());
     }
 
-    fn replenish_locked(&self, state: &mut PoolState, keep_starting: bool) {
-        let spares = self.spare.min(self.starting(state, keep_starting).total());
+    fn replenish_locked(&self, state: &mut PoolState) {
+        let spares = self.spare.min(self.starting(state).total());
         let bound = self.max_concurrency + self.spare;
         while !state.closed {
             let waiting = state.waiting.total();
@@ -237,15 +256,9 @@ impl SessionPool {
 
     /// Take a session for a starting test, a `fresh` one if it needs one, waiting until one is
     /// ready. `None` if the test doesn't start anymore: the run was cancelled, or, for a test that
-    /// doesn't run always, a failure stopped it (see [`Self::stopped`]). A cancelled run drops the
+    /// doesn't run always, a failure stopped it (see [`Self::stop`]). A cancelled run drops the
     /// sessions being created or reset, so the one a test waits for may never arrive.
-    pub(super) async fn take(
-        &self,
-        fresh: bool,
-        run_always: bool,
-        keep_starting: impl Fn() -> bool,
-    ) -> Option<TicketResult> {
-        let may_start = || !self.cancellation.is_cancelled() && (run_always || keep_starting());
+    pub(super) async fn take(&self, fresh: bool, run_always: bool) -> Option<TicketResult> {
         {
             let mut state = self.lock();
             state.upcoming.remove(fresh);
@@ -253,14 +266,14 @@ impl SessionPool {
                 state.upcoming_always.remove(fresh);
             }
             *state.waiting.count(fresh) += 1;
-            self.replenish_locked(&mut state, keep_starting());
+            self.replenish_locked(&mut state);
         }
         loop {
             let mut available = pin!(self.available.notified());
             available.as_mut().enable();
             {
                 let mut state = self.lock();
-                if !may_start() {
+                if !self.may_start(run_always) {
                     *state.waiting.count(fresh) -= 1;
                     return None;
                 }
@@ -269,20 +282,22 @@ impl SessionPool {
                     if ticket.is_ok() {
                         state.running += 1;
                     }
-                    self.replenish_locked(&mut state, keep_starting());
+                    self.replenish_locked(&mut state);
                     return Some(ticket);
                 }
             }
             tokio::select! {
                 () = available => {}
                 () = self.cancellation.cancelled() => {}
+                () = self.stop.cancelled(), if !run_always => {}
             }
         }
     }
 
-    /// A failure stopped the run: tests waiting for a session that don't run always give up.
-    pub(super) fn stopped(&self) {
-        self.available.notify_waiters();
+    /// Start no further tests, except those that run always (after a failure): tests waiting for a
+    /// session that don't run always give up.
+    pub(super) fn stop(&self) {
+        self.stop.cancel();
     }
 
     /// Create a session with non-default settings for one test.
@@ -336,20 +351,19 @@ impl SessionPool {
 
     /// The worker of a pool session ended: its browser quit, or never started. Create the spares
     /// that had to wait for it.
-    pub(super) fn session_ended(&self, keep_starting: bool) {
+    pub(super) fn session_ended(&self) {
         let mut state = self.lock();
         state.alive -= 1;
-        self.replenish_locked(&mut state, keep_starting);
+        self.replenish_locked(&mut state);
     }
 
     /// Whether the session of a finished test should be reset: while tests (not needing a fresh
     /// session) are still to run, otherwise it quits. If so, it counts as a session on its way to
     /// the pool until [`Self::deliver_reset`] or [`Self::reset_failed`]. Claimed before the next
     /// test starts, so that the pool doesn't create a session for that test in the meantime.
-    pub(super) fn claim_reset(&self, keep_starting: bool) -> bool {
+    pub(super) fn claim_reset(&self) -> bool {
         let mut state = self.lock();
-        let wanted =
-            !state.closed && state.waiting.any + self.starting(&state, keep_starting).any > 0;
+        let wanted = !state.closed && state.waiting.any + self.starting(&state).any > 0;
         if wanted {
             state.resetting += 1;
         }
@@ -359,11 +373,11 @@ impl SessionPool {
     /// Offer a session reset after its test. The pool keeps it only while it has fewer sessions
     /// (running a test, ready or on their way) than tests that can run at the same time and
     /// spares need: otherwise it drops the ticket, and the session quits.
-    pub(super) fn deliver_reset(&self, ticket: Ticket, keep_starting: bool) {
+    pub(super) fn deliver_reset(&self, ticket: Ticket) {
         {
             let mut state = self.lock();
             state.resetting -= 1;
-            let starting = self.starting(&state, keep_starting).total();
+            let starting = self.starting(&state).total();
             let spares = self.spare.min(starting);
             let running_at_once = self
                 .max_concurrency
@@ -377,10 +391,10 @@ impl SessionPool {
     }
 
     /// A claimed reset failed, so the session quits: create another one if tests need it.
-    pub(super) fn reset_failed(&self, keep_starting: bool) {
+    pub(super) fn reset_failed(&self) {
         let mut state = self.lock();
         state.resetting -= 1;
-        self.replenish_locked(&mut state, keep_starting);
+        self.replenish_locked(&mut state);
     }
 
     /// Create no further sessions and let idle ones quit.
@@ -396,8 +410,6 @@ impl SessionPool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
     use assertr::prelude::*;
 
     use super::*;
@@ -454,21 +466,21 @@ mod tests {
     async fn spares_wait_for_quitting_sessions() {
         let created = SessionPreparation::Created(std::time::Duration::ZERO);
         let (pool, mut requests) = pool_with_spare(Upcoming { any: 3, fresh: 0 });
-        pool.replenish(true);
+        pool.replenish();
         assert_that!(requested(&mut requests)).is_equal_to(1);
         pool.deliver(Delivery::Pool, Ok(ticket(created).0));
 
         // The first test takes the spare, and the pool creates the next one.
-        assert_that!(pool.take(false, false, || true).await).is_some();
+        assert_that!(pool.take(false, false).await).is_some();
         assert_that!(requested(&mut requests)).is_equal_to(1);
         pool.deliver(Delivery::Pool, Ok(ticket(created).0));
         pool.test_finished();
 
         // While the first test's session quits, two browsers are open: the next test takes the
         // spare, and the pool creates no further one until the session ended.
-        assert_that!(pool.take(false, false, || true).await).is_some();
+        assert_that!(pool.take(false, false).await).is_some();
         assert_that!(requested(&mut requests)).is_equal_to(0);
-        pool.session_ended(true);
+        pool.session_ended();
         assert_that!(requested(&mut requests)).is_equal_to(1);
     }
 
@@ -482,7 +494,7 @@ mod tests {
             state.idle.push_back(Ok(reset));
         }
 
-        let take = pin!(pool.take(true, false, || true));
+        let take = pin!(pool.take(true, false));
         assert_that!(futures_util::poll!(take).is_pending()).is_true();
 
         assert_that!(requested(&mut requests)).is_equal_to(1);
@@ -496,8 +508,8 @@ mod tests {
         let pool = pool(Upcoming { any: 2, fresh: 0 }, &cancellation);
         // The session of a finished test is reset for the next one, which then waits for it
         // instead of a new session. A cancelled run drops the reset.
-        assert_that!(pool.claim_reset(true)).is_true();
-        let take = pool.take(false, false, || true);
+        assert_that!(pool.claim_reset()).is_true();
+        let take = pool.take(false, false);
         cancellation.cancel();
 
         assert_that!(take.await.is_none()).is_true();
@@ -512,29 +524,29 @@ mod tests {
         );
         // A failure stopped the run, but two tests that run always are still to start: a
         // finished test's session is reset rather than quit, and a spare is kept ready for them.
-        assert_that!(pool.claim_reset(false)).is_true();
-        pool.reset_failed(false);
+        pool.stop();
+        assert_that!(pool.claim_reset()).is_true();
+        pool.reset_failed();
         assert_that!(requested(&mut requests)).is_equal_to(1);
     }
 
     #[tokio::test]
     async fn without_tests_that_run_always_a_stop_ends_spares_and_resets() {
         let (pool, mut requests) = pool_with_spare(Upcoming { any: 3, fresh: 0 });
-        assert_that!(pool.claim_reset(false)).is_false();
-        pool.replenish(false);
+        pool.stop();
+        assert_that!(pool.claim_reset()).is_false();
+        pool.replenish();
         assert_that!(requested(&mut requests)).is_equal_to(0);
     }
 
     #[tokio::test]
     async fn a_stop_ends_the_wait_of_tests_that_dont_run_always() {
-        let keep_starting = AtomicBool::new(true);
         let (pool, _requests) = pool_with_spare(Upcoming { any: 2, fresh: 0 });
-        let take = pool.take(false, false, || keep_starting.load(Ordering::SeqCst));
+        let take = pool.take(false, false);
         let mut take = pin!(take);
         assert_that!(futures_util::poll!(take.as_mut()).is_pending()).is_true();
 
-        keep_starting.store(false, Ordering::SeqCst);
-        pool.stopped();
+        pool.stop();
 
         assert_that!(take.await.is_none()).is_true();
         assert_that!(pool.lock().waiting.total()).is_equal_to(0);
