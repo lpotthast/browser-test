@@ -5,8 +5,10 @@ use crate::RunReport;
 /// Receives the [`RunReport`] at the end of a run.
 ///
 /// Register consumers with [`crate::BrowserTestRunner::with_report_consumer`]. The runner calls
-/// every registered consumer, in registration order, after each run that started tests. Consumers
-/// are the only way to get the report: without one, the runner neither prints nor keeps it.
+/// every registered consumer, in registration order, after each run that started tests. Without
+/// one, the runner neither prints nor logs the report.
+/// [`BrowserTestRunner::run_with_report`](crate::BrowserTestRunner::run_with_report) returns it
+/// as well.
 ///
 /// Ready-made consumers print the run summary (the report's `Display` output): [`StderrSummary`],
 /// [`StdoutSummary`], and [`TracingSummary`]. Closures taking a `&RunReport` are

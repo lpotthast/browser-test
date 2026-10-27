@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Tests in `TestSuite::unfiltered` suites always run, e.g. checks of the whole run. A run whose filter selects none of
   the other tests fails with `BrowserTestError::NoTestSelected`, so that a mistyped filter can't pass unnoticed.
 - `InvalidEnvVar::details`, e.g. why a regular expression is invalid.
+- `BrowserTestRunner::run_with_report`, which returns the run's `RunReport` along with its result, so that the report
+  no longer needs a consumer to be reached. Consumers are still called.
 - `BrowserTestRunner::with_version`, which pins the Chrome version, e.g. `.with_version(version)` with a `Version`
   parsed from `"147.0.7727.56"`, or picks the latest of a channel, like `with_channel`. `Version` and `VersionRequest`
   are re-exported.

@@ -331,7 +331,8 @@ and uses less memory in every test.
 ## Timing
 
 At the end of each run, the runner passes a [`RunReport`] to the consumers you add with
-`BrowserTestRunner::with_report_consumer`. `StderrSummary` prints a summary like this:
+`BrowserTestRunner::with_report_consumer`, and `BrowserTestRunner::run_with_report` returns it along with the run's
+result. `StderrSummary` prints a summary like this:
 
 ```text
 Browser test run: 39 test(s), 39 passed, 0 failed, in 2m 10.4s

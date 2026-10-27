@@ -525,20 +525,31 @@ async fn run_all_runs_successful_page_title_tests() -> RunnerResult {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn run_all_reports_intentional_failure_and_runs_page_title_test() {
-    let err = runner()
-        .with_failure_policy(FailurePolicy::RunAll)
-        .run(
+    let (runner, outcomes) = record_outcomes(runner().with_failure_policy(FailurePolicy::RunAll));
+    let (result, report) = runner
+        .run_with_report(
             &IntegrationContext::default(),
             TestSuite::sequential()
                 .with(IntentionalFailureTest { started: None })
                 .with(page_title_test("page title")),
         )
-        .await
-        .expect_err("run-all should report the intentional failure");
+        .await;
+    let err = result.expect_err("run-all should report the intentional failure");
 
     assert_that!(err.to_string())
         .contains(BrowserTestError::RunTests { failed_tests: 1 }.to_string());
     assert_that!(err).has_child_count(1);
+    let reported: Vec<_> = report
+        .tests
+        .iter()
+        .map(|test| (test.name.clone(), test.outcome))
+        .collect();
+    assert_that!(reported.clone()).contains_exactly([
+        ("intentional failure".to_owned(), TestOutcome::Failed),
+        ("page title".to_owned(), TestOutcome::Passed),
+    ]);
+    // The consumers got the same report.
+    assert_that!(outcomes.lock().unwrap().clone()).is_equal_to(reported);
 }
 
 /// Implements `run` by hand, and panics before returning its future.

@@ -410,7 +410,8 @@ impl BrowserTestRunner {
     /// summary of the run's test results and timings.
     ///
     /// Consumers are called in the order they were added. Without a consumer, the report is
-    /// neither printed nor logged. See [`RunReportConsumer`].
+    /// neither printed nor logged. See [`RunReportConsumer`], and [`Self::run_with_report`] to get
+    /// the report of a run directly.
     #[must_use]
     pub fn with_report_consumer(mut self, consumer: impl RunReportConsumer + 'static) -> Self {
         self.report_consumers.push(Arc::new(consumer));
@@ -434,7 +435,8 @@ impl BrowserTestRunner {
     /// A run without tests returns `Ok(())` right away, even if cancelled.
     ///
     /// Logs each test's timing when it finishes. If tests ran, the run's report is handed to the
-    /// consumers added with [`Self::with_report_consumer`].
+    /// consumers added with [`Self::with_report_consumer`]. [`Self::run_with_report`] returns it
+    /// as well.
     ///
     /// Non-empty runs require a multithreaded Tokio runtime because [`ChromeForTesting::launch`]
     /// requires one. Use `#[tokio::test(flavor = "multi_thread")]` for browser tests.
@@ -458,20 +460,58 @@ impl BrowserTestRunner {
     where
         Context: Sync + ?Sized,
     {
+        self.run_with_report(context, tests).await.0
+    }
+
+    /// Run `tests` like [`Self::run`], and return the run's report along with its result.
+    ///
+    /// The report is the one handed to the consumers added with [`Self::with_report_consumer`],
+    /// which are still called. For a run that started no test (e.g. without tests, or one that
+    /// failed before starting any), it is empty, and no consumer is called.
+    ///
+    /// # Errors
+    ///
+    /// The result holds the errors [`Self::run`] returns.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use browser_test::{BrowserTestRunner, Cancellation, TestSuite};
+    /// # async fn run(tests: TestSuite) -> Result<(), browser_test::rootcause::Report> {
+    /// let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals());
+    /// let (result, report) = runner.run_with_report(&(), tests).await;
+    /// for test in report.tests.iter().filter(|test| test.outcome.is_failed()) {
+    ///     eprintln!("{} failed", test.name);
+    /// }
+    /// result?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn run_with_report<Context>(
+        &self,
+        context: &Context,
+        tests: TestSuite<Context>,
+    ) -> (Result<(), Report<BrowserTestError>>, RunReport)
+    where
+        Context: Sync + ?Sized,
+    {
+        let mut report = RunReport::default();
         let had_filterable_tests = tests.has_filterable_tests();
         let tests = tests.filter(&self.filter);
         if had_filterable_tests && !tests.has_filterable_tests() {
-            return Err(Report::new(self.filter.selected_no_test()));
+            return (Err(Report::new(self.filter.selected_no_test())), report);
         }
         // Before listening for shutdown signals, as an empty run has nothing to clean up.
         if tests.is_empty() {
             tracing::info!("Skipping browser test run because no tests were provided.");
-            return Ok(());
+            return (Ok(()), report);
         }
         crate::failure_report::install(self.failure_report_hooks);
-        let cancellation = self.cancellation.run_token()?;
+        let cancellation = match self.cancellation.run_token() {
+            Ok(cancellation) => cancellation,
+            Err(error) => return (Err(error), report),
+        };
         let start = Instant::now();
-        let mut report = RunReport::default();
         let result = self
             .run_reporting(context, tests, &cancellation, &mut report)
             .await;
@@ -486,7 +526,7 @@ impl BrowserTestRunner {
                 consumer.consume(&report);
             }
         }
-        result
+        (result, report)
     }
 
     async fn run_reporting<Context>(
@@ -774,9 +814,12 @@ mod tests {
             },
         );
 
-        let result = runner.run(&(), TestSuite::<()>::sequential()).await;
+        let (result, report) = runner
+            .run_with_report(&(), TestSuite::<()>::sequential())
+            .await;
 
         assert_that!(result).is_ok();
+        assert_that!(report).is_equal_to(RunReport::default());
         assert_that!(calls.load(Ordering::SeqCst)).is_equal_to(0);
     }
 

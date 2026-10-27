@@ -8,8 +8,9 @@ use std::{
 
 /// The outcome and timing of every test of a browser test run.
 ///
-/// Handed to the [`crate::RunReportConsumer`]s of the runner at the end of every run. Its `Display`
-/// implementation renders a human-readable summary, as printed by [`crate::StderrSummary`].
+/// Handed to the [`crate::RunReportConsumer`]s of the runner at the end of every run, and returned
+/// by [`crate::BrowserTestRunner::run_with_report`]. Its `Display` implementation renders a
+/// human-readable summary, as printed by [`crate::StderrSummary`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RunReport {
