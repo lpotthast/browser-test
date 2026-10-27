@@ -39,6 +39,12 @@ fmt-check:
     cargo fmt --all --manifest-path examples/minimal/Cargo.toml -- --check
     cargo fmt --all --manifest-path examples/advanced/Cargo.toml -- --check
 
+# Check that all Cargo.toml dependency tables are sorted, including the examples.
+sort-check:
+    cargo sort --check --workspace
+    cargo sort --check examples/minimal
+    cargo sort --check examples/advanced
+
 # Check the code, including the examples.
 check:
     cargo check --workspace --all-targets
@@ -48,7 +54,6 @@ check:
 
 # Lint the code, including the examples.
 clippy:
-    cargo clippy --workspace -- -D warnings
     cargo clippy --workspace --all-targets --all-features -- -D warnings
     cargo clippy --manifest-path examples/minimal/Cargo.toml --all-targets -- -D warnings
     cargo clippy --manifest-path examples/advanced/Cargo.toml --all-targets -- -D warnings
@@ -86,6 +91,7 @@ tidy:
 # Run the full non-mutating validation suite.
 verify:
     just fmt-check
+    just sort-check
     just check
     just clippy
     just test
