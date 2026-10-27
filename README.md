@@ -289,8 +289,11 @@ let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals())
 BROWSER_TEST_VISIBLE=1 BROWSER_TEST_PAUSE=1 BROWSER_TEST_DRIVER_OUTPUT=1 cargo test -- --nocapture
 ```
 
-`from_env()` returns `None` if the variable is not set, so you choose the default. A value it cannot parse, such as
-`BROWSER_TEST_VISIBLE=ture`, is an error instead of being ignored.
+The `from_env()` of `Visibility`, `Pause`, `DriverOutput`, `Parallelism` and `SessionReuse` returns `None` if its
+variable is unset or empty, so you choose the default. `TestFilter::from_env()` returns the filter itself: an unset or
+empty variable adds no pattern, so without either variable, it selects every test. A value that cannot be parsed, such
+as `BROWSER_TEST_VISIBLE=ture` or an invalid regular expression in `BROWSER_TEST_NAME`, is an `InvalidEnvVar` error
+instead of being ignored.
 
 | Variable                                | Read by                    | Effect                                        |
 |-----------------------------------------|----------------------------|-----------------------------------------------|
