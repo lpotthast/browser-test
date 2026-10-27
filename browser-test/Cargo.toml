@@ -34,7 +34,7 @@ rootcause.workspace = true
 serde_json = { version = "1.0.145", default-features = false, features = ["std"] }
 thirtyfour = { version = "0.38.1", default-features = false, features = ["bidi", "cdp", "reqwest"] }
 thiserror = { version = "2.0.17", default-features = false, features = ["std"] }
-tokio = { version = "1.48.0", default-features = false, features = ["io-std", "io-util", "macros", "net", "rt", "signal", "sync", "time"] }
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "net", "rt", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect"] }
 tracing = { version = "0.1.41", default-features = false, features = ["std"] }
 url = { version = "2.5.8", default-features = false, features = ["std"] }
@@ -45,7 +45,7 @@ nix = { version = "0.31.3", default-features = false, features = ["user"] }
 [dev-dependencies]
 assertr = { workspace = true, features = ["rootcause"] }
 serial_test = { version = "4.0.1", default-features = false, features = ["async"] }
-tokio = { version = "1.52.3", default-features = false, features = ["macros", "net", "rt-multi-thread", "signal"] }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal"] }
 
 [lints]
 workspace = true

@@ -15,6 +15,8 @@ repository = "https://github.com/lpotthast/browser-test"
 assertr = { version = "0.9.1", default-features = false, features = ["std"] }
 browser-test-macros = { version = "0.8.0", path = "browser-test-macros" }
 rootcause = { version = "0.13.0", default-features = false }
+# The library and its tests share one floor. chrome-for-testing-manager requires 1.48.0 as well.
+tokio = { version = "1.48.0", default-features = false }
 
 [workspace.lints.rust]
 missing_docs = "warn"
