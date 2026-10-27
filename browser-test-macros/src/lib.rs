@@ -2,7 +2,7 @@
 //!
 //! Depend on `browser-test` and use the attribute through its re-export,
 //! `browser_test::browser_test`. The generated code refers to `browser-test`, under whatever name
-//! your `Cargo.toml` gives it.
+//! your `Cargo.toml` gives it, or at the path `#[browser_test(crate = ...)]` sets.
 
 mod browser_test;
 
@@ -65,6 +65,9 @@ use proc_macro2::TokenStream;
 ///   `time_limit = ...` sets, if given (any expression of type `std::time::Duration`). Implement
 ///   `BrowserTest` yourself, with `BrowserTest::settings`, for tests that need their own timeouts,
 ///   element query wait, or a fresh session.
+/// - **Crate path**: the generated code refers to `browser-test` under the name your `Cargo.toml`
+///   gives it. `crate = path::to::browser_test` sets another path, e.g. in a crate that uses
+///   `browser-test` only through a re-export of another crate.
 ///
 /// # Signature
 ///

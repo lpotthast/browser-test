@@ -1,4 +1,4 @@
-error: expected `name = "..."`, `tags = ["..."]` or `time_limit = <Duration>`
+error: expected `name = "..."`, `tags = ["..."]`, `time_limit = <Duration>` or `crate = <path>`
  --> tests/ui/error_keeps_the_test.rs:7:16
   |
 7 | #[browser_test(time_limt = std::time::Duration::from_secs(5))]

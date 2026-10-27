@@ -81,7 +81,13 @@ pub(crate) fn expand(
         }
     };
     let args = syn::parse2::<Arguments>(args);
-    let crate_path = crate_path();
+    let crate_path = match &args {
+        Ok(Arguments {
+            crate_path: Some(path),
+            ..
+        }) => Ok(path.to_token_stream()),
+        _ => crate_path(),
+    };
     *dummy = expand_dummy(function.clone(), crate_path.as_ref().ok());
     expand_test(args?, &crate_path?, function)
 }

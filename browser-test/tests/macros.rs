@@ -138,6 +138,21 @@ mod shadowed_macros {
     }
 }
 
+/// `crate = ...` replaces the path to browser-test, e.g. in a crate re-exporting it.
+mod reexported {
+    use super::*;
+
+    mod reexports {
+        pub(super) use ::browser_test as reexported;
+    }
+
+    #[browser_test(crate = self::reexports::reexported)]
+    pub(super) async fn crate_path() -> Result<(), Report> {
+        tokio::task::yield_now().await;
+        Ok(())
+    }
+}
+
 mod other {
     use super::*;
 
@@ -161,6 +176,8 @@ fn generated_tests_implement_the_trait_with_distinct_module_qualified_names() {
     // A test without arguments implements `BrowserTest` for every context, which calls name.
     assert_that!(BrowserTest::<()>::name(&Type)).is_equal_to("macros::type");
     assert_that!(other::BorrowedPage.name()).is_equal_to("macros::other::borrowed_page");
+    assert_that!(BrowserTest::<()>::name(&reexported::CratePath))
+        .is_equal_to("macros::reexported::crate_path");
     assert_that!(BrowserTest::<()>::name(&shadowed_macros::NamedByItsPath))
         .is_equal_to("macros::shadowed_macros::named_by_its_path");
     let _: TestSuite<str> = TestSuite::sequential().with(RawDriver);

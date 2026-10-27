@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `rootcause` is re-exported, like `thirtyfour`, as tests return its reports. Import it as `browser_test::rootcause`
   instead of depending on it directly, so that tests and the runner always use the same version. Updating `rootcause`
   or `thirtyfour` to a new breaking version is a breaking change of `browser-test`.
+- `#[browser_test(crate = path::to::browser_test)]`, which sets the path the generated code refers to `browser-test`
+  by, e.g. in a crate that uses it only through a re-export.
 - `TestSuite::with_all`, which adds a test for each item, e.g. the cases of a parameterized test.
 - `Box<T>` and `Arc<T>` implement `BrowserTest` for every test `T`, including `dyn BrowserTest`, so that a suite can
   hold tests built at runtime.
