@@ -1,38 +1,29 @@
 //! Session workers: each creates a browser session, offers it to the pool, runs the tests it is
 //! assigned, and quits it.
 
-use std::{
-    panic::AssertUnwindSafe,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
-use chrome_for_testing_manager::{ChromeForTestingError, Session};
+use chrome_for_testing_manager::ChromeForTestingError;
 use futures_util::{StreamExt as _, stream::FuturesUnordered};
 use rootcause::Report;
-use thirtyfour::{
-    ChromeCapabilities, ChromiumLikeCapabilities,
-    error::{WebDriverError, WebDriverResult},
-};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    ChromeCapabilitiesSetup, Env,
+    Env,
     session_pool::{Delivery, ResetClaim, Ticket, WorkerRequest},
+    sessions::SessionFactory,
     test_run::{JobRun, run_job},
 };
 use crate::{
     SessionPreparation,
-    failure_report::panic_payload_message,
-    frozen_pages::close_frozen_pages,
     progress::{Activity, Phase},
     report::FormatDuration,
-    session_reuse::{ResetError, SessionBaseline, configure_reusable_session},
+    session_reuse::ResetError,
 };
 
 /// How long resetting a session, or preparing a new one for resets, may take. Their steps usually
 /// take about 0.1s.
-const RESET_TIME_LIMIT: Duration = Duration::from_secs(30);
+pub(super) const RESET_TIME_LIMIT: Duration = Duration::from_secs(30);
 
 /// A test assigned to a session.
 pub(super) struct Job {
@@ -43,12 +34,15 @@ pub(super) struct Job {
     pub(super) body_done: oneshot::Sender<()>,
 }
 
-/// Drive the session workers until the pool closed and every worker finished.
-pub(super) async fn drive_workers<Context>(
+/// Drive the session workers, which get their sessions from `sessions`, until the pool closed and
+/// every worker finished.
+pub(super) async fn drive_workers<Context, S>(
     env: &Env<'_, Context>,
+    sessions: &S,
     mut requests: mpsc::UnboundedReceiver<Option<WorkerRequest>>,
 ) where
     Context: Sync + ?Sized,
+    S: SessionFactory,
 {
     let mut workers = FuturesUnordered::new();
     let mut closing = false;
@@ -58,7 +52,7 @@ pub(super) async fn drive_workers<Context>(
         }
         tokio::select! {
             request = requests.recv(), if !closing => match request {
-                Some(Some(request)) => workers.push(session_worker(env, request)),
+                Some(Some(request)) => workers.push(session_worker(env, sessions, request)),
                 Some(None) | None => closing = true,
             },
             Some(()) = workers.next(), if !workers.is_empty() => {}
@@ -69,99 +63,63 @@ pub(super) async fn drive_workers<Context>(
 /// Create a session, offer it, run the test it is assigned, and quit it. With
 /// [`SessionReuse`](crate::SessionReuse), reset the session after its test and offer it again, as
 /// long as upcoming tests need sessions.
-async fn session_worker<Context>(env: &Env<'_, Context>, request: WorkerRequest)
+async fn session_worker<Context, S>(env: &Env<'_, Context>, sessions: &S, request: WorkerRequest)
 where
     Context: Sync + ?Sized,
+    S: SessionFactory,
 {
-    run_session(env, request).await;
+    run_session(env, sessions, request).await;
     env.pool.session_ended();
 }
 
 /// The work of [`session_worker`].
-async fn run_session<Context>(env: &Env<'_, Context>, request: WorkerRequest)
+async fn run_session<Context, S>(env: &Env<'_, Context>, sessions: &S, request: WorkerRequest)
 where
     Context: Sync + ?Sized,
+    S: SessionFactory,
 {
-    let config = env.config;
     let activity = Activity::Session(request.session);
     env.board
         .enter(activity, "a browser session", Phase::CreatingSession);
     let creation_start = Instant::now();
-    let profile = match config.profiles.create_session_profile().await {
-        Ok(profile) => profile,
-        Err(error) => {
-            env.board.clear(activity);
-            let report = Report::<rootcause::markers::Dynamic>::from(error)
-                .context("the Chrome profile of the session could not be created")
-                .into_dynamic();
-            env.fail_creation(request.delivery, report, creation_start);
-            return;
-        }
-    };
     let pooled = matches!(request.delivery, Delivery::Pool);
     // Only pool sessions are reused: a dedicated session has settings of its own. With reuse
     // enabled, dedicated sessions are set up like reusable ones all the same, so that their tests
     // see the same browser.
-    let reusable = config.session_reuse.is_enabled() && pooled;
+    let reusable = env.config.session_reuse.is_enabled() && pooled;
     let mut end = SessionEnd {
         delivery: Some(request.delivery),
         last_run: None,
         released: None,
     };
-    // Boxed, as a session's future takes about 17 KB.
-    let session_result = Box::pin(
-        config
-            .chrome
-            .session()
-            .with_caps(|caps: &mut ChromeCapabilities| {
-                configure_chrome_capabilities(
-                    caps,
-                    config.visible,
-                    config.chrome_capabilities_setups,
-                )?;
-                if config.session_reuse.is_enabled() {
-                    configure_reusable_session(caps, config.session_reuse)?;
-                }
-                profile.configure(caps)
-            })
-            .with_cancellation(config.cancellation.clone())
-            .with_config(|builder| match request.element_query_wait {
-                Some(wait) => builder.poller(Arc::new(wait.into_thirtyfour_poller())),
-                None => builder,
-            })
-            .run(async |session: &Session| {
-                serve_tests(
-                    env,
-                    session,
-                    SessionStart {
-                        activity,
-                        creation_start,
-                        pooled,
-                        reusable,
-                    },
-                    &mut end,
-                )
-                .await
-            }),
-    )
-    .await;
+    let session_result = sessions
+        .run_session(request.element_query_wait, async |session: &S::Session| {
+            serve_tests(
+                env,
+                sessions,
+                session,
+                SessionStart {
+                    activity,
+                    creation_start,
+                    pooled,
+                    reusable,
+                },
+                &mut end,
+            )
+            .await
+        })
+        .await;
     if let Some(quit_start) = end.released {
         let teardown = quit_start.elapsed();
         env.warn_if_slow_session("Quitting a browser session", teardown);
         env.results().released_session_teardown += teardown;
-    }
-    if session_result.as_ref().is_err_and(quit_timed_out) {
-        // Its browser may still write to the profile.
-        profile.keep();
-    } else {
-        profile.remove().await;
     }
     env.board.clear(activity);
 
     if let Some(delivery) = end.delivery {
         // The session could not be created, so it was never offered.
         let report = match session_result {
-            Err(error) => error.into_dynamic(),
+            Err(error) => error,
             Ok(()) => rootcause::report!("the browser session ended before it could be used"),
         };
         env.fail_creation(delivery, report, creation_start);
@@ -170,7 +128,10 @@ where
     let Some(last_run) = end.last_run else {
         // The session quit without a test: no test reports a failure to quit it.
         if let Err(error) = session_result
-            && !matches!(error.current_context(), ChromeForTestingError::Cancelled)
+            && !matches!(
+                error.downcast_current_context::<ChromeForTestingError>(),
+                Some(ChromeForTestingError::Cancelled)
+            )
         {
             tracing::warn!("Quitting a browser session failed: {error}");
         }
@@ -187,16 +148,6 @@ where
         );
     }
     last_run.finish(env, session_result, teardown);
-}
-
-/// Whether `error`, of a session, says that it did not quit in time.
-fn quit_timed_out(error: &Report<ChromeForTestingError>) -> bool {
-    error.iter_reports().any(|report| {
-        matches!(
-            report.downcast_current_context::<ChromeForTestingError>(),
-            Some(ChromeForTestingError::QuitSessionTimeout { .. })
-        )
-    })
 }
 
 /// How a worker's session started.
@@ -224,30 +175,28 @@ struct SessionEnd {
 /// Offer `session` through `end.delivery` (or, once it ran a test, to the pool), and run the tests
 /// it is assigned: one, or with [`SessionReuse`](crate::SessionReuse) several, resetting the
 /// session in between. What is left to do once the session quit is left in `end`.
-async fn serve_tests<Context>(
+async fn serve_tests<Context, S>(
     env: &Env<'_, Context>,
-    session: &Session,
+    sessions: &S,
+    session: &S::Session,
     start: SessionStart,
     end: &mut SessionEnd,
 ) -> Result<(), Report>
 where
     Context: Sync + ?Sized,
+    S: SessionFactory,
 {
-    let config = env.config;
+    let config = &env.config;
     let SessionStart {
         activity,
         creation_start,
         pooled,
         reusable,
     } = start;
-    if let Err(error) = focus_page(session).await {
-        return Err(Report::<rootcause::markers::Dynamic>::from(error)
-            .context("the page of the session could not be brought to the front")
-            .into_dynamic());
-    }
+    sessions.ready(session).await?;
     // Prepared for dedicated sessions as well: it selects where the test runs.
     let mut baseline = if config.session_reuse.is_enabled() {
-        let prepare = SessionBaseline::prepare(session, config.session_reuse.reset());
+        let prepare = sessions.baseline(session, config.session_reuse.reset());
         match tokio::time::timeout(RESET_TIME_LIMIT, prepare).await {
             Ok(Ok(baseline)) => Some(baseline),
             Ok(Err(error)) => {
@@ -293,7 +242,7 @@ where
             return Ok(());
         };
         tests_run += 1;
-        let mut run = run_job(env, session, &job, preparation).await;
+        let mut run = run_job(env, sessions, session, &job, preparation).await;
         if pooled {
             env.pool.test_finished();
         }
@@ -327,7 +276,7 @@ where
         env.board
             .enter(Activity::Test(index), subject, Phase::ResettingSession);
         let reset_start = Instant::now();
-        let was_reset = reset_session(session, baseline, &test.name).await;
+        let was_reset = reset_session(sessions, session, baseline, &test.name).await;
         let reset_duration = reset_start.elapsed();
         env.board.clear(Activity::Test(index));
         env.warn_if_slow_session(
@@ -347,8 +296,16 @@ where
 
 /// Reset `session` to `baseline` after the browser test `name`, and return whether that worked.
 /// If it didn't, the session quits, and why is logged.
-async fn reset_session(session: &Session, baseline: &mut SessionBaseline, name: &str) -> bool {
-    match tokio::time::timeout(RESET_TIME_LIMIT, baseline.reset(session)).await {
+async fn reset_session<S>(
+    sessions: &S,
+    session: &S::Session,
+    baseline: &mut S::Baseline,
+    name: &str,
+) -> bool
+where
+    S: SessionFactory,
+{
+    match tokio::time::timeout(RESET_TIME_LIMIT, sessions.reset(session, baseline)).await {
         Ok(Ok(())) => return true,
         Ok(Err(ResetError::DefaultContextUsed(reason))) => tracing::debug!(
             "The session of browser test '{name}' quits instead of being reset: {reason}."
@@ -358,7 +315,7 @@ async fn reset_session(session: &Session, baseline: &mut SessionBaseline, name: 
         ),
         Err(_) => {
             // A page the test left behind may have frozen, which would block quitting as well.
-            let pages = close_frozen_pages(session).await;
+            let pages = sessions.close_frozen_pages(session).await;
             tracing::warn!(
                 "Resetting the session of browser test '{name}' took longer than {}, so it quits. \
                  {pages}",
@@ -367,89 +324,4 @@ async fn reset_session(session: &Session, baseline: &mut SessionBaseline, name: 
         }
     }
     false
-}
-
-/// Bring the page of a new session to the front.
-///
-/// `ChromeDriver` starts a session on a profile it did not create itself (browser-test names every
-/// session's profile, see [`RunProfiles`](crate::profile::RunProfiles)) with a page that lacks
-/// focus: `document.hasFocus()` is `false`, and focusing an element from script moves
-/// `document.activeElement` without firing `focus` or `focusin` events. Sessions on
-/// `ChromeDriver`'s own profiles start with a focused page. This restores that behavior.
-async fn focus_page(session: &Session) -> WebDriverResult<()> {
-    session
-        .cdp()
-        .send_raw("Page.bringToFront", serde_json::json!({}))
-        .await?;
-    Ok(())
-}
-
-fn configure_chrome_capabilities(
-    caps: &mut ChromeCapabilities,
-    visible: bool,
-    chrome_capabilities_setups: &[Arc<ChromeCapabilitiesSetup>],
-) -> WebDriverResult<()> {
-    if visible {
-        caps.unset_headless()?;
-    }
-    for setup in chrome_capabilities_setups {
-        // A panic would unwind through the whole run: it fails the session instead.
-        std::panic::catch_unwind(AssertUnwindSafe(|| setup(caps))).unwrap_or_else(|payload| {
-            Err(WebDriverError::SessionCreateError(format!(
-                "a Chrome capability setup panicked: {}",
-                panic_payload_message(payload.as_ref())
-            )))
-        })?;
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use assertr::prelude::*;
-    use thirtyfour::BrowserCapabilitiesHelper;
-
-    use super::*;
-
-    mod configure_chrome_capabilities {
-        use super::*;
-
-        #[test]
-        fn applies_visible_mode_before_custom_setup() {
-            let custom_setup_called = Arc::new(AtomicUsize::new(0));
-            let custom_setup = {
-                let custom_setup_called = Arc::clone(&custom_setup_called);
-                Arc::new(move |caps: &mut ChromeCapabilities| {
-                    assert_that!(caps.is_headless()).is_false();
-                    custom_setup_called.fetch_add(1, Ordering::SeqCst);
-                    caps.add_arg("--window-size=800,600")
-                }) as Arc<ChromeCapabilitiesSetup>
-            };
-            let mut caps = ChromeCapabilities::new();
-            caps.set_headless()
-                .expect("setting headless should update capabilities");
-
-            configure_chrome_capabilities(&mut caps, true, &[custom_setup])
-                .expect("capability setup should succeed");
-
-            assert_that!(custom_setup_called.load(Ordering::SeqCst)).is_equal_to(1);
-            assert_that!(caps.is_headless()).is_false();
-            assert_that!(caps.args()).contains("--window-size=800,600");
-        }
-
-        #[test]
-        fn a_panicking_setup_is_an_error() {
-            let panicking = Arc::new(|_: &mut ChromeCapabilities| -> WebDriverResult<()> {
-                panic!("no window size")
-            }) as Arc<ChromeCapabilitiesSetup>;
-            let error =
-                configure_chrome_capabilities(&mut ChromeCapabilities::new(), false, &[panicking])
-                    .expect_err("a panicking setup should fail");
-
-            assert_that!(error.to_string())
-                .contains("a Chrome capability setup panicked: no window size");
-        }
-    }
 }

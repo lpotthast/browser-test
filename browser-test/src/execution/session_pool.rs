@@ -565,6 +565,16 @@ impl SessionPool {
         })
     }
 
+    /// Check that every session the pool counted ended, once the run is done.
+    pub(super) fn debug_assert_settled(&self) {
+        let state = self.lock();
+        debug_assert_eq!(state.creating, 0, "sessions being created");
+        debug_assert_eq!(state.resetting, 0, "sessions being reset");
+        debug_assert_eq!(state.running, 0, "sessions running a test");
+        debug_assert_eq!(state.alive, 0, "sessions alive");
+        debug_assert!(state.waiters.is_empty(), "tests waiting for a session");
+    }
+
     /// Create no further sessions and let idle ones quit.
     pub(super) fn close(&self) {
         {
@@ -815,6 +825,60 @@ mod tests {
         pool.deliver(Delivery::Pool, Ok(ticket(created).0));
         assert_that!(pool.take(false, false).await).is_some();
         assert_that!(requested(&mut requests)).is_equal_to(0);
+    }
+
+    #[tokio::test]
+    async fn tests_not_needing_a_fresh_session_prefer_reset_ones() {
+        let created = SessionPreparation::Created(std::time::Duration::ZERO);
+        let reset = SessionPreparation::Reset(std::time::Duration::ZERO);
+        let (pool, _requests) = pool_with_spare(Upcoming { any: 1, fresh: 1 });
+        pool.lock()
+            .idle
+            .extend([ticket(created).0, ticket(reset).0]);
+
+        let any = pool.take(false, false).await;
+        assert_that!(matches!(
+            any,
+            Some(Ok(Ticket {
+                preparation: SessionPreparation::Reset(_),
+                ..
+            }))
+        ))
+        .is_true();
+        let fresh = pool.take(true, false).await;
+        assert_that!(matches!(
+            fresh,
+            Some(Ok(Ticket {
+                preparation: SessionPreparation::Created(_),
+                ..
+            }))
+        ))
+        .is_true();
+    }
+
+    #[tokio::test]
+    async fn reset_sessions_are_kept_while_the_pool_wants_more() {
+        let reset = SessionPreparation::Reset(std::time::Duration::ZERO);
+        // One test at a time and one spare: the pool wants two sessions while tests are to come.
+        let (pool, _requests) = pool_with_spare(Upcoming { any: 3, fresh: 0 });
+        let mut jobs = Vec::new();
+        for _ in 0..3 {
+            let (ticket, ticket_jobs) = ticket(reset);
+            pool.claim_reset()
+                .expect("tests are still to run")
+                .deliver(ticket);
+            jobs.push(ticket_jobs);
+        }
+
+        assert_that!(pool.lock().idle.len()).is_equal_to(2);
+        let mut jobs = jobs.into_iter();
+        let (Some(first), Some(second), Some(third)) = (jobs.next(), jobs.next(), jobs.next())
+        else {
+            unreachable!("three sessions were reset");
+        };
+        // The third one quits.
+        assert_that!(third.await.is_err()).is_true();
+        drop((first, second));
     }
 
     fn creation_failure() -> CreationFailure {

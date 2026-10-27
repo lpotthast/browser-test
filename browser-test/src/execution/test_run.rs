@@ -8,12 +8,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrome_for_testing_manager::{ChromeForTestingError, Session};
 use futures_util::FutureExt as _;
-use rootcause::{Report, markers::Dynamic};
+use rootcause::Report;
 use tracing::Instrument as _;
 
-use super::{Env, plan::QueuedTest, worker::Job};
+use super::{Env, plan::QueuedTest, sessions::SessionFactory, worker::Job};
 use crate::{
     BrowserTestError,
     driver_output::{DriverOutputSnapshot, attach_session_output},
@@ -21,7 +20,7 @@ use crate::{
         PanicDetails, PanicLocation, RecentSteps, TestCodeFramesHandler, panic_payload_message,
         without_own_location,
     },
-    frozen_pages::{PageCheck, close_frozen_pages},
+    frozen_pages::PageCheck,
     progress::Activity,
     report::{SessionPreparation, SessionTiming, StepStats, TestOutcome, TestRecord},
     step::StepRecorder,
@@ -77,7 +76,7 @@ impl JobRun {
     pub(super) fn finish<Context>(
         self,
         env: &Env<'_, Context>,
-        session_result: Result<(), Report<ChromeForTestingError>>,
+        session_result: Result<(), Report>,
         teardown: Option<Duration>,
     ) where
         Context: Sync + ?Sized,
@@ -110,15 +109,17 @@ impl JobRun {
     }
 }
 
-/// Run the test of `job` in `session`, prepared as `preparation`.
-pub(super) async fn run_job<Context>(
+/// Run the test of `job` in `session` of `sessions`, prepared as `preparation`.
+pub(super) async fn run_job<Context, S>(
     env: &Env<'_, Context>,
-    session: &Session,
+    sessions: &S,
+    session: &S::Session,
     job: &Job,
     preparation: SessionPreparation,
 ) -> JobRun
 where
     Context: Sync + ?Sized,
+    S: SessionFactory,
 {
     let test = env.test(job.test);
     let mut run = JobRun {
@@ -132,23 +133,21 @@ where
         driver_output: env
             .config
             .driver_output
-            .map(|capture| (capture.position(), session.session_id().to_string())),
+            .map(|capture| (capture.position(), sessions.session_id(session))),
         quit_start: None,
     };
     let timeouts = test.ready().timeouts;
     let timeouts = if timeouts.is_empty() {
         Ok(())
     } else {
-        session
-            .update_timeouts(timeouts.into_thirtyfour_timeout_configuration())
-            .await
+        sessions.set_timeouts(session, timeouts).await
     };
     match timeouts {
-        Ok(()) => run_body(env, session, test, &mut run).await,
+        Ok(()) => run_body(env, sessions, session, test, &mut run).await,
         Err(error) => {
             // Don't let further tests start while this session quits.
             env.stop_starting_on_fail_fast();
-            run.failure = Some(Failure::PrepareSession(Report::<Dynamic>::from(error)));
+            run.failure = Some(Failure::PrepareSession(error));
         }
     }
     run
@@ -166,9 +165,9 @@ fn test_outcome(
     failure: Option<Failure>,
     recent_steps: Option<RecentSteps>,
     driver_output: Option<DriverOutputSnapshot>,
-    session_result: Result<(), Report<ChromeForTestingError>>,
+    session_result: Result<(), Report>,
 ) -> (TestOutcome, Result<(), Report<BrowserTestError>>) {
-    let quit_error = session_result.err().map(Report::into_dynamic);
+    let quit_error = session_result.err();
     let (outcome, report) = match (failure, quit_error) {
         (Some(failure), None) => failure_report(name, failure),
         (Some(failure), Some(quit_error)) => {
@@ -254,13 +253,15 @@ fn panic_report(
 
 /// Run the body of `test`, recording its duration, steps and failure into `run`. A body exceeding
 /// the time limit has its session's frozen pages closed.
-async fn run_body<Context>(
+async fn run_body<Context, S>(
     env: &Env<'_, Context>,
-    session: &Session,
+    sessions: &S,
+    session: &S::Session,
     test: &QueuedTest<Context>,
     run: &mut JobRun,
 ) where
     Context: Sync + ?Sized,
+    S: SessionFactory,
 {
     let name = test.name.as_str();
     tracing::debug!("Executing browser test: {name}");
@@ -280,7 +281,11 @@ async fn run_body<Context>(
     // `run` is called in the block, so that a panic before it returns its future (in a
     // hand-written implementation) is caught as well.
     let prepared = test.ready();
-    let body = async { prepared.test.run(session, env.context).await };
+    let body = async {
+        sessions
+            .run_test(session, &*prepared.test, env.context)
+            .await
+    };
     let mut body = Body::new(
         recorder
             .scope(AssertUnwindSafe(body).catch_unwind())
@@ -319,7 +324,7 @@ async fn run_body<Context>(
             });
             Some(Failure::TimedOut {
                 limit: prepared.time_limit,
-                pages: close_frozen_pages(session).await,
+                pages: sessions.close_frozen_pages(session).await,
                 drop_panic,
             })
         }

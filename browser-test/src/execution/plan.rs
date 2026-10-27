@@ -346,6 +346,51 @@ mod tests {
         ]);
     }
 
+    mod max_concurrency {
+        use super::*;
+
+        fn suite(parallelism: usize, tests: usize) -> TestSuite<()> {
+            (0..tests).fold(
+                TestSuite::parallel(Parallelism::parallel(parallelism)),
+                |suite, _| suite.with(StubTest::new("test")),
+            )
+        }
+
+        fn max_concurrency(tests: TestSuite<()>) -> usize {
+            plan(tests, TestDefaults::new()).0.max_concurrency()
+        }
+
+        #[test]
+        fn is_bounded_by_the_parallelism() {
+            assert_that!(max_concurrency(suite(2, 3))).is_equal_to(2);
+            assert_that!(max_concurrency(suite(4, 3))).is_equal_to(3);
+            assert_that!(max_concurrency(TestSuite::sequential())).is_equal_to(1);
+        }
+
+        #[test]
+        fn sums_the_widest_children_that_run_at_the_same_time() {
+            // Two sequential suites and a test, all at once.
+            let tests = TestSuite::parallel(Parallelism::parallel(4))
+                .with_nested(suite(1, 3))
+                .with_nested(suite(1, 2))
+                .with(StubTest::new("test"));
+            assert_that!(max_concurrency(tests)).is_equal_to(3);
+
+            // Two at a time: the parallel suite of three, and a test.
+            let tests = TestSuite::parallel(Parallelism::parallel(2))
+                .with(StubTest::new("test"))
+                .with_nested(suite(3, 3))
+                .with(StubTest::new("test"));
+            assert_that!(max_concurrency(tests)).is_equal_to(4);
+
+            // A sequential suite runs one child at a time, however wide.
+            let tests = TestSuite::sequential()
+                .with_nested(suite(3, 3))
+                .with(StubTest::new("test"));
+            assert_that!(max_concurrency(tests)).is_equal_to(3);
+        }
+    }
+
     mod plan_test {
         use super::*;
 
