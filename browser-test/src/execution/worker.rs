@@ -152,7 +152,12 @@ where
             .lock()
             .unwrap_or_else(PoisonError::into_inner) += teardown;
     }
-    profile.remove().await;
+    if session_result.as_ref().is_err_and(quit_timed_out) {
+        // Its browser may still write to the profile.
+        profile.keep();
+    } else {
+        profile.remove().await;
+    }
     env.board.clear(activity);
 
     if let Some(delivery) = end.delivery {
@@ -184,6 +189,16 @@ where
         );
     }
     env.finish_job(last_run, session_result, teardown);
+}
+
+/// Whether `error`, of a session, says that it did not quit in time.
+fn quit_timed_out(error: &Report<ChromeForTestingError>) -> bool {
+    error.iter_reports().any(|report| {
+        matches!(
+            report.downcast_current_context::<ChromeForTestingError>(),
+            Some(ChromeForTestingError::QuitSessionTimeout { .. })
+        )
+    })
 }
 
 /// How a worker's session started.

@@ -402,6 +402,12 @@ impl SessionProfile {
     pub(crate) async fn remove(self) {
         self.dir.remove().await;
     }
+
+    /// Leave the profile to the run, which removes it with its directory once Chrome for Testing
+    /// shut down: for a browser that may still be running.
+    pub(crate) fn keep(self) {
+        self.dir.keep();
+    }
 }
 
 /// An exclusive lock on a run's lock file, which is removed when the lock is dropped. The
@@ -481,11 +487,19 @@ impl OwnedDir {
         // removes the directory right away.
         let _ = tokio::task::spawn_blocking(move || drop(self)).await;
     }
+
+    /// Don't remove the directory.
+    fn keep(mut self) {
+        self.path = PathBuf::new();
+    }
 }
 
 impl Drop for OwnedDir {
     fn drop(&mut self) {
-        remove_dir(&self.path);
+        // Empty if kept.
+        if !self.path.as_os_str().is_empty() {
+            remove_dir(&self.path);
+        }
     }
 }
 

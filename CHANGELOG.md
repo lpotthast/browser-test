@@ -151,6 +151,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - With `FailurePolicy::FailFast`, a failure also ends the wait of a test for a session with an element query wait of
   its own, which then doesn't start, like a test waiting for any other session. Idle spare sessions that the tests
   still to start (those of `TestSuite::run_always` suites) don't need quit right away, instead of at the end of the run.
+- The Chrome profile of a session that didn't quit in time is removed with the run's profiles once Chrome for Testing
+  shut down, rather than right away, while its browser may still write to it.
 
 ## [0.7.0] - 2026-10-13
 
