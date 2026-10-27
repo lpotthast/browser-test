@@ -5,6 +5,7 @@ use proc_macro2::Span;
 use syn::{
     FnArg, GenericParam, Generics, Lifetime, LifetimeParam, ParenthesizedGenericArguments,
     ReturnType, Safety, Signature, Type, TypeFnPtr, TypeReference,
+    spanned::Spanned as _,
     visit_mut::{self, VisitMut},
 };
 
@@ -20,6 +21,8 @@ pub(super) struct TestSignature {
     pub(super) generics: Generics,
     /// The arguments the function takes.
     pub(super) inputs: Inputs,
+    /// The spans of the types the arguments reference, at which a mismatched argument is reported.
+    pub(super) input_spans: Vec<Span>,
 }
 
 /// The arguments a browser test function takes.
@@ -64,6 +67,7 @@ impl TestSignature {
             ),
         };
         let mut context = None;
+        let mut input_spans = Vec::new();
         for input in &signature.inputs {
             let FnArg::Typed(input) = input else {
                 bail!(input, "browser tests must be free functions");
@@ -75,17 +79,26 @@ impl TestSignature {
                     "browser test arguments must be shared references"
                 ),
             };
+            input_spans.push(reference.elem.span());
             // The last argument is the context.
             context = Some((*reference.elem).clone());
-        }
-        if let (Inputs::Context, Some(context)) = (&inputs, &context) {
-            ensure!(
-                !names_web_driver(context),
-                &signature.inputs,
-                "a single argument is the run's context, not the session's driver";
-                help = "take the driver and the context: `(driver: &WebDriver, context: &Context)`, \
-                        with `&()` for a run without context",
-            );
+            if names_web_driver(&reference.elem) {
+                match inputs {
+                    Inputs::Context => bail!(
+                        input,
+                        "a single argument is the run's context, not the session's driver";
+                        help = "take the driver and the context: \
+                                `(driver: &WebDriver, context: &Context)`, with `&()` for a run \
+                                without context",
+                    ),
+                    Inputs::DriverAndContext if input_spans.len() == 2 => bail!(
+                        input,
+                        "the second argument is the run's context, not the session's driver";
+                        help = "take the driver first: `(driver: &WebDriver, context: &Context)`",
+                    ),
+                    _ => {}
+                }
+            }
         }
         let ReturnType::Type(_, result) = &signature.output else {
             bail!(signature, "browser tests must return Result<(), Report>");
@@ -110,6 +123,7 @@ impl TestSignature {
             context,
             generics,
             inputs,
+            input_spans,
         })
     }
 }

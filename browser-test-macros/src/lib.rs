@@ -86,7 +86,8 @@ use proc_macro2::TokenStream;
 /// e.g. `TestSuite::<()>::sequential()`.
 ///
 /// A single `&WebDriver` argument is rejected, as a single argument is the context. Take
-/// `(driver: &WebDriver, context: &Context)`, with `&()` for a run without context.
+/// `(driver: &WebDriver, context: &Context)`, with `&()` for a run without context. A second
+/// `&WebDriver` argument is rejected as well, as the driver comes first.
 ///
 /// A test never registered with `TestSuite` warns as an unused function (`dead_code`), unless
 /// its struct is public.

@@ -97,6 +97,7 @@ fn expand_test(
         context,
         generics,
         inputs,
+        input_spans,
     } = TestSignature::parse(&function.sig)?;
     let function_name = function.sig.ident.unraw().to_string();
     let name = struct_name(&function.sig.ident, &function_name)?;
@@ -132,17 +133,22 @@ fn expand_test(
     let body = &function.sig.ident;
     let (impl_generics, _, where_clause) = generics.split_for_impl();
     let call_args = match inputs {
-        Inputs::None => quote!(),
-        Inputs::Context => quote!(__browser_test_context),
-        Inputs::DriverAndContext => quote!(__browser_test_driver, __browser_test_context),
+        Inputs::None => &[][..],
+        Inputs::Context => &["__browser_test_context"][..],
+        Inputs::DriverAndContext => &["__browser_test_driver", "__browser_test_context"][..],
     };
+    // Spanned at the arguments' types, where an argument of another type is reported.
+    let call_args = call_args
+        .iter()
+        .zip(input_spans)
+        .map(|(arg, span)| Ident::new(arg, span));
     // Spanned at the return type, where a wrong one is reported.
     let into_dynamic = quote_spanned! {result.span()=>
         <#result as #crate_path::__private::TestResult>::into_dynamic
     };
     // Spanned at the function's name, where a future that is not `Send` is reported.
     let boxed_body = quote_spanned! {body.span()=>
-        ::std::boxed::Box::pin(#crate_path::__private::run_body(#body(#call_args), #into_dynamic))
+        ::std::boxed::Box::pin(#crate_path::__private::run_body(#body(#(#call_args),*), #into_dynamic))
     };
     Ok(quote! {
         #test_struct
@@ -350,6 +356,10 @@ mod tests {
             (
                 "async fn test(driver: &thirtyfour::WebDriver) -> Result<(), Report> { Ok(()) }",
                 "a single argument is the run's context, not the session's driver",
+            ),
+            (
+                "async fn test(context: &str, driver: &WebDriver) -> Result<(), Report> { Ok(()) }",
+                "the second argument is the run's context, not the session's driver",
             ),
             (
                 "async fn test() {}",
