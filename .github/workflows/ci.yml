@@ -5,6 +5,13 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  schedule:
+    # Weekly, to catch new advisories and newly released dependency versions without a push.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -14,6 +21,8 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
+# Jobs run the Justfile recipes that `just verify` runs, so CI and local validation cannot drift apart. The examples
+# are separate workspaces with their own lockfiles and target directories, which the caches include.
 jobs:
   fmt:
     runs-on: ubuntu-latest
@@ -22,7 +31,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: cargo fmt --all -- --check
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-sort
+      - run: just fmt-check
+      - run: just sort-check
 
   check:
     runs-on: ubuntu-latest
@@ -30,6 +43,43 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            examples/minimal
+            examples/advanced
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      # The recipes do not pass `--locked`, so fail on outdated lockfiles first.
+      - run: just lockfile-check
+      - run: just check
+
+  check-features:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      # The `native-tls` feature links against the system's OpenSSL.
+      - run: sudo apt-get update && sudo apt-get install --yes libssl-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-hack
+      - run: just lockfile-check
+      - run: just check-features
+
+  check-platforms:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ windows-latest, macos-latest ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The library and the tests compile. The browser tests themselves only run on Linux.
       - run: cargo check --workspace --all-targets --locked
 
   clippy:
@@ -40,7 +90,16 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+        with:
+          workspaces: |
+            .
+            examples/minimal
+            examples/advanced
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just lockfile-check
+      - run: just clippy
 
   test-unit:
     runs-on: ubuntu-latest
@@ -51,7 +110,24 @@ jobs:
       - run: cargo test --workspace --lib --locked
       - run: cargo test --workspace --doc --locked
       - run: cargo test --workspace --test macros --locked
-      - run: cargo test --package browser-test-macros --test ui --locked
+
+  test-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      # The expected compiler output of the trybuild UI tests only matches one Rust release. The Justfile pins it, so
+      # that updating it is a deliberate change instead of a failure on the next stable release.
+      - id: toolchain
+        run: echo "version=$(just --evaluate ui_toolchain)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+      - run: just lockfile-check
+      - run: just test-ui
 
   test-integration:
     runs-on: ubuntu-latest
@@ -59,7 +135,16 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --package browser-test --test browser_runner --test session_prefetch --locked -- --test-threads=1
+      # chrome-for-testing-manager downloads Chrome for Testing into the per-user cache directory. The key changes
+      # weekly to pick up new stable releases, while older entries still restore the previous download.
+      - id: week
+        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/chrome-for-testing-manager
+          key: chrome-for-testing-${{ runner.os }}-${{ steps.week.outputs.week }}
+          restore-keys: chrome-for-testing-${{ runner.os }}-
+      - run: cargo test --package browser-test --test browser_runner --test session_prefetch --locked
 
   build:
     runs-on: ubuntu-latest
@@ -67,15 +152,59 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --workspace --release --locked
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just lockfile-check
+      - run: just build
 
-  doc:
+  docs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo doc --workspace --no-deps --release --locked
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just lockfile-check
+      - run: just build-docs
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-audit
+      - run: just audit
+
+  semver-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-semver-checks
+      # Compares the public API against the latest release of browser-test on crates.io.
+      - run: just semver-checks
+
+  minimal-versions:
+    runs-on: ubuntu-latest
+    env:
+      # Only the resolution against the lowest allowed versions matters here, not the lints of a nightly compiler.
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v6
+      # cargo-minimal-versions resolves with the unstable `-Z direct-minimal-versions`.
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-hack,cargo-minimal-versions
+      - run: just minimal-versions
 
   msrv:
     runs-on: ubuntu-latest
