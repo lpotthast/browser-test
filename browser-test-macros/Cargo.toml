@@ -25,6 +25,8 @@ assertr.workspace = true
 # dependency is left out when publishing.
 browser-test = { path = "../browser-test" }
 rootcause.workspace = true
+# The unit tests render syn types in assertion messages, which needs their Debug impls.
+syn = { version = "3", features = ["extra-traits"] }
 trybuild = "1.0.114"
 
 [lints]

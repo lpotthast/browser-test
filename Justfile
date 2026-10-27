@@ -21,7 +21,7 @@ msrv:
 
 # Check if the current dependency version bounds are sufficient.
 minimal-versions:
-    cargo minimal-versions check --workspace --direct
+    cargo minimal-versions check --workspace --direct --all-targets --all-features
 
 # Check whether current changes require a breaking release.
 semver-checks:
