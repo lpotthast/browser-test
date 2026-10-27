@@ -261,9 +261,21 @@ struct CapturedFrames {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Frame {
+    /// The absolute path of the source file.
+    path: PathBuf,
+    /// The source file as shown, relative to the test root.
     file: String,
     line: u32,
     function: String,
+}
+
+impl Frame {
+    /// Whether the frame is at `line` of `file`, a path as rustc reports locations (in panics and
+    /// [`Location`]s): relative to the workspace root for the workspace's sources, absolute for
+    /// others, e.g. registry crates.
+    fn is_at(&self, file: &str, line: u32) -> bool {
+        self.line == line && test_root().join(file) == self.path
+    }
 }
 
 impl TestCodeFrames {
@@ -324,7 +336,7 @@ impl TestCodeFrames {
     fn starts_at_line(&self, file: &str, line: u32) -> bool {
         self.frames()
             .first()
-            .is_some_and(|frame| frame.line == line && Path::new(file).ends_with(&frame.file))
+            .is_some_and(|frame| frame.is_at(file, line))
     }
 }
 
@@ -353,6 +365,7 @@ fn test_code_frames(backtrace: &backtrace::Backtrace) -> Vec<Frame> {
                 continue;
             }
             let entry = Frame {
+                path: path.to_path_buf(),
                 file: file.display().to_string(),
                 line,
                 function: symbol
@@ -766,27 +779,46 @@ mod tests {
 
     use super::*;
 
+    /// A frame of `file`, relative to the test root.
+    fn frame(file: &str, line: u32, function: &str) -> Frame {
+        Frame {
+            path: test_root().join(file),
+            file: file.to_owned(),
+            line,
+            function: function.to_owned(),
+        }
+    }
+
     #[test]
     fn a_panic_location_is_test_code_when_it_is_the_innermost_frame() {
         let frames = TestCodeFrames::from_frames(vec![
-            Frame {
-                file: "tests/ui/checkbox.rs".to_owned(),
-                line: 84,
-                function: "checkbox::selected_state".to_owned(),
-            },
-            Frame {
-                file: "tests/main.rs".to_owned(),
-                line: 12,
-                function: "main".to_owned(),
-            },
+            frame(
+                "my_crate/tests/ui/checkbox.rs",
+                84,
+                "checkbox::selected_state",
+            ),
+            frame("my_crate/tests/main.rs", 12, "main"),
         ]);
-        assert_that!(frames.starts_at("tests/ui/checkbox.rs:84:9")).is_true();
+        let absolute = test_root().join("my_crate/tests/ui/checkbox.rs:84:9");
         assert_that!(frames.starts_at("my_crate/tests/ui/checkbox.rs:84:9")).is_true();
-        assert_that!(frames.starts_at("tests/ui/checkbox.rs:85:9")).is_false();
-        assert_that!(frames.starts_at("tests/main.rs:12:5")).is_false();
-        assert_that!(frames.starts_at("/home/me/.cargo/registry/src/assertr/src/lib.rs:84:9"))
-            .is_false();
+        assert_that!(frames.starts_at(&absolute.display().to_string())).is_true();
+        assert_that!(frames.starts_at("tests/ui/checkbox.rs:84:9")).is_false();
+        assert_that!(frames.starts_at("my_crate/tests/ui/checkbox.rs:85:9")).is_false();
+        assert_that!(frames.starts_at("my_crate/tests/main.rs:12:5")).is_false();
         assert_that!(frames.starts_at("no location")).is_false();
+    }
+
+    #[test]
+    fn a_location_in_a_dependency_is_no_test_code_even_where_the_paths_overlap() {
+        // A single-package workspace, whose `src/lib.rs` ends the path of a registry crate's.
+        let frames = TestCodeFrames::from_frames(vec![frame("src/lib.rs", 84, "lib::check")]);
+        assert_that!(frames.starts_at("src/lib.rs:84:9")).is_true();
+        assert_that!(frames.starts_at(
+            "/home/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/assertr-0.9.0/src/lib.rs:84:9"
+        ))
+        .is_false();
+        assert_that!(frames.starts_at_line("/home/me/.cargo/git/checkouts/x/src/lib.rs", 84))
+            .is_false();
     }
 
     #[test]

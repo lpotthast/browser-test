@@ -104,6 +104,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   captured where the error is created, but only symbolized to its `TestCodeFrames` when the report is printed. The
   source location `rootcause` attaches to such an error is now wrapped in an attachment of browser-test's, which hides
   it when the frames start there.
+- A panic in a dependency is no longer taken for one in the test code when the dependency's file path ends with the
+  path of the test's innermost frame, e.g. a registry crate's `src/lib.rs` in a single-package workspace. Locations are
+  compared by their full paths.
 
 ## [0.7.0] - 2026-10-13
 
