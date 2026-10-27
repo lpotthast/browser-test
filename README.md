@@ -146,6 +146,8 @@ A few things to keep in mind:
   provider before running tests.
 - `native-tls`: Download using the platform's native TLS implementation.
 - `component`: Enable `#[derive(Component)]` in the re-exported `thirtyfour`.
+- `serde`: Implement `serde::Serialize` for the run report (`RunReport` and the types it holds), e.g. to write it as
+  JSON. Durations serialize as seconds.
 
 The TLS features are passed on to `chrome-for-testing-manager`. Chrome for Testing is downloaded over HTTPS, so one of
 them must be enabled, or every download fails. The connection to chromedriver on localhost does not use TLS.

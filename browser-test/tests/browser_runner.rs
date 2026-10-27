@@ -550,6 +550,9 @@ async fn run_all_reports_intentional_failure_and_runs_page_title_test() {
     ]);
     // The consumers got the same report.
     assert_that!(outcomes.lock().unwrap().clone()).is_equal_to(reported);
+    assert_that!(report.tests[0].failure.as_deref().unwrap_or_default())
+        .contains("intentional browser test failure");
+    assert_that!(report.tests[1].failure.clone()).is_none();
 }
 
 /// Implements `run` by hand, and panics before returning its future.

@@ -243,7 +243,8 @@ where
     }
 
     /// Record a finished test.
-    fn finish(&self, record: TestRecord, result: Result<(), Report<BrowserTestError>>) {
+    fn finish(&self, mut record: TestRecord, result: Result<(), Report<BrowserTestError>>) {
+        record.failure = result.as_ref().err().map(ToString::to_string);
         let total = FormatDuration(record.total());
         let breakdown = timing_breakdown(&record);
         match record.outcome {

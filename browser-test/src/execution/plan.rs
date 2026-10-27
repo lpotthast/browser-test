@@ -57,6 +57,7 @@ where
             index: self.index,
             name: self.name.clone(),
             outcome,
+            failure: None,
             path: self.placement.path.clone(),
             tags: self.tags.clone(),
             session,

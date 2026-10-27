@@ -22,6 +22,9 @@ native-tls = ["chrome-for-testing-manager/native-tls"]
 # Enables `#[derive(Component)]` in the re-exported `thirtyfour`.
 component = ["thirtyfour/component"]
 
+# Implements `serde::Serialize` for the run report types, e.g. to write the report as JSON.
+serde = ["dep:serde"]
+
 [dependencies]
 async-trait = { version = "0.1.83", default-features = false }
 backtrace = { version = "0.3.76", default-features = false, features = ["std"] }
@@ -31,6 +34,7 @@ futures-util = { version = "0.3.32", default-features = false, features = ["sink
 regex = { version = "1.13.1", default-features = false, features = ["perf", "std", "unicode"] }
 reqwest = { version = "0.13.5", default-features = false }
 rootcause.workspace = true
+serde = { version = "1.0.228", default-features = false, features = ["derive", "std"], optional = true }
 serde_json = { version = "1.0.145", default-features = false, features = ["std"] }
 thirtyfour = { version = "0.38.1", default-features = false, features = ["bidi", "cdp", "reqwest"] }
 thiserror = { version = "2.0.17", default-features = false, features = ["std"] }

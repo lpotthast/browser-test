@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `InvalidEnvVar::details`, e.g. why a regular expression is invalid.
 - `BrowserTestRunner::run_with_report`, which returns the run's `RunReport` along with its result, so that the report
   no longer needs a consumer to be reached. Consumers are still called.
+- `TestRecord::failure`, the rendered failure report of a test that failed, panicked or timed out, so that a consumer
+  writing e.g. a `JUnit` or JSON report can say why a test failed.
+- `TestRecord::new`, `SuiteRecord::new` and `SessionTiming::new`, so that reports can be built outside the runner, e.g.
+  to test a `RunReportConsumer`.
+- The `serde` feature, which implements `serde::Serialize` for `RunReport` and the types it holds. Durations serialize
+  as seconds (a floating-point number), and enums in `snake_case`.
 - `BrowserTestRunner::with_version`, which pins the Chrome version, e.g. `.with_version(version)` with a `Version`
   parsed from `"147.0.7727.56"`, or picks the latest of a channel, like `with_channel`. `Version` and `VersionRequest`
   are re-exported.
@@ -61,6 +67,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** Updated `thirtyfour` to version `0.38`.
 - Updated `chrome-for-testing-manager` to version `0.15`.
 - Updated `assertr` to version `0.9`.
+
+### Fixed
+
+- The run summary's lists keep their durations aligned when one of them is 100 minutes or longer, as a step kind's total
+  time can be in a long run.
 
 ## [0.7.0] - 2026-10-13
 
