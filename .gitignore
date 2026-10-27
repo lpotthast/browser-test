@@ -1,2 +1,5 @@
 target/
 .DS_Store
+.idea/*
+# The project spelling dictionary is shared, the rest of the IDE configuration is not.
+!.idea/dictionaries/
