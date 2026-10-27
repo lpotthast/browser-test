@@ -22,6 +22,7 @@ use serial_test::serial;
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::TcpListener,
+    sync::watch,
 };
 
 const PAGE: &str = "<!doctype html><title>session prefetch fixture</title><p>fixture</p>";
@@ -70,7 +71,38 @@ fn runner() -> BrowserTestRunner {
 struct Tracker {
     started: Mutex<Vec<usize>>,
     running: AtomicUsize,
-    max_running: AtomicUsize,
+    max_running: watch::Sender<usize>,
+    /// How many of its tests must have run at once before a test runs its body.
+    overlap: usize,
+}
+
+/// How long a test waits for [`Tracker::overlap`] tests to run at once. Only reached when they
+/// never do, which the test's assertions then report.
+const OVERLAP_TIMEOUT: Duration = Duration::from_secs(30);
+
+impl Tracker {
+    /// A tracker whose tests wait until `overlap` of them have run at the same time before they
+    /// run their body. That `overlap` tests ran at once then doesn't depend on whether their
+    /// sessions happened to start within one body's duration of each other.
+    fn overlapping(overlap: usize) -> Self {
+        Self {
+            overlap,
+            ..Self::default()
+        }
+    }
+
+    fn max_running(&self) -> usize {
+        *self.max_running.borrow()
+    }
+
+    async fn await_overlap(&self) {
+        let mut max_running = self.max_running.subscribe();
+        let _ = tokio::time::timeout(
+            OVERLAP_TIMEOUT,
+            max_running.wait_for(|max| *max >= self.overlap),
+        )
+        .await;
+    }
 }
 
 /// Opens the fixture page and stays there for `body`.
@@ -125,10 +157,13 @@ impl BrowserTest<str> for Visit {
         let tracker = &self.tracker;
         tracker.started.lock().unwrap().push(self.index);
         let running = tracker.running.fetch_add(1, Ordering::SeqCst) + 1;
-        tracker.max_running.fetch_max(running, Ordering::SeqCst);
+        tracker
+            .max_running
+            .send_modify(|max| *max = (*max).max(running));
 
         let result = async {
             driver.goto(base_url).step("goto").detail(base_url).await?;
+            tracker.await_overlap().await;
             tokio::time::sleep(self.body).await;
             if self.fail {
                 return Err(report!("intentional failure"));
@@ -199,6 +234,7 @@ fn session_timings(outcome: &Run) -> Vec<(Duration, Duration)> {
 async fn later_tests_find_their_session_ready() {
     let base_url = serve_fixture().await;
     let tracker = Arc::new(Tracker::default());
+    let body = Duration::from_secs(2);
     let consumed = Arc::new(Mutex::new(Vec::new()));
     let consumer = |name: &'static str| {
         let consumed = Arc::clone(&consumed);
@@ -212,7 +248,7 @@ async fn later_tests_find_their_session_ready() {
             .with_report_consumer(consumer("first"))
             .with_report_consumer(consumer("second")),
         base_url.as_str(),
-        visits(3, Duration::from_secs(2), &tracker),
+        visits(3, body, &tracker),
     )
     .await;
 
@@ -220,12 +256,16 @@ async fn later_tests_find_their_session_ready() {
     assert_that!(consumed.lock().unwrap().clone()).is_equal_to(vec![("first", 3), ("second", 3)]);
     assert_that!(outcome.report.sessions_created()).is_equal_to(3);
     for (creation, wait) in &session_timings(&outcome)[1..] {
-        // Created while the previous test ran.
+        // Created while the previous test ran, so the test waits at most for the part of the
+        // creation that outlasted the previous test's body. A session created only on the test's
+        // turn makes it wait for all of the creation. The margin of half a body (or half the
+        // creation, if that is shorter) holds however long creating a session takes.
+        let margin = (*creation).min(body) / 2;
         assert_that!(*wait)
             .with_detail_message(format!(
                 "waited {wait:?} for a session created in {creation:?}"
             ))
-            .is_less_than(*creation / 2);
+            .is_less_than(creation.saturating_sub(margin));
     }
     for test in &outcome.report.tests {
         assert_that!(test.teardown).is_some();
@@ -262,7 +302,7 @@ async fn without_spare_sessions_tests_wait_for_their_session() {
 #[serial]
 async fn parallel_tests_start_in_order_on_bounded_slots() {
     let base_url = serve_fixture().await;
-    let tracker = Arc::new(Tracker::default());
+    let tracker = Arc::new(Tracker::overlapping(2));
 
     let outcome = run(
         runner(),
@@ -282,7 +322,7 @@ async fn parallel_tests_start_in_order_on_bounded_slots() {
     let mut started = tracker.started.lock().unwrap().clone();
     started.sort_unstable();
     assert_that!(started).is_equal_to(vec![0, 1, 2, 3, 4]);
-    assert_that!(tracker.max_running.load(Ordering::SeqCst)).is_equal_to(2);
+    assert_that!(tracker.max_running()).is_equal_to(2);
     assert_that!(outcome.report.sessions_created()).is_equal_to(5);
 }
 
@@ -402,7 +442,7 @@ async fn every_test_gets_a_fresh_browser() {
 #[serial]
 async fn nested_suites_limit_what_runs_at_the_same_time() {
     let base_url = serve_fixture().await;
-    let all = Arc::new(Tracker::default());
+    let all = Arc::new(Tracker::overlapping(2));
     let serial = Arc::new(Tracker::default());
     let body = Duration::from_millis(700);
     let tests = TestSuite::parallel(Parallelism::parallel(3))
@@ -424,8 +464,8 @@ async fn nested_suites_limit_what_runs_at_the_same_time() {
     let outcome = run(runner(), base_url.as_str(), tests).await;
 
     assert_that!(outcome.result).is_ok();
-    assert_that!(all.max_running.load(Ordering::SeqCst)).is_equal_to(2);
-    assert_that!(serial.max_running.load(Ordering::SeqCst)).is_equal_to(1);
+    assert_that!(all.max_running()).is_equal_to(2);
+    assert_that!(serial.max_running()).is_equal_to(1);
     assert_that!(serial.started.lock().unwrap().clone()).is_equal_to(vec![2, 3]);
     let paths: Vec<Option<&str>> = outcome
         .report
