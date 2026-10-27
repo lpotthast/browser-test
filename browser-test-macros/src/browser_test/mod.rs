@@ -11,7 +11,10 @@ use manyhow::{ErrorMessage, bail, ensure, error_message};
 use proc_macro2::{Ident, TokenStream};
 use quote::{ToTokens as _, format_ident, quote, quote_spanned};
 use signature::{Inputs, TestSignature};
-use syn::{Attribute, ItemFn, Visibility, ext::IdentExt, spanned::Spanned as _};
+use syn::{
+    Attribute, ItemFn, Meta, Token, Visibility, ext::IdentExt, punctuated::Punctuated,
+    spanned::Spanned as _,
+};
 
 /// Struct names that would shadow a name of the standard prelude (Rust 2024) in the test's module:
 /// its types and traits, and the `Option` and `Result` variants, as a unit struct also defines a
@@ -239,6 +242,8 @@ struct StructAttributes {
     docs: Vec<Attribute>,
     /// The `#[cfg]`s, which must guard every generated item, including the implementation.
     cfgs: Vec<Attribute>,
+    /// The lint attributes meant for the struct (see [`take_lints`]).
+    lints: Vec<Attribute>,
     /// The function's visibility.
     visibility: Visibility,
 }
@@ -259,10 +264,12 @@ impl StructAttributes {
             .filter(|attr| attr.path().is_ident("cfg"))
             .cloned()
             .collect();
+        let lints = take_lints(&mut function.attrs);
         let visibility = std::mem::replace(&mut function.vis, Visibility::Inherited);
         Self {
             docs,
             cfgs,
+            lints,
             visibility,
         }
     }
@@ -272,11 +279,13 @@ impl StructAttributes {
         let Self {
             docs,
             cfgs,
+            lints,
             visibility,
         } = self;
         quote! {
             #(#docs)*
             #(#cfgs)*
+            #(#lints)*
             #[derive(
                 ::std::fmt::Debug,
                 ::std::clone::Clone,
@@ -286,6 +295,53 @@ impl StructAttributes {
             #visibility struct #name;
         }
     }
+}
+
+/// Takes the struct's lint attributes from `attrs`: copies of the `#[allow]`s, which are harmless
+/// where nothing triggers them, and the `missing_docs` lints of the `#[expect]`s, which only the
+/// struct, public unlike the function, can fulfill.
+fn take_lints(attrs: &mut Vec<Attribute>) -> Vec<Attribute> {
+    let mut lints = Vec::new();
+    attrs.retain_mut(|attr| {
+        if attr.path().is_ident("allow") {
+            lints.push(attr.clone());
+            return true;
+        }
+        if !attr.path().is_ident("expect") {
+            return true;
+        }
+        let Meta::List(list) = &attr.meta else {
+            return true;
+        };
+        let Ok(entries) = list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+        else {
+            return true;
+        };
+        let (reason, entries): (Vec<_>, Vec<_>) = entries.into_iter().partition(
+            |entry| matches!(entry, Meta::NameValue(entry) if entry.path.is_ident("reason")),
+        );
+        let (missing_docs, others): (Vec<_>, Vec<_>) = entries
+            .into_iter()
+            .partition(|entry| matches!(entry, Meta::Path(path) if path.is_ident("missing_docs")));
+        if missing_docs.is_empty() {
+            return true;
+        }
+        // The attribute, with the lints `entries` and its reason.
+        let relisted = |entries: &[Meta]| {
+            let mut attr = attr.clone();
+            if let Meta::List(list) = &mut attr.meta {
+                list.tokens = quote!(#(#entries,)* #(#reason)*);
+            }
+            attr
+        };
+        lints.push(relisted(&missing_docs));
+        if others.is_empty() {
+            return false;
+        }
+        *attr = relisted(&others);
+        true
+    });
+    lints
 }
 
 /// The path to `browser-test`, under the name the caller's `Cargo.toml` gives it.
@@ -326,7 +382,10 @@ mod tests {
     use assertr::prelude::*;
     use manyhow::ToTokensError;
 
-    use super::{Arguments, crate_path, expand_test};
+    use quote::ToTokens as _;
+    use syn::{Attribute, parse_quote};
+
+    use super::{Arguments, crate_path, expand_test, take_lints};
 
     #[test]
     fn invalid_signatures_explain_the_unsupported_part() {
@@ -398,6 +457,35 @@ mod tests {
                 .into_token_stream();
             assert_that!(error.to_string()).contains(message);
         }
+    }
+
+    #[test]
+    fn struct_lints_are_allows_and_expected_missing_docs() {
+        let mut attrs: Vec<Attribute> = vec![
+            parse_quote!(#[allow(dead_code)]),
+            parse_quote!(#[expect(missing_docs, unused_variables, reason = "generated")]),
+            parse_quote!(#[expect(missing_docs)]),
+            parse_quote!(#[expect(unused_mut)]),
+            parse_quote!(#[inline]),
+        ];
+        let lints = take_lints(&mut attrs);
+        let tokens = |attrs: &[Attribute]| {
+            attrs
+                .iter()
+                .map(|attr| attr.to_token_stream().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_that!(tokens(&lints)).contains_exactly([
+            "# [allow (dead_code)]",
+            "# [expect (missing_docs , reason = \"generated\")]",
+            "# [expect (missing_docs ,)]",
+        ]);
+        assert_that!(tokens(&attrs)).contains_exactly([
+            "# [allow (dead_code)]",
+            "# [expect (unused_variables , reason = \"generated\")]",
+            "# [expect (unused_mut)]",
+            "# [inline]",
+        ]);
     }
 
     #[test]

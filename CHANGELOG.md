@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or `thirtyfour` to a new breaking version is a breaking change of `browser-test`.
 - `#[browser_test(crate = path::to::browser_test)]`, which sets the path the generated code refers to `browser-test`
   by, e.g. in a crate that uses it only through a re-export.
+- `#[browser_test]` applies the function's `#[allow]`s to the generated struct as well, and moves the `missing_docs`
+  lints of its `#[expect]`s to the struct, so that `#[expect(missing_docs)]` on a public test is fulfilled.
 - `TestSuite::with_all`, which adds a test for each item, e.g. the cases of a parameterized test.
 - `Box<T>` and `Arc<T>` implement `BrowserTest` for every test `T`, including `dyn BrowserTest`, so that a suite can
   hold tests built at runtime.

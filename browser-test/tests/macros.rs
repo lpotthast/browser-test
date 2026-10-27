@@ -74,6 +74,46 @@ async fn function_attributes() -> Result<(), Report> {
     Ok(())
 }
 
+/// Lint attributes for the public struct reach it: its `#[allow]`s, and the `missing_docs` of its
+/// `#[expect]`s.
+#[deny(missing_docs, unfulfilled_lint_expectations)]
+pub mod lints {
+    use super::*;
+
+    #[browser_test]
+    #[allow(missing_docs)]
+    pub async fn allowed() -> Result<(), Report> {
+        tokio::task::yield_now().await;
+        Ok(())
+    }
+
+    #[browser_test]
+    #[expect(
+        missing_docs,
+        unused_variables,
+        reason = "the attribute splits its lints"
+    )]
+    pub async fn expected() -> Result<(), Report> {
+        let unused = ();
+        tokio::task::yield_now().await;
+        Ok(())
+    }
+
+    // `#[cfg_attr]`s are expanded before `#[browser_test]` sees them.
+    #[browser_test]
+    #[cfg_attr(all(), doc = "Documented conditionally.")]
+    pub async fn conditionally_documented() -> Result<(), Report> {
+        tokio::task::yield_now().await;
+        Ok(())
+    }
+}
+
+#[browser_test]
+#[cfg_attr(all(), cfg(any()))]
+async fn disabled_conditionally(_context: &DoesNotExist) -> Result<(), Report> {
+    unreachable!()
+}
+
 #[browser_test]
 async fn r#type() -> Result<(), Report> {
     tokio::task::yield_now().await;
@@ -239,6 +279,8 @@ fn names_and_descriptions_are_independent() {
     assert_that!(BrowserTest::<()>::description(&ComputedDocumentation).as_deref())
         .is_equal_to(Some("Computed documentation."));
     assert_that!(BrowserTest::<()>::description(&NoContext)).is_none();
+    assert_that!(BrowserTest::<()>::description(&lints::ConditionallyDocumented).as_deref())
+        .is_equal_to(Some("Documented conditionally."));
 }
 
 #[tokio::test]

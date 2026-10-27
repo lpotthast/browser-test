@@ -51,7 +51,10 @@ use proc_macro2::TokenStream;
 /// `Clone`, `Copy` and `Default`. Register it with `TestSuite::with(ShowsGreeting)`. The
 /// function itself stays as the test's body, private to its module, under its own name (which
 /// failure reports and `#[tracing::instrument]` show), and all its other attributes (e.g.
-/// `#[allow]`, `#[expect]`, `#[tracing::instrument]`) stay on it.
+/// `#[allow]`, `#[expect]`, `#[tracing::instrument]`) stay on it. Its `#[allow]`s apply to the
+/// struct as well, and the `missing_docs` lints its `#[expect]`s list move to the struct, which
+/// only a public struct can trigger. `#[cfg_attr]`s are expanded before the attribute sees them,
+/// so e.g. `#[cfg_attr(.., doc = "...")]` documents the struct.
 ///
 /// - **Name**: `BrowserTest::name` returns the module-qualified function name
 ///   (`module_path!()` and the function name, e.g. `my_tests::checkout::shows_greeting`), which
