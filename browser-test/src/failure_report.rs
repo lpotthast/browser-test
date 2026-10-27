@@ -17,6 +17,7 @@
 
 use std::{
     any::Any,
+    borrow::Cow,
     collections::{HashMap, VecDeque},
     fmt,
     path::{Path, PathBuf},
@@ -51,6 +52,14 @@ const OWN_SOURCES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/");
 
 /// The runner's source: frames from here on down called the test.
 const RUNNER_SOURCE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/execution/");
+
+/// browser-test's crate, by the symbols of its frames: where their source files don't match
+/// [`OWN_SOURCES`].
+const OWN_CRATE: &str = "browser_test";
+
+/// The runner's module, by the symbols of its frames: where their source files don't match
+/// [`RUNNER_SOURCE`].
+const RUNNER_MODULE: &str = "browser_test::execution";
 
 /// How many steps [`RecentSteps`] keeps.
 pub(crate) const RECENT_STEP_COUNT: usize = 8;
@@ -161,7 +170,8 @@ fn test_root() -> &'static Path {
             .map(PathBuf::from)
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_default();
-        workspace_root(&package).unwrap_or(package)
+        let root = workspace_root(&package).unwrap_or(package);
+        normalized(&root).into_owned()
     })
 }
 
@@ -341,44 +351,151 @@ impl TestCodeFrames {
 }
 
 /// The test code's frames of `backtrace`, a symbolized one.
+///
+/// browser-test's own frames are told apart by their source files and, where those don't match
+/// (e.g. with remapped paths), by their symbols.
 fn test_code_frames(backtrace: &backtrace::Backtrace) -> Vec<Frame> {
     let root = test_root();
     let dependencies = Dependencies::of_test_root();
+    let own_sources = normalized(Path::new(OWN_SOURCES));
+    let runner_source = normalized(Path::new(RUNNER_SOURCE));
     let mut frames: Vec<Frame> = Vec::new();
+    // For the debug log when no frame is test code: usually the frame the runner called.
+    let mut outermost_source = None;
     'frames: for frame in backtrace.frames() {
         for symbol in frame.symbols() {
-            let Some(path) = symbol.filename() else {
-                continue;
-            };
-            if path.starts_with(RUNNER_SOURCE) {
+            let name = symbol.name().map(|name| name.to_string());
+            let name = name.as_deref().unwrap_or_default();
+            let path = symbol.filename().map(|path| source_path(path, root));
+            if in_module(name, RUNNER_MODULE)
+                || path
+                    .as_ref()
+                    .is_some_and(|path| path.starts_with(&runner_source))
+            {
                 // The runner called the test: everything below is not test code.
                 break 'frames;
             }
-            if path.starts_with(OWN_SOURCES) {
+            let Some(path) = path else {
+                continue;
+            };
+            if in_module(name, OWN_CRATE) || path.starts_with(&own_sources) {
                 // browser-test's helpers between the test's frames (steps, this hook).
                 continue;
             }
+            outermost_source = Some(path.clone());
             let (Ok(file), Some(line)) = (path.strip_prefix(root), symbol.lineno()) else {
                 continue;
             };
-            if dependencies.contains(path, root) {
+            if dependencies.contains(&path, root) {
                 continue;
             }
             let entry = Frame {
-                path: path.to_path_buf(),
                 file: file.display().to_string(),
+                path,
                 line,
-                function: symbol
-                    .name()
-                    .map(|name| function_name(&name.to_string()))
-                    .unwrap_or_default(),
+                function: function_name(name),
             };
             if frames.last() != Some(&entry) {
                 frames.push(entry);
             }
         }
     }
+    if frames.is_empty() {
+        log_no_test_code(root, outermost_source.as_deref());
+    }
     frames
+}
+
+/// Log once that a stack captured in a test held no test code, at `debug` level: the test code's
+/// source files may not be where failure reports expect them.
+fn log_no_test_code(root: &Path, outermost_source: Option<&Path>) {
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    if LOGGED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    if let Some(source) = outermost_source {
+        tracing::debug!(
+            "Found no test code on the stack of an error or panic in a test: none of its frames \
+             is in a source file below the test root {}, other than a dependency's. The outermost \
+             frame outside browser-test is in {}.",
+            root.display(),
+            source.display(),
+        );
+    } else {
+        tracing::debug!(
+            "Found no test code on the stack of an error or panic in a test: its frames outside \
+             browser-test have no source files. Is debug info missing?"
+        );
+    }
+}
+
+/// The source file `path` of a frame, as debug info names it, comparable with the test root: a
+/// relative path (from `--remap-path-prefix` or `trim-paths`) joined onto the `root` if the file
+/// is there, and [`normalized`].
+fn source_path(path: &Path, root: &Path) -> PathBuf {
+    if path.is_relative() {
+        let joined = root.join(path);
+        if joined.is_file() {
+            return joined;
+        }
+    }
+    normalized(path).into_owned()
+}
+
+/// `path` without a Windows verbatim prefix and with an upper-case drive letter (see
+/// [`normalized_windows_path`]). Other platforms keep it as it is.
+fn normalized(path: &Path) -> Cow<'_, Path> {
+    if !cfg!(windows) {
+        return Cow::Borrowed(path);
+    }
+    match path.to_str().map(normalized_windows_path) {
+        Some(Cow::Owned(normalized)) => Cow::Owned(PathBuf::from(normalized)),
+        _ => Cow::Borrowed(path),
+    }
+}
+
+/// The Windows path `path` without a verbatim prefix (`\\?\C:\x` is `C:\x`, `\\?\UNC\host\share`
+/// is `\\host\share`) and with an upper-case drive letter: debug info and Cargo may spell the same
+/// path either way.
+fn normalized_windows_path(path: &str) -> Cow<'_, str> {
+    let has_drive =
+        |path: &str| matches!(path.as_bytes(), [drive, b':', ..] if drive.is_ascii_alphabetic());
+    let path = if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        Cow::Owned(format!(r"\\{unc}"))
+    } else if let Some(local) = path.strip_prefix(r"\\?\").filter(|local| has_drive(local)) {
+        Cow::Borrowed(local)
+    } else {
+        Cow::Borrowed(path)
+    };
+    if has_drive(&path) && path.as_bytes()[0].is_ascii_lowercase() {
+        let mut path = path.into_owned();
+        path[..1].make_ascii_uppercase();
+        Cow::Owned(path)
+    } else {
+        path
+    }
+}
+
+/// Whether the demangled symbol `name` is in `module` (e.g. `browser_test::execution`) or below
+/// it. The crate may carry a hash (`browser_test[c72fec33b3453a53]::execution::run`), and a
+/// method's symbol may start with its type (`<browser_test::step::Step<F> as Future>::poll`).
+fn in_module(name: &str, module: &str) -> bool {
+    let name = name.strip_prefix('<').unwrap_or(name);
+    let (krate, below) = module.split_once("::").unwrap_or((module, ""));
+    let Some(rest) = name.strip_prefix(krate) else {
+        return false;
+    };
+    let rest = match rest.strip_prefix('[') {
+        Some(hashed) => hashed.split_once(']').map_or("", |(_hash, rest)| rest),
+        None => rest,
+    };
+    let Some(rest) = rest.strip_prefix("::") else {
+        return false;
+    };
+    below.is_empty()
+        || rest
+            .strip_prefix(below)
+            .is_some_and(|rest| rest.starts_with("::"))
 }
 
 impl PartialEq for TestCodeFrames {
@@ -819,6 +936,60 @@ mod tests {
         .is_false();
         assert_that!(frames.starts_at_line("/home/me/.cargo/git/checkouts/x/src/lib.rs", 84))
             .is_false();
+    }
+
+    #[test]
+    fn windows_paths_lose_verbatim_prefixes_and_get_upper_case_drives() {
+        for (path, normalized) in [
+            (r"\\?\C:\work\app\tests\ui.rs", r"C:\work\app\tests\ui.rs"),
+            (r"c:\work\app\tests\ui.rs", r"C:\work\app\tests\ui.rs"),
+            (r"\\?\d:\work\app", r"D:\work\app"),
+            (r"\\?\UNC\host\share\app", r"\\host\share\app"),
+            (r"C:\work\app", r"C:\work\app"),
+            (r"\\host\share\app", r"\\host\share\app"),
+            ("/home/me/app", "/home/me/app"),
+        ] {
+            assert_that!(normalized_windows_path(path).into_owned()).is_equal_to(normalized);
+        }
+    }
+
+    #[test]
+    fn relative_source_paths_are_joined_onto_the_root_if_the_file_is_there() {
+        let tree = TempTree::new("relative-sources", &["app/tests/ui.rs"]);
+        let root = &tree.0;
+        assert_that!(source_path(Path::new("app/tests/ui.rs"), root))
+            .is_equal_to(root.join("app/tests/ui.rs"));
+        // A remapped dependency, as `trim-paths` names it.
+        assert_that!(source_path(Path::new("thirtyfour-0.38.1/src/lib.rs"), root))
+            .is_equal_to(PathBuf::from("thirtyfour-0.38.1/src/lib.rs"));
+        assert_that!(source_path(&root.join("app/tests/ui.rs"), root))
+            .is_equal_to(root.join("app/tests/ui.rs"));
+    }
+
+    #[test]
+    fn own_frames_are_recognized_by_their_symbols() {
+        for name in [
+            "browser_test::execution::test_run::run_body::{{closure}}",
+            "browser_test[c72fec33b3453a53]::execution::test_run::run_body",
+            "<browser_test::execution::Foo as core::future::Future>::poll",
+        ] {
+            assert_that!(in_module(name, RUNNER_MODULE)).is_true();
+        }
+        assert_that!(in_module(
+            "<browser_test::step::Step<F> as core::future::Future>::poll",
+            OWN_CRATE
+        ))
+        .is_true();
+        for name in [
+            "browser_test::step::record_step",
+            "browser_test::executions::run",
+            "browser_test_helpers::execution::run",
+            "<browser_runner::MissingElementTest as browser_test::test_case::BrowserTest<()>>::run",
+            "",
+        ] {
+            assert_that!(in_module(name, RUNNER_MODULE)).is_false();
+        }
+        assert_that!(in_module("browser_test_helpers::find", OWN_CRATE)).is_false();
     }
 
     #[test]

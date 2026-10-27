@@ -107,6 +107,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A panic in a dependency is no longer taken for one in the test code when the dependency's file path ends with the
   path of the test's innermost frame, e.g. a registry crate's `src/lib.rs` in a single-package workspace. Locations are
   compared by their full paths.
+- `TestCodeFrames` also find the test code where debug info names source files relative to the workspace (with
+  `--remap-path-prefix` or `trim-paths`) or, on Windows, with a verbatim prefix (`\\?\`) or a lower-case drive letter.
+  browser-test's own frames are also recognized by their symbols, so that remapped paths don't list the runner's
+  callers as test code. A stack without test code is logged once at `debug` level, with where its frames are.
 
 ## [0.7.0] - 2026-10-13
 
