@@ -720,6 +720,7 @@ async fn capability_setup_setting_user_data_dir_fails_the_session() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn unusable_chrome_profiles_dir_fails_the_run() {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -741,6 +742,7 @@ async fn unusable_chrome_profiles_dir_fails_the_run() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cancelled_token_cancels_the_run_before_any_test_starts() {
     let cancellation = CancellationToken::new();
     cancellation.cancel();
@@ -801,7 +803,7 @@ async fn cancellation_stops_the_run_and_its_browsers() {
                     .contains(&*profiles_dir.path().to_string_lossy())
         })
     };
-    assert_that!(eventually(|| !leftovers())).is_true();
+    assert_that!(eventually(|| !leftovers()).await).is_true();
 }
 
 /// Opens the fixture page and freezes it: its main thread runs an endless chain of microtasks.
@@ -1205,16 +1207,14 @@ async fn assert_signal_cancels_the_run(child_test: &str, signal: &str) {
     let groups = process_groups_of_tree(child.id());
 
     child.signal_group(signal);
-    let status = child.wait_for_exit();
+    let status = child.wait_for_exit().await;
 
     // The run returned its error, so the test failed instead of being killed by the signal.
     assert_that!(status.code()).is_equal_to(Some(101));
     // libtest prints the returned error with `Debug`, which prints a report's messages.
     assert_that!(child.output()).contains(BrowserTestError::Cancelled.to_string());
-    assert_that!(eventually(|| !groups
-        .iter()
-        .any(|group| process_group_exists(*group))))
-    .is_true();
+    assert_that!(eventually(|| !groups.iter().any(|group| process_group_exists(*group))).await)
+        .is_true();
     assert_that!(dir_entry_count(&child.profiles_dir())).is_equal_to(0);
 }
 
@@ -1234,7 +1234,7 @@ async fn next_run_removes_the_chrome_profiles_of_a_killed_run() -> RunnerResult 
     let mut child = ChildRun::start("child_run_to_be_killed").await;
     let profiles_dir = child.profiles_dir();
 
-    child.kill();
+    child.kill().await;
     // The killed run could not clean up.
     assert_that!(dir_entry_count(&profiles_dir)).is_equal_to(1);
 
@@ -1342,7 +1342,7 @@ impl ChildRun {
     }
 
     /// Wait until the child exited, at most a minute.
-    fn wait_for_exit(&mut self) -> std::process::ExitStatus {
+    async fn wait_for_exit(&mut self) -> std::process::ExitStatus {
         use std::time::{Duration, Instant};
 
         let deadline = Instant::now() + Duration::from_secs(60);
@@ -1351,16 +1351,25 @@ impl ChildRun {
                 return status;
             }
             assert_that!(Instant::now()).is_less_than(deadline);
-            std::thread::sleep(Duration::from_millis(50));
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 
     /// Kill the child and its descendants with `SIGKILL`, and wait until they all exited.
+    async fn kill(&mut self) {
+        let groups = self.send_kill();
+        // Dying Chrome processes must not write into profiles that the next run removes.
+        assert_that!(eventually(|| !groups.iter().any(|group| process_group_exists(*group))).await)
+            .is_true();
+    }
+
+    /// Send `SIGKILL` to the child and its descendants, and reap the child. Returns the process
+    /// groups killed, whose processes may still be exiting.
     ///
     /// `tokio-process-tools` starts `ChromeDriver` in a process group of its own, which its Chrome
     /// processes join. Killing the child's group alone would leave them running, so every group in
     /// the child's process tree is killed.
-    fn kill(&mut self) {
+    fn send_kill(&mut self) -> std::collections::BTreeSet<u32> {
         let groups = process_groups_of_tree(self.id());
         let _ = std::process::Command::new("kill")
             .arg("-KILL")
@@ -1368,18 +1377,16 @@ impl ChildRun {
             .args(groups.iter().map(|group| format!("-{group}")))
             .status();
         let _ = self.process.wait();
-        // Dying Chrome processes must not write into profiles that the next run removes.
-        assert_that!(eventually(|| !groups
-            .iter()
-            .any(|group| process_group_exists(*group))))
-        .is_true();
+        groups
     }
 }
 
 #[cfg(unix)]
 impl Drop for ChildRun {
+    /// Kills what a failed test left running. Drop cannot await the processes' exit, which only
+    /// [`ChildRun::kill`] needs to ensure.
     fn drop(&mut self) {
-        self.kill();
+        self.send_kill();
     }
 }
 
@@ -1450,7 +1457,7 @@ fn process_group_exists(group: u32) -> bool {
 
 /// Whether `condition` holds within ten seconds. Processes take a moment to exit.
 #[cfg(unix)]
-fn eventually(condition: impl Fn() -> bool) -> bool {
+async fn eventually(condition: impl Fn() -> bool) -> bool {
     use std::time::{Duration, Instant};
 
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -1458,7 +1465,7 @@ fn eventually(condition: impl Fn() -> bool) -> bool {
         if Instant::now() > deadline {
             return false;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     true
 }
