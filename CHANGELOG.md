@@ -138,6 +138,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   print `State:` within their message.
 - A test that panics while it is stopped at its time limit, e.g. in a `Drop` implementation, no longer brings down the
   whole run. The test times out, and its report holds the panic as a child.
+- Tests waiting for a browser session get one in the order they asked for it, rather than whichever happened to be
+  polled first.
 
 ## [0.7.0] - 2026-10-13
 

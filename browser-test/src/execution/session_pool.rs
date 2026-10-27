@@ -2,14 +2,13 @@
 
 use std::{
     collections::VecDeque,
-    pin::pin,
     sync::{Mutex, PoisonError},
     time::Instant,
 };
 
 use chrome_for_testing_manager::CancellationToken;
 use rootcause::Report;
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 
 use super::worker::Job;
 use crate::{ElementQueryWait, SessionPreparation};
@@ -45,10 +44,10 @@ pub(super) struct WorkerRequest {
 /// Keeps sessions with the runner's default settings ready for starting tests: fresh ones, and,
 /// with [`SessionReuse`](crate::SessionReuse), those of finished tests after resetting them.
 /// Creates sessions while starting tests need more than it has (counting spares), and takes back
-/// reset sessions only while upcoming tests need them, so that the others quit.
+/// reset sessions only while upcoming tests need them, so that the others quit. Waiting tests get
+/// sessions in the order they asked for them.
 pub(super) struct SessionPool {
     state: Mutex<PoolState>,
-    available: Notify,
     /// How many tests can run at the same time.
     max_concurrency: usize,
     /// Sessions to keep ready beyond those requested.
@@ -63,7 +62,8 @@ pub(super) struct SessionPool {
 }
 
 struct PoolState {
-    /// Sessions ready for a test, not yet taken.
+    /// Sessions ready for a test, not yet taken. Only those that no waiting test can take: one
+    /// needing a fresh session can't take a reset one.
     idle: VecDeque<TicketResult>,
     /// Sessions being created for the pool.
     creating: usize,
@@ -74,8 +74,9 @@ struct PoolState {
     /// Pool sessions whose browser is open, or opening: from the request to create them until
     /// their worker ended, which includes sessions that are quitting.
     alive: usize,
-    /// Tests waiting for a pool session.
-    waiting: Upcoming,
+    /// Tests waiting for a pool session, in the order they asked for one.
+    waiters: VecDeque<Waiter>,
+    next_waiter: u64,
     /// Pool tests that have not requested a session yet.
     upcoming: Upcoming,
     /// Those of `upcoming` that start even after a failure stopped the run (see
@@ -83,6 +84,37 @@ struct PoolState {
     upcoming_always: Upcoming,
     next_session: usize,
     closed: bool,
+}
+
+/// A test waiting for a pool session.
+struct Waiter {
+    id: u64,
+    /// Whether the test needs a fresh session.
+    fresh: bool,
+    ticket: oneshot::Sender<TicketResult>,
+}
+
+/// A test's place in the queue of tests waiting for a pool session. Dropping it leaves the queue,
+/// and offers a session the test was handed meanwhile to the next one.
+struct Waiting<'p> {
+    pool: &'p SessionPool,
+    id: u64,
+    ticket: oneshot::Receiver<TicketResult>,
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        let mut state = self.pool.lock();
+        if let Some(position) = state.waiters.iter().position(|waiter| waiter.id == self.id) {
+            state.waiters.remove(position);
+        }
+        if let Ok(ticket) = self.ticket.try_recv() {
+            if ticket.is_ok() {
+                state.running -= 1;
+            }
+            state.offer(ticket);
+        }
+    }
 }
 
 /// A number of tests: those taking any session, and those needing a fresh one.
@@ -113,6 +145,15 @@ impl Upcoming {
 }
 
 impl PoolState {
+    /// The tests waiting for a session.
+    fn waiting(&self) -> Upcoming {
+        let fresh = self.waiters.iter().filter(|waiter| waiter.fresh).count();
+        Upcoming {
+            any: self.waiters.len() - fresh,
+            fresh,
+        }
+    }
+
     /// Sessions ready or on their way to the pool.
     fn supply(&self) -> usize {
         self.idle.len() + self.creating + self.resetting
@@ -135,6 +176,39 @@ impl PoolState {
                 .or_else(|| (!self.idle.is_empty()).then_some(0))
         }?;
         self.idle.remove(position)
+    }
+
+    /// Hand `ticket` to the first waiting test that can take it, or else keep it idle. Dropped if
+    /// the pool closed, so that its session quits.
+    fn offer(&mut self, mut ticket: TicketResult) {
+        if self.closed {
+            return;
+        }
+        while let Some(position) = self
+            .waiters
+            .iter()
+            .position(|waiter| !waiter.fresh || is_fresh(&ticket))
+        {
+            let waiter = self
+                .waiters
+                .remove(position)
+                .expect("the position is in bounds");
+            let ok = ticket.is_ok();
+            if ok {
+                self.running += 1;
+            }
+            match waiter.ticket.send(ticket) {
+                Ok(()) => return,
+                // The test left the queue: try the next one.
+                Err(returned) => {
+                    if ok {
+                        self.running -= 1;
+                    }
+                    ticket = returned;
+                }
+            }
+        }
+        self.idle.push_back(ticket);
     }
 }
 
@@ -164,13 +238,13 @@ impl SessionPool {
                 resetting: 0,
                 running: 0,
                 alive: 0,
-                waiting: Upcoming::default(),
+                waiters: VecDeque::new(),
+                next_waiter: 0,
                 upcoming,
                 upcoming_always,
                 next_session: 0,
                 closed: false,
             }),
-            available: Notify::new(),
             max_concurrency,
             spare,
             default_wait,
@@ -224,11 +298,11 @@ impl SessionPool {
     fn replenish_locked(&self, state: &mut PoolState) {
         let spares = self.spare.min(self.starting(state).total());
         let bound = self.max_concurrency + self.spare;
+        let waiting = state.waiting();
         while !state.closed {
-            let waiting = state.waiting.total();
-            let needs_fresh = state.fresh_supply() < state.waiting.fresh;
-            let needs_any = state.supply() < waiting;
-            let wants_spare = state.supply() < waiting + spares && state.alive < bound;
+            let needs_fresh = state.fresh_supply() < waiting.fresh;
+            let needs_any = state.supply() < waiting.total();
+            let wants_spare = state.supply() < waiting.total() + spares && state.alive < bound;
             if !(needs_fresh || needs_any || wants_spare) {
                 break;
             }
@@ -236,7 +310,7 @@ impl SessionPool {
                 // A reset session no waiting test takes makes way for the fresh one: dropping
                 // its ticket quits it.
                 let reset = state.idle.iter().filter(|ticket| !is_fresh(ticket)).count();
-                if reset > state.waiting.any
+                if reset > waiting.any
                     && let Some(position) = state.idle.iter().position(|ticket| !is_fresh(ticket))
                 {
                     state.idle.remove(position);
@@ -259,38 +333,45 @@ impl SessionPool {
     /// doesn't run always, a failure stopped it (see [`Self::stop`]). A cancelled run drops the
     /// sessions being created or reset, so the one a test waits for may never arrive.
     pub(super) async fn take(&self, fresh: bool, run_always: bool) -> Option<TicketResult> {
-        {
+        let mut waiting = {
             let mut state = self.lock();
             state.upcoming.remove(fresh);
             if run_always {
                 state.upcoming_always.remove(fresh);
             }
-            *state.waiting.count(fresh) += 1;
+            if !self.may_start(run_always) {
+                return None;
+            }
+            if let Some(ticket) = state.take_idle(fresh) {
+                if ticket.is_ok() {
+                    state.running += 1;
+                }
+                self.replenish_locked(&mut state);
+                return Some(ticket);
+            }
+            let (ticket_tx, ticket_rx) = oneshot::channel();
+            let id = state.next_waiter;
+            state.next_waiter += 1;
+            state.waiters.push_back(Waiter {
+                id,
+                fresh,
+                ticket: ticket_tx,
+            });
             self.replenish_locked(&mut state);
-        }
-        loop {
-            let mut available = pin!(self.available.notified());
-            available.as_mut().enable();
-            {
-                let mut state = self.lock();
-                if !self.may_start(run_always) {
-                    *state.waiting.count(fresh) -= 1;
-                    return None;
-                }
-                if let Some(ticket) = state.take_idle(fresh) {
-                    *state.waiting.count(fresh) -= 1;
-                    if ticket.is_ok() {
-                        state.running += 1;
-                    }
-                    self.replenish_locked(&mut state);
-                    return Some(ticket);
-                }
+            Waiting {
+                pool: self,
+                id,
+                ticket: ticket_rx,
             }
-            tokio::select! {
-                () = available => {}
-                () = self.cancellation.cancelled() => {}
-                () = self.stop.cancelled(), if !run_always => {}
-            }
+        };
+        let given_up = if run_always {
+            &self.cancellation
+        } else {
+            &self.stop
+        };
+        tokio::select! {
+            ticket = &mut waiting.ticket => ticket.ok(),
+            () = given_up.cancelled() => None,
         }
     }
 
@@ -329,14 +410,9 @@ impl SessionPool {
     pub(super) fn deliver(&self, delivery: Delivery, ticket: TicketResult) {
         match delivery {
             Delivery::Pool => {
-                {
-                    let mut state = self.lock();
-                    state.creating -= 1;
-                    if !state.closed {
-                        state.idle.push_back(ticket);
-                    }
-                }
-                self.available.notify_waiters();
+                let mut state = self.lock();
+                state.creating -= 1;
+                state.offer(ticket);
             }
             Delivery::Dedicated(ticket_tx) => {
                 let _ = ticket_tx.send(ticket);
@@ -363,7 +439,7 @@ impl SessionPool {
     /// test starts, so that the pool doesn't create a session for that test in the meantime.
     pub(super) fn claim_reset(&self) -> bool {
         let mut state = self.lock();
-        let wanted = !state.closed && state.waiting.any + self.starting(&state).any > 0;
+        let wanted = !state.closed && state.waiting().any + self.starting(&state).any > 0;
         if wanted {
             state.resetting += 1;
         }
@@ -374,20 +450,16 @@ impl SessionPool {
     /// (running a test, ready or on their way) than tests that can run at the same time and
     /// spares need: otherwise it drops the ticket, and the session quits.
     pub(super) fn deliver_reset(&self, ticket: Ticket) {
-        {
-            let mut state = self.lock();
-            state.resetting -= 1;
-            let starting = self.starting(&state).total();
-            let spares = self.spare.min(starting);
-            let running_at_once = self
-                .max_concurrency
-                .min(state.running + state.waiting.total() + starting);
-            if state.closed || state.running + state.supply() >= running_at_once + spares {
-                return;
-            }
-            state.idle.push_back(Ok(ticket));
+        let mut state = self.lock();
+        state.resetting -= 1;
+        let starting = self.starting(&state).total();
+        let spares = self.spare.min(starting);
+        let running_at_once = self
+            .max_concurrency
+            .min(state.running + state.waiting().total() + starting);
+        if state.running + state.supply() < running_at_once + spares {
+            state.offer(Ok(ticket));
         }
-        self.available.notify_waiters();
     }
 
     /// A claimed reset failed, so the session quits: create another one if tests need it.
@@ -410,6 +482,8 @@ impl SessionPool {
 
 #[cfg(test)]
 mod tests {
+    use std::pin::pin;
+
     use assertr::prelude::*;
 
     use super::*;
@@ -513,7 +587,7 @@ mod tests {
         cancellation.cancel();
 
         assert_that!(take.await.is_none()).is_true();
-        assert_that!(pool.lock().waiting.total()).is_equal_to(0);
+        assert_that!(pool.lock().waiting().total()).is_equal_to(0);
     }
 
     #[tokio::test]
@@ -549,6 +623,39 @@ mod tests {
         pool.stop();
 
         assert_that!(take.await.is_none()).is_true();
-        assert_that!(pool.lock().waiting.total()).is_equal_to(0);
+        assert_that!(pool.lock().waiting().total()).is_equal_to(0);
+    }
+
+    #[tokio::test]
+    async fn waiting_tests_get_sessions_in_the_order_they_asked() {
+        let created = SessionPreparation::Created(std::time::Duration::ZERO);
+        let (pool, _requests) = pool_with_spare(Upcoming { any: 3, fresh: 0 });
+        let mut first = pin!(pool.take(false, false));
+        let mut second = pin!(pool.take(false, false));
+        assert_that!(futures_util::poll!(first.as_mut()).is_pending()).is_true();
+        assert_that!(futures_util::poll!(second.as_mut()).is_pending()).is_true();
+
+        // Polled in the other order, the second test still waits until the first got a session.
+        pool.deliver(Delivery::Pool, Ok(ticket(created).0));
+        assert_that!(futures_util::poll!(second.as_mut()).is_pending()).is_true();
+        assert_that!(first.await).is_some();
+        pool.deliver(Delivery::Pool, Ok(ticket(created).0));
+        assert_that!(second.await).is_some();
+        assert_that!(pool.lock().running).is_equal_to(2);
+    }
+
+    #[tokio::test]
+    async fn a_session_handed_to_a_test_that_gave_up_goes_to_the_next_one() {
+        let created = SessionPreparation::Created(std::time::Duration::ZERO);
+        let (pool, _requests) = pool_with_spare(Upcoming { any: 2, fresh: 0 });
+        let mut first = Box::pin(pool.take(false, false));
+        let mut second = pin!(pool.take(false, false));
+        assert_that!(futures_util::poll!(first.as_mut()).is_pending()).is_true();
+        assert_that!(futures_util::poll!(second.as_mut()).is_pending()).is_true();
+
+        pool.deliver(Delivery::Pool, Ok(ticket(created).0));
+        drop(first);
+        assert_that!(second.await).is_some();
+        assert_that!(pool.lock().running).is_equal_to(1);
     }
 }
