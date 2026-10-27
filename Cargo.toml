@@ -1,7 +1,7 @@
 [workspace]
 members = ["browser-test", "browser-test-macros"]
 exclude = ["examples/advanced", "examples/minimal"]
-resolver = "2"
+resolver = "3"
 
 [workspace.package]
 version = "0.8.0"
