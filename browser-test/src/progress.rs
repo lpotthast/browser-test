@@ -7,6 +7,7 @@ use std::{
 };
 
 use crate::{
+    execution::{SessionNumber, TestIndex},
     report::FormatDuration,
     step::{DEFAULT_SLOW_STEP, StepRecorder},
 };
@@ -159,10 +160,10 @@ pub(crate) enum Phase {
 /// that is not yet assigned to a test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Activity {
-    /// The test with the given index.
-    Test(usize),
-    /// The pool session with the given number.
-    Session(usize),
+    /// A test.
+    Test(TestIndex),
+    /// A pool session.
+    Session(SessionNumber),
 }
 
 #[derive(Debug)]
@@ -349,7 +350,7 @@ mod tests {
     fn board_counts_warnings_per_phase() {
         let board = ProgressBoard::default();
         let warnings = ProgressWarnings::default();
-        let test = Activity::Test(1);
+        let test = Activity::Test(TestIndex::new(1));
         board.enter(test, "browser test 'slow test'", Phase::RunningTest);
         let since = board.activities.lock().unwrap()[&test].since;
 
@@ -370,7 +371,7 @@ mod tests {
             .build()
             .expect("current-thread runtime should build");
         let board = ProgressBoard::default();
-        let test = Activity::Test(1);
+        let test = Activity::Test(TestIndex::new(1));
         let steps = StepRecorder::new(None);
         board.enter_running_test(test, "browser test 'login'", &steps);
         let warning =

@@ -103,6 +103,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   context, e.g. `BrowserTest::<()>::name(&MyTest)`, and a suite of only such tests may need its context named where
   nothing else infers it, e.g. `TestSuite::<()>::sequential()`.
 - **Breaking:** Updated `thirtyfour` to version `0.38`.
+- A test with an element query wait of its own (`TestSettings::with_element_query_wait`) takes a session from the pool
+  like any other test, instead of getting a session created for it when its turn comes. The runner sets every test's
+  wait in the session it gets. Such a test no longer waits for a browser to start, and with `SessionReuse`, it runs in
+  a reused session.
 - Updated `chrome-for-testing-manager` to version `0.15`.
 - Updated `assertr` to version `0.9`.
 
@@ -146,11 +150,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   doesn't create sessions without end.
 - With `SessionReuse`, preparing a new session for reuse may take 30 seconds, like resetting one. A session taking
   longer runs one test only, instead of keeping its test from starting indefinitely.
-- The sessions of tests with an element query wait of their own count towards the documented limit of open browsers
-  (parallel tests plus spare sessions), so that spares no longer exceed it.
-- With `FailurePolicy::FailFast`, a failure also ends the wait of a test for a session with an element query wait of
-  its own, which then doesn't start, like a test waiting for any other session. Idle spare sessions that the tests
-  still to start (those of `TestSuite::run_always` suites) don't need quit right away, instead of at the end of the run.
+- With `FailurePolicy::FailFast`, idle spare sessions that the tests still to start (those of `TestSuite::run_always`
+  suites) don't need quit right away, instead of at the end of the run.
 - The Chrome profile of a session that didn't quit in time is removed with the run's profiles once Chrome for Testing
   shut down, rather than right away, while its browser may still write to it.
 

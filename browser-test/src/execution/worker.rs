@@ -10,7 +10,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{
     Env,
-    session_pool::{Delivery, ResetClaim, Ticket, WorkerRequest},
+    plan::TestIndex,
+    session_pool::{ResetClaim, SessionNumber, Ticket},
     sessions::SessionFactory,
     test_run::{JobRun, run_job},
 };
@@ -27,7 +28,7 @@ pub(super) const RESET_TIME_LIMIT: Duration = Duration::from_secs(30);
 
 /// A test assigned to a session.
 pub(super) struct Job {
-    pub(super) test: usize,
+    pub(super) test: TestIndex,
     /// How long the test waited for its session.
     pub(super) wait: Duration,
     /// Completed once the test body finished, before the session quits or is reset.
@@ -35,11 +36,11 @@ pub(super) struct Job {
 }
 
 /// Drive the session workers, which get their sessions from `sessions`, until the pool closed and
-/// every worker finished.
+/// every worker finished. `requests` names the sessions to create, `None` once the pool closed.
 pub(super) async fn drive_workers<Context, S>(
     env: &Env<'_, Context>,
     sessions: &S,
-    mut requests: mpsc::UnboundedReceiver<Option<WorkerRequest>>,
+    mut requests: mpsc::UnboundedReceiver<Option<SessionNumber>>,
 ) where
     Context: Sync + ?Sized,
     S: SessionFactory,
@@ -52,7 +53,7 @@ pub(super) async fn drive_workers<Context, S>(
         }
         tokio::select! {
             request = requests.recv(), if !closing => match request {
-                Some(Some(request)) => workers.push(session_worker(env, sessions, request)),
+                Some(Some(session)) => workers.push(session_worker(env, sessions, session)),
                 Some(None) | None => closing = true,
             },
             Some(()) = workers.next(), if !workers.is_empty() => {}
@@ -63,50 +64,33 @@ pub(super) async fn drive_workers<Context, S>(
 /// Create a session, offer it, run the test it is assigned, and quit it. With
 /// [`SessionReuse`](crate::SessionReuse), reset the session after its test and offer it again, as
 /// long as upcoming tests need sessions.
-async fn session_worker<Context, S>(env: &Env<'_, Context>, sessions: &S, request: WorkerRequest)
+async fn session_worker<Context, S>(env: &Env<'_, Context>, sessions: &S, session: SessionNumber)
 where
     Context: Sync + ?Sized,
     S: SessionFactory,
 {
-    run_session(env, sessions, request).await;
+    run_session(env, sessions, session).await;
     env.pool.session_ended();
 }
 
 /// The work of [`session_worker`].
-async fn run_session<Context, S>(env: &Env<'_, Context>, sessions: &S, request: WorkerRequest)
+async fn run_session<Context, S>(env: &Env<'_, Context>, sessions: &S, session: SessionNumber)
 where
     Context: Sync + ?Sized,
     S: SessionFactory,
 {
-    let activity = Activity::Session(request.session);
+    let activity = Activity::Session(session);
     env.board
         .enter(activity, "a browser session", Phase::CreatingSession);
     let creation_start = Instant::now();
-    let pooled = matches!(request.delivery, Delivery::Pool);
-    // Only pool sessions are reused: a dedicated session has settings of its own. With reuse
-    // enabled, dedicated sessions are set up like reusable ones all the same, so that their tests
-    // see the same browser.
-    let reusable = env.config.session_reuse.is_enabled() && pooled;
     let mut end = SessionEnd {
-        delivery: Some(request.delivery),
+        offered: false,
         last_run: None,
         released: None,
     };
     let session_result = sessions
-        .run_session(request.element_query_wait, async |session: &S::Session| {
-            serve_tests(
-                env,
-                sessions,
-                session,
-                SessionStart {
-                    activity,
-                    creation_start,
-                    pooled,
-                    reusable,
-                },
-                &mut end,
-            )
-            .await
+        .run_session(async |session: &S::Session| {
+            serve_tests(env, sessions, session, activity, creation_start, &mut end).await
         })
         .await;
     if let Some(quit_start) = end.released {
@@ -116,13 +100,13 @@ where
     }
     env.board.clear(activity);
 
-    if let Some(delivery) = end.delivery {
-        // The session could not be created, so it was never offered.
+    if !end.offered {
+        // The session could not be created.
         let report = match session_result {
             Err(error) => error,
             Ok(()) => rootcause::report!("the browser session ended before it could be used"),
         };
-        env.fail_creation(delivery, report, creation_start);
+        env.fail_creation(report, creation_start);
         return;
     }
     let Some(last_run) = end.last_run else {
@@ -150,21 +134,10 @@ where
     last_run.finish(env, session_result, teardown);
 }
 
-/// How a worker's session started.
-struct SessionStart {
-    /// The pool session's activity on the progress board.
-    activity: Activity,
-    creation_start: Instant,
-    /// Whether the session belongs to the pool (rather than to one test with settings of its own).
-    pooled: bool,
-    /// Whether the session may run further tests after its first one.
-    reusable: bool,
-}
-
 /// What a session leaves its worker to do once it quit.
 struct SessionEnd {
-    /// Where the session is offered first. Still set if it never was: it could not be created.
-    delivery: Option<Delivery>,
+    /// Whether the session was offered to the pool. It wasn't if it could not be created.
+    offered: bool,
     /// The run of the session's last test, to be recorded with the result of quitting it.
     last_run: Option<JobRun>,
     /// When the session started quitting without a test: no test took it, or the pool released
@@ -172,14 +145,16 @@ struct SessionEnd {
     released: Option<Instant>,
 }
 
-/// Offer `session` through `end.delivery` (or, once it ran a test, to the pool), and run the tests
-/// it is assigned: one, or with [`SessionReuse`](crate::SessionReuse) several, resetting the
-/// session in between. What is left to do once the session quit is left in `end`.
+/// Offer `session`, created since `creation_start`, to the pool, and run the tests it is assigned:
+/// one, or with [`SessionReuse`](crate::SessionReuse) several, resetting the session in between.
+/// `activity` is the session's on the progress board until it is offered. What is left to do once
+/// the session quit is left in `end`.
 async fn serve_tests<Context, S>(
     env: &Env<'_, Context>,
     sessions: &S,
     session: &S::Session,
-    start: SessionStart,
+    activity: Activity,
+    creation_start: Instant,
     end: &mut SessionEnd,
 ) -> Result<(), Report>
 where
@@ -187,14 +162,7 @@ where
     S: SessionFactory,
 {
     let config = &env.config;
-    let SessionStart {
-        activity,
-        creation_start,
-        pooled,
-        reusable,
-    } = start;
     sessions.ready(session).await?;
-    // Prepared for dedicated sessions as well: it selects where the test runs.
     let mut baseline = if config.session_reuse.is_enabled() {
         let prepare = sessions.baseline(session, config.session_reuse.reset());
         match tokio::time::timeout(RESET_TIME_LIMIT, prepare).await {
@@ -229,8 +197,9 @@ where
             job: job_tx,
             preparation,
         };
-        if let Some(delivery) = end.delivery.take() {
-            env.pool.deliver(delivery, Ok(ticket));
+        if !end.offered {
+            end.offered = true;
+            env.pool.deliver(Ok(ticket));
         } else if let Some(reset) = reset.take() {
             // Dropped if the pool has enough sessions: the job channel closes, and the session
             // quits below.
@@ -243,14 +212,9 @@ where
         };
         tests_run += 1;
         let mut run = run_job(env, sessions, session, &job, preparation).await;
-        if pooled {
-            env.pool.test_finished();
-        }
+        env.pool.test_finished();
         // A timed out test may have left commands running in its session.
-        let claim = if reusable
-            && !run.timed_out()
-            && config.session_reuse.allows_another_test(tests_run)
-        {
+        let claim = if !run.timed_out() && config.session_reuse.allows_another_test(tests_run) {
             baseline
                 .as_mut()
                 .and_then(|baseline| Some((baseline, env.pool.claim_reset()?)))

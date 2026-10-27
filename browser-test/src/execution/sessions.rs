@@ -10,6 +10,7 @@ use rootcause::{Report, markers::Dynamic};
 use thirtyfour::{
     ChromeCapabilities, ChromiumLikeCapabilities,
     error::{WebDriverError, WebDriverResult},
+    extensions::query::{ElementPollerWithTimeout, IntoElementPoller},
 };
 
 use super::ChromeCapabilitiesSetup;
@@ -27,13 +28,9 @@ pub(super) trait SessionFactory: Sync {
     /// What resetting a session restores.
     type Baseline: Send;
 
-    /// Create a session whose element queries wait `element_query_wait`, run `serve` in it, and
-    /// quit it. `Err` if the session could not be created, `serve` failed, or quitting failed.
-    fn run_session<F>(
-        &self,
-        element_query_wait: Option<ElementQueryWait>,
-        serve: F,
-    ) -> impl Future<Output = Result<(), Report>>
+    /// Create a session, run `serve` in it, and quit it. `Err` if the session could not be
+    /// created, `serve` failed, or quitting failed.
+    fn run_session<F>(&self, serve: F) -> impl Future<Output = Result<(), Report>>
     where
         F: for<'s> AsyncFnOnce(&'s Self::Session) -> Result<(), Report>;
 
@@ -54,6 +51,14 @@ pub(super) trait SessionFactory: Sync {
         session: &Self::Session,
         baseline: &mut Self::Baseline,
     ) -> impl Future<Output = Result<(), ResetError>>;
+
+    /// Make the element queries of `session` wait `element_query_wait`, or as `thirtyfour` does by
+    /// default if `None`.
+    fn set_element_query_wait(
+        &self,
+        session: &Self::Session,
+        element_query_wait: Option<ElementQueryWait>,
+    );
 
     /// Set the timeouts of `session`.
     fn set_timeouts(
@@ -95,11 +100,7 @@ impl SessionFactory for ChromeSessions<'_> {
     type Session = Session;
     type Baseline = SessionBaseline;
 
-    async fn run_session<F>(
-        &self,
-        element_query_wait: Option<ElementQueryWait>,
-        serve: F,
-    ) -> Result<(), Report>
+    async fn run_session<F>(&self, serve: F) -> Result<(), Report>
     where
         F: for<'s> AsyncFnOnce(&'s Session) -> Result<(), Report>,
     {
@@ -128,10 +129,6 @@ impl SessionFactory for ChromeSessions<'_> {
                     profile.configure(caps)
                 })
                 .with_cancellation(self.cancellation.clone())
-                .with_config(|builder| match element_query_wait {
-                    Some(wait) => builder.poller(Arc::new(wait.into_thirtyfour_poller())),
-                    None => builder,
-                })
                 .run(serve),
         )
         .await;
@@ -166,6 +163,18 @@ impl SessionFactory for ChromeSessions<'_> {
         baseline: &mut SessionBaseline,
     ) -> Result<(), ResetError> {
         baseline.reset(session).await
+    }
+
+    fn set_element_query_wait(
+        &self,
+        session: &Session,
+        element_query_wait: Option<ElementQueryWait>,
+    ) {
+        let poller: Arc<dyn IntoElementPoller + Send + Sync> = match element_query_wait {
+            Some(wait) => Arc::new(wait.into_thirtyfour_poller()),
+            None => Arc::new(ElementPollerWithTimeout::default()),
+        };
+        session.set_poller(poller);
     }
 
     async fn set_timeouts(&self, session: &Session, timeouts: Timeouts) -> Result<(), Report> {

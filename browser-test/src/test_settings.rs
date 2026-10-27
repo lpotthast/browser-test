@@ -63,11 +63,6 @@ impl TestSettings {
 
     /// Set how element queries poll in this test, instead of the runner's
     /// [`BrowserTestRunner::with_element_query_wait`](crate::BrowserTestRunner::with_element_query_wait).
-    ///
-    /// The element query wait is fixed when a session is created. A test whose wait differs from
-    /// the runner's does not take one of the sessions the runner keeps ready (see
-    /// [`BrowserTestRunner::with_spare_sessions`](crate::BrowserTestRunner::with_spare_sessions)),
-    /// but gets a session created for it when its turn comes.
     #[must_use]
     pub const fn with_element_query_wait(mut self, wait: ElementQueryWait) -> Self {
         self.element_query_wait = Some(wait);

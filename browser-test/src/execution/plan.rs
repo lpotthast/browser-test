@@ -18,12 +18,28 @@ pub(super) struct Placement {
     pub(super) run_always: bool,
 }
 
+/// The number of a test of the run, in definition order: its index in the run's tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct TestIndex(usize);
+
+impl TestIndex {
+    /// The index as a number, e.g. into the run's tests.
+    pub(crate) const fn get(self) -> usize {
+        self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn new(index: usize) -> Self {
+        Self(index)
+    }
+}
+
 /// A test of the run, numbered in definition order, with its metadata.
 pub(super) struct QueuedTest<Context>
 where
     Context: Sync + ?Sized,
 {
-    pub(super) index: usize,
+    pub(super) index: TestIndex,
     /// The test's name, or a placeholder if reading it panicked.
     pub(super) name: String,
     pub(super) placement: Placement,
@@ -54,7 +70,7 @@ where
         body: Option<Duration>,
     ) -> TestRecord {
         TestRecord {
-            index: self.index,
+            index: self.index.0,
             name: self.name.clone(),
             outcome,
             failure: None,
@@ -75,10 +91,8 @@ where
 {
     /// The test's timeouts, completed with the runner's.
     pub(super) timeouts: Timeouts,
+    /// The test's element query wait, else the runner's.
     pub(super) element_query_wait: Option<ElementQueryWait>,
-    /// Whether the test takes its session from the pool, as it uses the runner's element query
-    /// wait, rather than getting one created with its own settings.
-    pub(super) pooled: bool,
     /// Whether the test needs a session no test ran in (see
     /// [`TestSettings::fresh_session`](crate::TestSettings::fresh_session)).
     pub(super) fresh_session: bool,
@@ -98,7 +112,7 @@ pub(super) struct Suite {
 }
 
 pub(super) enum Node {
-    Test(usize),
+    Test(TestIndex),
     Suite(Suite),
 }
 
@@ -171,7 +185,7 @@ where
     for entry in entries {
         match entry {
             SuiteEntry::Test(test) => {
-                let index = tests.len();
+                let index = TestIndex(tests.len());
                 tests.push(plan_test(index, test, placement.clone(), defaults));
                 children.push(Node::Test(index));
             }
@@ -190,7 +204,7 @@ where
 
 /// Read the metadata of `test`, the test at `index`, and complete its settings with `defaults`.
 fn plan_test<Context>(
-    index: usize,
+    index: TestIndex,
     test: Box<dyn BrowserTest<Context>>,
     placement: Placement,
     defaults: TestDefaults,
@@ -199,7 +213,7 @@ where
     Context: Sync + ?Sized,
 {
     // What was read before a metadata method panicked is kept, with a fallback for the name.
-    let mut name = format!("unnamed test at index {index}");
+    let mut name = format!("unnamed test at index {}", index.0);
     let mut tags = Vec::new();
     let settings = std::panic::catch_unwind(AssertUnwindSafe(|| {
         name = test.name().into_owned();
@@ -207,18 +221,14 @@ where
         test.settings()
     }));
     let prepared = match settings {
-        Ok(settings) => Ok({
-            let element_query_wait = settings
+        Ok(settings) => Ok(PreparedTest {
+            timeouts: settings.timeouts().or(defaults.timeouts),
+            element_query_wait: settings
                 .element_query_wait()
-                .or(defaults.element_query_wait);
-            PreparedTest {
-                timeouts: settings.timeouts().or(defaults.timeouts),
-                element_query_wait,
-                pooled: element_query_wait == defaults.element_query_wait,
-                fresh_session: settings.fresh_session(),
-                time_limit: settings.time_limit().unwrap_or(defaults.time_limit),
-                test,
-            }
+                .or(defaults.element_query_wait),
+            fresh_session: settings.fresh_session(),
+            time_limit: settings.time_limit().unwrap_or(defaults.time_limit),
+            test,
         }),
         Err(payload) => {
             let panic_message = panic_payload_message(payload.as_ref());
@@ -266,15 +276,15 @@ mod tests {
             })
             .collect();
         assert_that!(metadata).contains_exactly([
-            (0, "a", Some("ui"), vec!["one".to_owned()], true),
+            (TestIndex(0), "a", Some("ui"), vec!["one".to_owned()], true),
             (
-                1,
+                TestIndex(1),
                 "b",
                 Some("ui"),
                 vec!["one".to_owned(), "two".to_owned()],
                 true,
             ),
-            (2, "c", Some("ui"), Vec::new(), true),
+            (TestIndex(2), "c", Some("ui"), Vec::new(), true),
         ]);
     }
 
@@ -396,7 +406,8 @@ mod tests {
 
         fn prepared(test: TestSettings, runner: TestDefaults) -> PreparedTest<()> {
             let test = StubTest::new("test").with_settings(test);
-            let Ok(prepared) = plan_test(0, Box::new(test), Placement::default(), runner).prepared
+            let Ok(prepared) =
+                plan_test(TestIndex(0), Box::new(test), Placement::default(), runner).prepared
             else {
                 panic!("the settings are readable")
             };
@@ -439,11 +450,9 @@ mod tests {
                 runner,
             );
             assert_that!(overriding.element_query_wait).is_equal_to(Some(test_wait));
-            assert_that!(overriding.pooled).is_false();
 
             let inheriting = prepared(TestSettings::new(), runner);
             assert_that!(inheriting.element_query_wait).is_equal_to(Some(runner_wait));
-            assert_that!(inheriting.pooled).is_true();
 
             assert_that!(prepared(TestSettings::new(), TestDefaults::new()).element_query_wait)
                 .is_none();

@@ -12,7 +12,12 @@ use futures_util::FutureExt as _;
 use rootcause::Report;
 use tracing::Instrument as _;
 
-use super::{Env, plan::QueuedTest, sessions::SessionFactory, worker::Job};
+use super::{
+    Env,
+    plan::{QueuedTest, TestIndex},
+    sessions::SessionFactory,
+    worker::Job,
+};
 use crate::{
     BrowserTestError,
     driver_output::{DriverOutputSnapshot, attach_session_output},
@@ -28,7 +33,7 @@ use crate::{
 
 /// What happened while a session ran its test.
 pub(super) struct JobRun {
-    pub(super) index: usize,
+    pub(super) index: TestIndex,
     preparation: SessionPreparation,
     wait: Duration,
     body: Option<Duration>,
@@ -136,7 +141,10 @@ where
             .map(|capture| (capture.position(), sessions.session_id(session))),
         quit_start: None,
     };
-    let timeouts = test.ready().timeouts;
+    let prepared = test.ready();
+    // Every test sets it, so that a reused session doesn't keep the wait of an earlier test.
+    sessions.set_element_query_wait(session, prepared.element_query_wait);
+    let timeouts = prepared.timeouts;
     let timeouts = if timeouts.is_empty() {
         Ok(())
     } else {

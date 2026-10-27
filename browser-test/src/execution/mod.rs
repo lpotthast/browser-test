@@ -5,8 +5,9 @@
 //! sessions ready so that a starting test rarely waits for a browser to start. A session's
 //! lifetime is bound to a scoped session API ([`SessionFactory::run_session`], that of
 //! `chrome-for-testing-manager` in a real run), so each session is owned by a worker future that
-//! creates it, offers it to the pool, runs the test it is assigned, and quits it. With [`SessionReuse`] enabled, a worker resets its session after the test and
-//! offers it to the pool again instead, as long as upcoming tests need sessions. Worker futures are
+//! creates it, offers it to the pool, runs the test it is assigned, and quits it. With
+//! [`SessionReuse`] enabled, a worker resets its session after the test and offers it to the pool
+//! again instead, as long as upcoming tests need sessions. Worker futures are
 //! driven by [`drive_workers`]. Everything crossing between them and the executor is plain data
 //! (test indices, channels), never a borrow of the run's state.
 //!
@@ -38,10 +39,12 @@ mod sessions;
 mod test_run;
 mod worker;
 
+pub(crate) use self::{plan::TestIndex, session_pool::SessionNumber};
+
 use self::{
     failures::BrowserTestFailures,
     plan::{Node, QueuedTest, Suite, plan},
-    session_pool::{CreationFailure, Delivery, SessionPool, Upcoming},
+    session_pool::{CreationFailure, SessionPool, Upcoming},
     sessions::{ChromeSessions, SessionFactory},
     worker::{Job, drive_workers},
 };
@@ -150,24 +153,23 @@ where
 {
     let (root, prepared) = plan(tests, config.test_defaults);
     let max_concurrency = root.max_concurrency();
-    let pooled = |fresh: bool, only_run_always: bool| {
+    let count = |fresh: bool, only_run_always: bool| {
         prepared
             .iter()
             .filter(|test| {
                 matches!(&test.prepared, Ok(prepared)
-                    if prepared.pooled
-                        && prepared.fresh_session == fresh
+                    if prepared.fresh_session == fresh
                         && (test.placement.run_always || !only_run_always))
             })
             .count()
     };
     let upcoming = Upcoming {
-        any: pooled(false, false),
-        fresh: pooled(true, false),
+        any: count(false, false),
+        fresh: count(true, false),
     };
     let upcoming_always = Upcoming {
-        any: pooled(false, true),
-        fresh: pooled(true, true),
+        any: count(false, true),
+        fresh: count(true, true),
     };
     let (requests_tx, requests_rx) = mpsc::unbounded_channel();
     let env = Env {
@@ -183,7 +185,6 @@ where
                 .unwrap_or_else(|| default_spare_sessions(max_concurrency, config.session_reuse)),
             upcoming,
             upcoming_always,
-            config.test_defaults.element_query_wait,
             requests_tx,
             config.cancellation.clone(),
         ),
@@ -261,8 +262,8 @@ where
     Context: Sync + ?Sized,
 {
     /// The test at `index`.
-    fn test(&self, index: usize) -> &QueuedTest<Context> {
-        &self.tests[index]
+    fn test(&self, index: TestIndex) -> &QueuedTest<Context> {
+        &self.tests[index.get()]
     }
 
     /// With [`FailurePolicy::FailFast`], start no further tests (after a failure).
@@ -317,13 +318,13 @@ where
         self.results.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Tell the test waiting for the session of `delivery` that it could not be created.
-    fn fail_creation(&self, delivery: Delivery, report: Report, creation_start: Instant) {
+    /// Tell the pool that a session could not be created.
+    fn fail_creation(&self, report: Report, creation_start: Instant) {
         let failure = CreationFailure {
             report,
             preparation: SessionPreparation::Created(creation_start.elapsed()),
         };
-        self.pool.deliver(delivery, Err(failure));
+        self.pool.deliver(Err(failure));
     }
 
     fn warn_if_slow_session(&self, what: &str, duration: Duration) {
@@ -390,9 +391,8 @@ where
     }
 }
 
-/// Run the test at `index` in a session of the pool (or one created for it) and return once its
-/// body finished. Its session quits or is reset, and its record is completed, in the background.
-async fn run_test<Context>(env: &Env<'_, Context>, index: usize)
+/// Run the test at `index` in a session of the pool and return once its body finished. Its session quits or is reset, and its record is completed, in the background.
+async fn run_test<Context>(env: &Env<'_, Context>, index: TestIndex)
 where
     Context: Sync + ?Sized,
 {
@@ -411,28 +411,15 @@ where
 
     let run_always = test.placement.run_always;
     let requested = Instant::now();
-    let pooled = prepared.pooled;
-    let ticket = if pooled {
-        // Tests not started because of fail-fast or a cancellation are not recorded.
-        let Some(ticket) = env.pool.take(prepared.fresh_session, run_always).await else {
-            return;
-        };
-        ticket
-    } else {
-        let Some(ticket) = env
-            .pool
-            .dedicated(prepared.element_query_wait, run_always)
-            .await
-        else {
-            return;
-        };
-        ticket
+    // Tests not started because of fail-fast or a cancellation are not recorded.
+    let Some(ticket) = env.pool.take(prepared.fresh_session, run_always).await else {
+        return;
     };
     let wait = requested.elapsed();
     if !env.pool.may_start(run_always) {
         // A test failed, or the run was cancelled, while this one waited for its session: it
         // doesn't start, like the tests after it. Its session quits.
-        if pooled && ticket.is_ok() {
+        if ticket.is_ok() {
             env.pool.test_finished();
         }
         return;
@@ -452,9 +439,7 @@ where
                     // The worker ended without finishing the test, which only a cancelled run
                     // does: it drops its workers, before they take the test off the board.
                     env.board.clear(Activity::Test(index));
-                    if pooled {
-                        env.pool.test_finished();
-                    }
+                    env.pool.test_finished();
                     let record = test.record(
                         TestOutcome::Cancelled,
                         Some(SessionTiming { preparation, wait }),
@@ -464,9 +449,7 @@ where
                 }
                 return;
             }
-            if pooled {
-                env.pool.test_finished();
-            }
+            env.pool.test_finished();
             (
                 Report::<SessionEnded>::new(SessionEnded).into_dynamic(),
                 preparation,
@@ -561,13 +544,6 @@ mod tests {
             names.iter().fold(TestSuite::sequential(), |suite, name| {
                 suite.with(StubTest::new(name))
             })
-        }
-
-        /// A test with an element query wait of its own, so that it gets a dedicated session.
-        fn dedicated(name: &'static str) -> StubTest {
-            StubTest::new(name).with_settings(TestSettings::new().with_element_query_wait(
-                ElementQueryWait::new(Duration::from_secs(1), Duration::from_millis(100)),
-            ))
         }
 
         #[tokio::test(start_paused = true)]
@@ -674,15 +650,15 @@ mod tests {
         }
 
         #[tokio::test(start_paused = true)]
-        async fn cancelling_the_run_ends_the_wait_for_a_dedicated_session() {
+        async fn cancelling_the_run_ends_the_wait_for_a_session() {
             let cancellation = CancellationToken::new();
-            // The pool session of "cancel" is created first, the dedicated one of "a" takes long.
+            // The session of "cancel" is created first, the one of "a" takes long.
             let sessions = FakeSessions::new(&cancellation)
                 .with_creation_time(1, Duration::from_secs(60))
                 .with_test("cancel", FakeTest::Cancel(Duration::from_secs(1)));
             let tests = TestSuite::parallel(Parallelism::parallel(2))
                 .with(StubTest::new("cancel"))
-                .with(dedicated("a"));
+                .with(StubTest::new("a"));
 
             let execution = run(&sessions, settings(&cancellation), tests).await;
 
@@ -692,14 +668,15 @@ mod tests {
         }
 
         #[tokio::test(start_paused = true)]
-        async fn a_failure_ends_the_wait_for_a_dedicated_session_with_fail_fast() {
+        async fn a_failure_ends_the_wait_for_a_session_with_fail_fast() {
             let cancellation = CancellationToken::new();
+            // The session of "fail" is created first, the one of "a" takes long.
             let sessions = FakeSessions::new(&cancellation)
                 .with_creation_time(1, Duration::from_secs(60))
                 .with_test("fail", FakeTest::Fail);
             let tests = TestSuite::parallel(Parallelism::parallel(2))
                 .with(StubTest::new("fail"))
-                .with(dedicated("a"));
+                .with(StubTest::new("a"));
             let config = RunSettings {
                 failure_policy: FailurePolicy::FailFast,
                 ..settings(&cancellation)
@@ -709,6 +686,41 @@ mod tests {
 
             assert_that!(outcomes(&execution)).contains_exactly([("fail", TestOutcome::Failed)]);
             assert_that!(execution.not_started).is_equal_to(1);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn every_test_sets_its_element_query_wait_in_the_session_it_gets() {
+            let cancellation = CancellationToken::new();
+            let sessions = FakeSessions::new(&cancellation);
+            let runner_wait =
+                ElementQueryWait::new(Duration::from_secs(10), Duration::from_millis(500));
+            let own_wait =
+                ElementQueryWait::new(Duration::from_secs(1), Duration::from_millis(100));
+            let config = RunSettings {
+                test_defaults: TestDefaults {
+                    element_query_wait: Some(runner_wait),
+                    ..TestDefaults::new()
+                },
+                session_reuse: SessionReuse::enabled(),
+                ..settings(&cancellation)
+            };
+            let tests = TestSuite::sequential()
+                .with(
+                    StubTest::new("a")
+                        .with_settings(TestSettings::new().with_element_query_wait(own_wait)),
+                )
+                .with(StubTest::new("b"));
+
+            let execution = run(&sessions, config, tests).await;
+
+            assert_that!(execution.result).is_ok();
+            // A test with a wait of its own takes a session like any other, which the next test
+            // reuses with the runner's wait.
+            assert_that!(sessions.events()).contains_exactly([
+                "create 0", "start a", "end a", "reset 0", "start b", "end b", "quit 0",
+            ]);
+            assert_that!(sessions.element_query_waits())
+                .contains_exactly([(0, Some(own_wait)), (0, Some(runner_wait))]);
         }
 
         #[tokio::test(start_paused = true)]

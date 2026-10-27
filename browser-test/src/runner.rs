@@ -358,9 +358,6 @@ impl BrowserTestRunner {
     /// Visible runs ([`Visibility::Visible`]) default to `0`: a spare session's browser window
     /// would open on top of the window of the running test. Set spare sessions explicitly to
     /// create them in visible runs as well.
-    ///
-    /// Spare sessions use the runner's element query wait. A test overriding it with
-    /// [`TestSettings::with_element_query_wait`] gets a session created when its turn comes.
     #[must_use]
     pub const fn with_spare_sessions(mut self, spare_sessions: usize) -> Self {
         self.spare_sessions = Some(spare_sessions);

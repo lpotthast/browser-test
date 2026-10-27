@@ -7,7 +7,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use assertr::prelude::*;
@@ -15,7 +15,7 @@ use browser_test::{
     BrowserTest, BrowserTestError, BrowserTestRunner, CachedData, Cancellation, ElementQueryWait,
     FailurePolicy, Parallelism, RunReport, SessionPreparation, SessionReset, SessionReuse, StepExt,
     TestFuture, TestOutcome, TestSettings, TestSuite, TracingSummary,
-    thirtyfour::{ChromiumLikeCapabilities, WebDriver},
+    thirtyfour::{By, ChromiumLikeCapabilities, WebDriver, prelude::ElementQueryable as _},
 };
 use rootcause::{Report, report};
 use serial_test::serial;
@@ -111,8 +111,6 @@ struct Visit {
     body: Duration,
     fail: bool,
     fresh_session: bool,
-    /// Whether the test has an element query wait of its own, and so a session created for it.
-    dedicated: bool,
     tags: &'static [&'static str],
     tracker: Arc<Tracker>,
 }
@@ -124,7 +122,6 @@ impl Visit {
             body,
             fail: false,
             fresh_session: false,
-            dedicated: false,
             tags: &[],
             tracker: Arc::clone(tracker),
         }
@@ -141,15 +138,7 @@ impl BrowserTest<str> for Visit {
     }
 
     fn settings(&self) -> TestSettings {
-        let settings = TestSettings::new().with_fresh_session(self.fresh_session);
-        if self.dedicated {
-            settings.with_element_query_wait(ElementQueryWait::new(
-                Duration::from_secs(1),
-                Duration::from_millis(100),
-            ))
-        } else {
-            settings
-        }
+        TestSettings::new().with_fresh_session(self.fresh_session)
     }
 
     fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
@@ -360,14 +349,15 @@ async fn fail_fast_does_not_start_tests_waiting_for_their_session() {
     let mut failing = Visit::new(1, Duration::ZERO, &tracker);
     failing.fail = true;
     // Its session is created when its turn comes, which takes longer than the failing test.
-    let mut waiting = Visit::new(2, Duration::ZERO, &tracker);
-    waiting.dedicated = true;
+    let waiting = Visit::new(2, Duration::ZERO, &tracker);
 
     let outcome = run(
-        runner().with_failure_policy(FailurePolicy::FailFast),
+        runner()
+            .with_failure_policy(FailurePolicy::FailFast)
+            .with_spare_sessions(1),
         base_url.as_str(),
         TestSuite::sequential()
-            // While it runs, a spare session gets ready for the failing test.
+            // While it runs, the one spare session gets ready for the failing test.
             .with(Visit::new(0, Duration::from_secs(1), &tracker))
             .with_nested(
                 TestSuite::parallel(Parallelism::parallel(2))
@@ -1127,24 +1117,11 @@ async fn only_manual_resets_keeping_it_keep_the_http_cache() {
 /// script state survived) is reported in `restored`.
 struct GoesBack {
     restored: Arc<Mutex<Option<bool>>>,
-    /// Whether the test has an element query wait of its own, and so a session created for it.
-    dedicated: bool,
 }
 
 impl BrowserTest<str> for GoesBack {
     fn name(&self) -> Cow<'_, str> {
         "goes back".into()
-    }
-
-    fn settings(&self) -> TestSettings {
-        if self.dedicated {
-            TestSettings::new().with_element_query_wait(ElementQueryWait::new(
-                Duration::from_secs(1),
-                Duration::from_millis(100),
-            ))
-        } else {
-            TestSettings::new()
-        }
     }
 
     fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
@@ -1165,9 +1142,8 @@ impl BrowserTest<str> for GoesBack {
     }
 }
 
-/// Whether a page is restored from the back/forward cache in a reused session, or in a
-/// `dedicated` one created for a test with settings of its own.
-async fn restored_from_back_forward_cache(reuse: SessionReuse, dedicated: bool) -> bool {
+/// Whether a page is restored from the back/forward cache in a reused session.
+async fn restored_from_back_forward_cache(reuse: SessionReuse) -> bool {
     let base_url = serve_fixture().await;
     let restored = Arc::new(Mutex::new(None));
     let outcome = run(
@@ -1175,7 +1151,6 @@ async fn restored_from_back_forward_cache(reuse: SessionReuse, dedicated: bool) 
         base_url.as_str(),
         TestSuite::sequential().with(GoesBack {
             restored: Arc::clone(&restored),
-            dedicated,
         }),
     )
     .await;
@@ -1187,16 +1162,10 @@ async fn restored_from_back_forward_cache(reuse: SessionReuse, dedicated: bool) 
 #[serial]
 async fn reused_sessions_have_no_back_forward_cache_unless_enabled() {
     for reset in [SessionReset::NewContext, SessionReset::manual([])] {
-        // Sessions created for tests with settings of their own are set up alike.
-        for dedicated in [false, true] {
-            let reuse = SessionReuse::enabled().with_reset(reset);
-            assert_that!(restored_from_back_forward_cache(reuse, dedicated).await).is_false();
-            assert_that!(
-                restored_from_back_forward_cache(reuse.with_back_forward_cache(true), dedicated)
-                    .await
-            )
+        let reuse = SessionReuse::enabled().with_reset(reset);
+        assert_that!(restored_from_back_forward_cache(reuse).await).is_false();
+        assert_that!(restored_from_back_forward_cache(reuse.with_back_forward_cache(true)).await)
             .is_true();
-        }
     }
 }
 
@@ -1223,6 +1192,76 @@ async fn reused_sessions_run_tests_while_more_tests_need_them() {
     assert_that!(outcome.report.sessions_created()).is_less_or_equal_to(4);
     assert_that!(outcome.report.session_resets()).is_greater_or_equal_to(4);
     assert_that!(outcome.report.to_string().as_str()).contains(", reset ");
+}
+
+/// Queries an element that doesn't exist, and reports in `waited` how long the query waited.
+struct QueriesMissing {
+    own_wait: Option<ElementQueryWait>,
+    waited: Arc<Mutex<Option<Duration>>>,
+}
+
+impl BrowserTest<str> for QueriesMissing {
+    fn name(&self) -> Cow<'_, str> {
+        format!("queries missing (own wait: {})", self.own_wait.is_some()).into()
+    }
+
+    fn settings(&self) -> TestSettings {
+        match self.own_wait {
+            Some(wait) => TestSettings::new().with_element_query_wait(wait),
+            None => TestSettings::new(),
+        }
+    }
+
+    fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver.goto(base_url).await?;
+            let start = Instant::now();
+            let missing = driver.query(By::Id("missing")).first().await;
+            *self.waited.lock().unwrap() = Some(start.elapsed());
+            if missing.is_ok() {
+                return Err(report!("found an element that doesn't exist"));
+            }
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn tests_with_an_element_query_wait_of_their_own_share_reused_sessions() {
+    let base_url = serve_fixture().await;
+    let own_waited = Arc::new(Mutex::new(None));
+    let runner_waited = Arc::new(Mutex::new(None));
+    let runner_wait = ElementQueryWait::new(Duration::from_secs(3), Duration::from_millis(100));
+
+    let outcome = run(
+        runner()
+            .with_session_reuse(SessionReuse::enabled())
+            .with_spare_sessions(0)
+            .with_element_query_wait(runner_wait),
+        base_url.as_str(),
+        TestSuite::sequential()
+            .with(QueriesMissing {
+                own_wait: Some(ElementQueryWait::new(
+                    Duration::from_millis(200),
+                    Duration::from_millis(50),
+                )),
+                waited: Arc::clone(&own_waited),
+            })
+            .with(QueriesMissing {
+                own_wait: None,
+                waited: Arc::clone(&runner_waited),
+            }),
+    )
+    .await;
+
+    assert_that!(outcome.result).is_ok();
+    // The second test ran in the session of the first, with the runner's wait.
+    assert_that!(outcome.report.sessions_created()).is_equal_to(1);
+    let own_waited = own_waited.lock().unwrap().expect("the first test ran");
+    let runner_waited = runner_waited.lock().unwrap().expect("the second test ran");
+    assert_that!(own_waited).is_less_than(Duration::from_secs(2));
+    assert_that!(runner_waited).is_greater_or_equal_to(runner_wait.timeout());
 }
 
 #[tokio::test(flavor = "multi_thread")]

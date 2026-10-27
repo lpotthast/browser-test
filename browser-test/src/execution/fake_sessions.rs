@@ -76,6 +76,8 @@ pub(super) struct FakeSessions {
     tests: HashMap<&'static str, FakeTest>,
     reset: FakeReset,
     events: Mutex<Vec<String>>,
+    /// The element query waits set, with the number of their session, in order.
+    element_query_waits: Mutex<Vec<(usize, Option<ElementQueryWait>)>>,
 }
 
 impl FakeSessions {
@@ -121,6 +123,14 @@ impl FakeSessions {
             .clone()
     }
 
+    /// The element query waits set so far, with the number of their session.
+    pub(super) fn element_query_waits(&self) -> Vec<(usize, Option<ElementQueryWait>)> {
+        self.element_query_waits
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     fn log(&self, event: String) {
         self.events
             .lock()
@@ -133,11 +143,7 @@ impl SessionFactory for FakeSessions {
     type Session = FakeSession;
     type Baseline = ();
 
-    async fn run_session<F>(
-        &self,
-        _element_query_wait: Option<ElementQueryWait>,
-        serve: F,
-    ) -> Result<(), Report>
+    async fn run_session<F>(&self, serve: F) -> Result<(), Report>
     where
         F: for<'s> AsyncFnOnce(&'s FakeSession) -> Result<(), Report>,
     {
@@ -187,6 +193,17 @@ impl SessionFactory for FakeSessions {
             }
         }
         Ok(())
+    }
+
+    fn set_element_query_wait(
+        &self,
+        session: &FakeSession,
+        element_query_wait: Option<ElementQueryWait>,
+    ) {
+        self.element_query_waits
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((session.id, element_query_wait));
     }
 
     fn set_timeouts(
