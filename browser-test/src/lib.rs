@@ -79,6 +79,9 @@ pub mod __private {
         fn into_dynamic(self) -> DynamicResult;
     }
 
+    // Not named in the error of another result, which would show rootcause's internal path to
+    // `Report`.
+    #[diagnostic::do_not_recommend]
     impl<E: ?Sized + 'static> TestResult for Result<(), Report<E>> {
         fn into_dynamic(self) -> DynamicResult {
             self.map_err(Report::into_dynamic)

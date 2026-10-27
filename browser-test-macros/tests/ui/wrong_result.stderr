@@ -6,8 +6,3 @@ error[E0277]: browser tests must return `Result<(), rootcause::Report>` or `Resu
   |
   = help: the trait `browser_test::__private::TestResult` is not implemented for `Result<(), String>`
   = note: any error converts into a `rootcause::Report` with `?`
-help: the trait `browser_test::__private::TestResult` is implemented for `Result<(), rootcause::report::owned::limit_field_access::Report<E>>`
- --> $WORKSPACE/browser-test/src/lib.rs
-  |
-  |     impl<E: ?Sized + 'static> TestResult for Result<(), Report<E>> {
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

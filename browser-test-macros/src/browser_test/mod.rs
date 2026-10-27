@@ -8,7 +8,7 @@ mod signature;
 use arguments::Arguments;
 use heck::ToUpperCamelCase;
 use manyhow::{ErrorMessage, bail, ensure, error_message};
-use proc_macro2::{Ident, TokenStream};
+use proc_macro2::{Group, Ident, Span, TokenStream, TokenTree};
 use quote::{ToTokens as _, format_ident, quote, quote_spanned};
 use signature::{Inputs, TestSignature};
 use syn::{
@@ -122,7 +122,8 @@ fn expand_test(
     // of another type is reported.
     let settings = args.time_limit.map(|limit| {
         let settings = quote_spanned! {limit.span()=>
-            #crate_path::TestSettings::new().with_time_limit(#limit)
+            let limit: ::core::time::Duration = #limit;
+            #crate_path::TestSettings::new().with_time_limit(limit)
         };
         quote! {
             fn settings(&self) -> #crate_path::TestSettings {
@@ -151,6 +152,16 @@ fn expand_test(
         .iter()
         .zip(input_spans)
         .map(|(arg, span)| Ident::new(arg, span));
+    // Spanned at the context, where one that is not `Sync` is reported. The path's first token
+    // decides. A path set with `crate = ...` keeps its span, where it is reported if it is wrong.
+    let crate_path_at_context = if args.crate_path.is_some() {
+        crate_path.clone()
+    } else {
+        respan(crate_path.clone(), context.span())
+    };
+    let browser_test = quote_spanned! {context.span()=>
+        #crate_path_at_context::BrowserTest<#context>
+    };
     // Spanned at the return type, where a wrong one is reported.
     let into_dynamic = quote_spanned! {result.span()=>
         <#result as #crate_path::__private::TestResult>::into_dynamic
@@ -168,7 +179,7 @@ fn expand_test(
         // browser-test's `run_body`, so that no frame of generated code is on the stack while the
         // test runs, and failure reports show the function as the test's outermost frame.
         #(#cfgs)*
-        impl #impl_generics #crate_path::BrowserTest<#context> for #name #where_clause {
+        impl #impl_generics #browser_test for #name #where_clause {
             fn name(&self) -> ::std::borrow::Cow<'_, str> {
                 ::std::borrow::Cow::Borrowed(#test_name)
             }
@@ -195,17 +206,18 @@ fn expand_test(
 /// What the attribute expands to besides an error: `function` and its struct, implementing
 /// `BrowserTest` for every context if `crate_path` is known.
 fn expand_dummy(mut function: ItemFn, crate_path: Option<&TokenStream>) -> TokenStream {
+    // A function with a receiver is a method (a free one doesn't parse), where a struct can't be.
+    if function.sig.receiver().is_some() {
+        return function.into_token_stream();
+    }
     let name = struct_name(&function.sig.ident, &function.sig.ident.unraw().to_string()).ok();
     let attributes = StructAttributes::take(&mut function);
-    // A free function with a receiver is an error of its own.
-    let function = function.sig.receiver().is_none().then(|| {
-        quote! {
-            #[allow(dead_code)]
-            #function
-        }
-    });
+    let function = quote! {
+        #[allow(dead_code)]
+        #function
+    };
     let Some(name) = name else {
-        return function.into_token_stream();
+        return function;
     };
     let test_struct = attributes.test_struct(&name);
     let cfgs = &attributes.cfgs;
@@ -342,6 +354,23 @@ fn take_lints(attrs: &mut Vec<Attribute>) -> Vec<Attribute> {
         true
     });
     lints
+}
+
+/// `tokens`, spanned at `span`.
+fn respan(tokens: TokenStream, span: Span) -> TokenStream {
+    tokens
+        .into_iter()
+        .map(|mut token| {
+            if let TokenTree::Group(group) = &token {
+                let mut respanned = Group::new(group.delimiter(), respan(group.stream(), span));
+                respanned.set_span(span);
+                token = TokenTree::Group(respanned);
+            } else {
+                token.set_span(span);
+            }
+            token
+        })
+        .collect()
 }
 
 /// The path to `browser-test`, under the name the caller's `Cargo.toml` gives it.

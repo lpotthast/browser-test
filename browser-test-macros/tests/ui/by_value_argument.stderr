@@ -1,0 +1,5 @@
+error: browser test arguments must be shared references
+ --> tests/ui/by_value_argument.rs:4:29
+  |
+4 | async fn by_value(_context: String) -> Result<(), rootcause::Report> {
+  |                             ^^^^^^

@@ -1,0 +1,5 @@
+error: function name must produce a valid PascalCase struct name
+ --> tests/ui/no_struct_name.rs:4:10
+  |
+4 | async fn __() -> Result<(), rootcause::Report> {
+  |          ^^

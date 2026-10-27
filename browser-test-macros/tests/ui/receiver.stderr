@@ -1,0 +1,5 @@
+error: browser tests must be free functions
+ --> tests/ui/receiver.rs:7:21
+  |
+7 |     async fn method(&self) -> Result<(), rootcause::Report> {
+  |                     ^^^^^
