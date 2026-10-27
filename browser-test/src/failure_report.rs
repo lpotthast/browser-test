@@ -215,8 +215,13 @@ impl Dependencies {
             // Cargo resolves a relative `CARGO_TARGET_DIR` against the working directory.
             let target_dir = std::env::var_os("CARGO_TARGET_DIR")
                 .and_then(|dir| std::path::absolute(dir).ok())
+                .or_else(|| {
+                    // Also finds a `build.target-dir` configured in `.cargo/config.toml`.
+                    let exe = std::env::current_exe().ok()?;
+                    target_dir_of(&normalized(&exe))
+                })
                 .unwrap_or_else(|| test_root().join("target"));
-            Self::new(target_dir)
+            Self::new(normalized(&target_dir).into_owned())
         })
     }
 
@@ -247,6 +252,21 @@ impl Dependencies {
         dirs.insert(dir.to_path_buf(), dependency);
         dependency
     }
+}
+
+/// The Cargo target directory that the executable `exe` was built into: the closest of its
+/// ancestors that Cargo marked with `CACHEDIR.TAG`, else `<target>` of
+/// `<target>/<profile>/deps/<exe>`, where Cargo puts tests.
+fn target_dir_of(exe: &Path) -> Option<PathBuf> {
+    let marked = exe
+        .ancestors()
+        .skip(1)
+        .find(|dir| dir.join("CACHEDIR.TAG").is_file());
+    let deps = || {
+        let deps = exe.parent().filter(|dir| dir.ends_with("deps"))?;
+        deps.parent()?.parent()
+    };
+    marked.or_else(deps).map(Path::to_path_buf)
 }
 
 /// The frames of the test code on the stack where an error was created or a panic happened,
@@ -1068,6 +1088,27 @@ mod tests {
         ] {
             assert_that!(dependencies.contains(&root.join(dependency), root)).is_true();
         }
+    }
+
+    #[test]
+    fn the_target_dir_is_found_from_the_executable() {
+        let tree = TempTree::new(
+            "target-dir",
+            &[
+                "build/CACHEDIR.TAG",
+                "build/debug/deps/ui-0123",
+                "build/debug/examples/demo",
+                "unmarked/release/deps/ui-0123",
+                "bin/tool",
+            ],
+        );
+        let root = &tree.0;
+        for exe in ["build/debug/deps/ui-0123", "build/debug/examples/demo"] {
+            assert_that!(target_dir_of(&root.join(exe))).is_equal_to(Some(root.join("build")));
+        }
+        assert_that!(target_dir_of(&root.join("unmarked/release/deps/ui-0123")))
+            .is_equal_to(Some(root.join("unmarked")));
+        assert_that!(target_dir_of(&root.join("bin/tool"))).is_none();
     }
 
     #[test]
