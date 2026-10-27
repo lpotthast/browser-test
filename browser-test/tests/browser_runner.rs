@@ -30,6 +30,7 @@ const FIXTURE_PAGE_TITLE: &str = "browser-test fixture";
 
 /// Set for a child run (see [`ChildRun`]): the directory in which it keeps its profiles and
 /// signals that its test is running.
+#[cfg(unix)]
 const CHILD_RUN_DIR_ENV: &str = "BROWSER_TEST_CHILD_RUN_DIR";
 
 #[derive(Debug)]
