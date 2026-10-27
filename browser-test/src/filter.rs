@@ -399,12 +399,22 @@ mod tests {
 
     #[test]
     fn invalid_patterns_are_errors() {
+        // The regex crate's wording may change between releases, so compare against it instead
+        // of spelling it out.
+        #[expect(
+            clippy::invalid_regex,
+            reason = "the test needs an invalid pattern's error"
+        )]
+        let regex_error = Regex::new("(").unwrap_err().to_string();
+        assert_that!(regex_error.as_str()).is_not_empty();
+
         assert_that!(TestFilter::new().try_with_tag("("))
             .err()
-            .has_display_value(concat!(
-                "invalid test filter pattern \"(\": ",
-                "regex parse error:\n    (\n    ^\nerror: unclosed group",
-            ));
+            .is_equal_to(InvalidPattern {
+                pattern: "(".to_owned(),
+                message: regex_error.clone(),
+            })
+            .has_display_value(format!("invalid test filter pattern \"(\": {regex_error}"));
 
         let names = EnvVarGuard::new("BROWSER_TEST_NAME_UNCLOSED");
         names.set(" ( ");
@@ -412,9 +422,15 @@ mod tests {
             TestFilter::new().with_name_pattern_from_env_var("BROWSER_TEST_NAME_UNCLOSED")
         )
         .err()
-        .has_display_value(concat!(
-            "environment variable BROWSER_TEST_NAME_UNCLOSED is set to \"(\", expected a ",
-            "regular expression: regex parse error:\n    (\n    ^\nerror: unclosed group",
+        .is_equal_to(InvalidEnvVar {
+            name: "BROWSER_TEST_NAME_UNCLOSED".to_owned(),
+            value: "(".to_owned(),
+            expected: EXPECTED_PATTERN,
+            details: Some(regex_error.clone()),
+        })
+        .has_display_value(format!(
+            "environment variable BROWSER_TEST_NAME_UNCLOSED is set to \"(\", expected a \
+             regular expression: {regex_error}"
         ));
     }
 
