@@ -18,7 +18,7 @@
 use std::{
     future::Future,
     pin::{Pin, pin},
-    sync::{Arc, Mutex, PoisonError},
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::{Duration, Instant},
 };
 
@@ -28,12 +28,14 @@ use rootcause::Report;
 use thirtyfour::{ChromeCapabilities, error::WebDriverResult};
 use tokio::sync::{mpsc, oneshot};
 
+mod failures;
 mod plan;
 mod session_pool;
 mod test_run;
 mod worker;
 
 use self::{
+    failures::BrowserTestFailures,
     plan::{Node, QueuedTest, Suite, plan},
     session_pool::{CreationFailure, Delivery, SessionPool, Upcoming},
     worker::{Job, drive_workers},
@@ -47,7 +49,6 @@ use crate::{
         FormatDuration, SessionPreparation, SessionTiming, SuiteRecord, TestOutcome, TestRecord,
         timing_breakdown,
     },
-    scheduler::BrowserTestFailures,
     test_settings::TestDefaults,
 };
 
@@ -124,10 +125,7 @@ where
         config,
         context,
         tests: prepared,
-        failures: Mutex::default(),
-        records: Mutex::default(),
-        suites: Mutex::default(),
-        released_session_teardown: Mutex::default(),
+        results: Mutex::default(),
         board: ProgressBoard::default(),
         pool: SessionPool::new(
             max_concurrency,
@@ -152,31 +150,22 @@ where
     let watchdog = env.board.watch(config.progress_warnings);
     futures_util::future::select(pin!(run), pin!(watchdog)).await;
 
-    let Env {
-        tests,
+    let Env { tests, results, .. } = env;
+    let Results {
         failures,
-        records,
-        suites,
+        mut records,
+        mut suites,
         released_session_teardown,
-        ..
-    } = env;
-    let mut records = records.into_inner().unwrap_or_else(PoisonError::into_inner);
+    } = results.into_inner().unwrap_or_else(PoisonError::into_inner);
     let not_started = tests.len() - records.len();
     records.sort_by_key(|record| record.index);
-    let mut suites = suites.into_inner().unwrap_or_else(PoisonError::into_inner);
     suites.sort_by_key(|(id, _)| *id);
-    let failures = failures
-        .into_inner()
-        .unwrap_or_else(PoisonError::into_inner);
-    let result = failures.into_result();
     Execution {
         records,
         suites: suites.into_iter().map(|(_, suite)| suite).collect(),
-        released_session_teardown: released_session_teardown
-            .into_inner()
-            .unwrap_or_else(PoisonError::into_inner),
+        released_session_teardown,
         not_started,
-        result,
+        result: failures.into_result(),
     }
 }
 
@@ -200,13 +189,21 @@ where
     config: &'c ExecutionConfig<'c>,
     context: &'c Context,
     tests: Vec<QueuedTest<Context>>,
-    failures: Mutex<BrowserTestFailures>,
-    records: Mutex<Vec<TestRecord>>,
-    suites: Mutex<Vec<(usize, SuiteRecord)>>,
-    /// Time spent quitting sessions without a test.
-    released_session_teardown: Mutex<Duration>,
+    results: Mutex<Results>,
     board: ProgressBoard,
     pool: SessionPool,
+}
+
+/// What a run's tests produced so far.
+#[derive(Default)]
+struct Results {
+    failures: BrowserTestFailures,
+    /// A record per finished test, in the order they finished.
+    records: Vec<TestRecord>,
+    /// The timing of every finished named suite, with its id.
+    suites: Vec<(usize, SuiteRecord)>,
+    /// Time spent quitting sessions without a test.
+    released_session_teardown: Duration,
 }
 
 impl<Context> Env<'_, Context>
@@ -256,17 +253,18 @@ where
                 record.name,
             ),
         }
-        if let Err(report) = result {
+        if result.is_err() {
             self.stop_starting_on_fail_fast();
-            self.failures
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(record.index, report);
         }
-        self.records
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(record);
+        let mut results = self.results();
+        if let Err(report) = result {
+            results.failures.push(record.index, report);
+        }
+        results.records.push(record);
+    }
+
+    fn results(&self) -> MutexGuard<'_, Results> {
+        self.results.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Tell the test waiting for the session of `delivery` that it could not be created.
@@ -312,16 +310,13 @@ where
             .collect::<()>()
             .await;
         if let Some(name) = &suite.name {
-            env.suites
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push((
-                    suite.id,
-                    SuiteRecord {
-                        name: name.clone(),
-                        duration: start.elapsed(),
-                    },
-                ));
+            env.results().suites.push((
+                suite.id,
+                SuiteRecord {
+                    name: name.clone(),
+                    duration: start.elapsed(),
+                },
+            ));
         }
     })
 }

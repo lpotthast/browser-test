@@ -1,11 +1,9 @@
+//! How the tests of a run are scheduled: how many run at the same time, and whether a failure
+//! stops the run.
+
 use std::num::NonZeroUsize;
 
-use rootcause::{Report, report_collection::ReportCollection};
-
-use crate::{
-    BrowserTestError,
-    env::{InvalidEnvVar, env_positive_number},
-};
+use crate::env::{InvalidEnvVar, env_positive_number};
 
 /// Default environment variable read by [`Parallelism::from_env`].
 pub(crate) const DEFAULT_PARALLELISM_ENV: &str = "BROWSER_TEST_PARALLELISM";
@@ -108,36 +106,6 @@ pub enum FailurePolicy {
     RunAll,
 }
 
-#[derive(Default)]
-pub(crate) struct BrowserTestFailures {
-    failures: Vec<(usize, Report<BrowserTestError>)>,
-}
-
-impl BrowserTestFailures {
-    pub(crate) fn push(&mut self, test_index: usize, failure: Report<BrowserTestError>) {
-        self.failures.push((test_index, failure));
-    }
-
-    pub(crate) fn into_result(mut self) -> Result<(), Report<BrowserTestError>> {
-        if self.failures.is_empty() {
-            return Ok(());
-        }
-
-        let failed_tests = self.failures.len();
-        self.failures
-            .sort_by_key(|(test_index, _failure)| *test_index);
-
-        let mut failure_collection = ReportCollection::with_capacity(failed_tests);
-        for (_test_index, failure) in self.failures {
-            failure_collection.push(failure.into_cloneable());
-        }
-
-        Err(crate::failure_report::without_own_location(
-            failure_collection.context(BrowserTestError::RunTests { failed_tests }),
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use assertr::prelude::*;
@@ -183,37 +151,5 @@ mod tests {
 
         assert_that!(Parallelism::from_env_var("BROWSER_TEST_CUSTOM_PARALLELISM"))
             .is_equal_to(Ok(Some(Parallelism::parallel(3))));
-    }
-
-    #[test]
-    fn browser_test_failures_returns_ok_when_empty() {
-        let failures = BrowserTestFailures::default();
-
-        assert_that!(failures.into_result()).is_ok();
-    }
-
-    #[test]
-    fn browser_test_failures_returns_aggregate_report_with_children() {
-        let mut failures = BrowserTestFailures::default();
-        failures.push(
-            0,
-            Report::new(BrowserTestError::RunTest {
-                test_name: "login".to_owned(),
-            }),
-        );
-        failures.push(
-            1,
-            Report::new(BrowserTestError::RunTest {
-                test_name: "checkout".to_owned(),
-            }),
-        );
-
-        let err = failures
-            .into_result()
-            .expect_err("non-empty failure collection should fail");
-
-        assert_that!(err.to_string())
-            .contains(BrowserTestError::RunTests { failed_tests: 2 }.to_string());
-        assert_that!(err).has_child_count(2);
     }
 }

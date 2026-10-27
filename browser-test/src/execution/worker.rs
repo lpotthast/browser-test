@@ -3,7 +3,7 @@
 
 use std::{
     panic::AssertUnwindSafe,
-    sync::{Arc, PoisonError},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -148,9 +148,7 @@ where
     if let Some(quit_start) = end.released {
         let teardown = quit_start.elapsed();
         env.warn_if_slow_session("Quitting a browser session", teardown);
-        *env.released_session_teardown
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) += teardown;
+        env.results().released_session_teardown += teardown;
     }
     if session_result.as_ref().is_err_and(quit_timed_out) {
         // Its browser may still write to the profile.
