@@ -87,7 +87,7 @@ where
     env.board
         .enter(activity, "a browser session", Phase::CreatingSession);
     let creation_start = Instant::now();
-    let profile = match config.profiles.create_session_profile() {
+    let profile = match config.profiles.create_session_profile().await {
         Ok(profile) => profile,
         Err(error) => {
             env.board.clear(activity);

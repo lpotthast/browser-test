@@ -327,10 +327,13 @@ impl RunProfiles {
             .is_ok_and(|modified| modified.elapsed().is_ok_and(|elapsed| elapsed > age))
     }
 
-    /// Create an empty profile for one session.
-    pub(crate) fn create_session_profile(&self) -> io::Result<SessionProfile> {
+    /// Create an empty profile for one session, without blocking the runtime.
+    pub(crate) async fn create_session_profile(&self) -> io::Result<SessionProfile> {
         let session = self.next_session.fetch_add(1, Ordering::Relaxed);
-        let dir = OwnedDir::create(self.dir.path().join(format!("session-{session}")))?;
+        let path = self.dir.path().join(format!("session-{session}"));
+        let dir = tokio::task::spawn_blocking(move || OwnedDir::create(path))
+            .await
+            .map_err(io::Error::other)??;
         // `ChromeProfilesDir::resolve` checked that the path is valid UTF-8, so `display` is
         // lossless.
         let user_data_dir_arg = format!("--{USER_DATA_DIR_SWITCH}={}", dir.path().display());
@@ -580,15 +583,17 @@ mod tests {
         fs::read_dir(dir).expect("dir should be readable").count()
     }
 
-    #[test]
-    fn profiles_are_removed_with_their_session_and_run() {
+    #[tokio::test]
+    async fn profiles_are_removed_with_their_session_and_run() {
         let profiles_dir = TestProfilesDir::new("removal");
         let run = profiles_dir.create_run();
         let first = run
             .create_session_profile()
+            .await
             .expect("profile should be created");
         let second = run
             .create_session_profile()
+            .await
             .expect("profile should be created");
         let first_path = first.dir.path().to_owned();
         let second_path = second.dir.path().to_owned();
@@ -750,12 +755,13 @@ mod tests {
         assert_that!(unknown).is_a_directory();
     }
 
-    #[test]
-    fn session_profile_sets_user_data_dir() {
+    #[tokio::test]
+    async fn session_profile_sets_user_data_dir() {
         let profiles_dir = TestProfilesDir::new("caps");
         let run = profiles_dir.create_run();
         let profile = run
             .create_session_profile()
+            .await
             .expect("profile should be created");
 
         let mut caps = ChromeCapabilities::new();
@@ -766,12 +772,13 @@ mod tests {
         )]);
     }
 
-    #[test]
-    fn session_profile_rejects_a_configured_user_data_dir() {
+    #[tokio::test]
+    async fn session_profile_rejects_a_configured_user_data_dir() {
         let profiles_dir = TestProfilesDir::new("conflict");
         let run = profiles_dir.create_run();
         let profile = run
             .create_session_profile()
+            .await
             .expect("profile should be created");
 
         for configured in [
