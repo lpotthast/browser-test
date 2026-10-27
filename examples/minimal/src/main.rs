@@ -1,6 +1,6 @@
 use browser_test::thirtyfour::WebDriver;
 use browser_test::{
-    BrowserTestError, BrowserTestRunner, BrowserTests, Cancellation, Visibility, browser_test,
+    BrowserTestError, BrowserTestRunner, Cancellation, TestSuite, Visibility, browser_test,
 };
 use rootcause::{Report, report};
 
@@ -34,6 +34,6 @@ async fn main() -> Result<(), Report<BrowserTestError>> {
 
     BrowserTestRunner::new(Cancellation::on_shutdown_signals())
         .with_visibility(Visibility::Visible)
-        .run(&context, BrowserTests::sequential().with(PageTitle))
+        .run(&context, TestSuite::sequential().with(PageTitle))
         .await
 }

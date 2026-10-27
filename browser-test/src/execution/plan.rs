@@ -1,33 +1,77 @@
 //! The test tree of a run: its tests, numbered in definition order and completed with the
-//! runner's settings, and the groups they run in.
+//! runner's settings, and the suites they run in.
 
-use std::{panic::AssertUnwindSafe, time::Duration};
+use std::{borrow::Cow, collections::BTreeMap, panic::AssertUnwindSafe, time::Duration};
 
 use crate::{
-    BrowserTest, BrowserTests, ElementQueryWait, Parallelism, Timeouts,
-    failure_report::panic_payload_message, test_case::BrowserTestEntry,
+    BrowserTest, BrowserTestRecord, ElementQueryWait, Parallelism, SessionTiming, TestOutcome,
+    TestSuite, Timeouts, failure_report::panic_payload_message, test_case::SuiteEntry,
     test_settings::TestDefaults,
 };
 
 /// Where a test sits in the test tree.
 #[derive(Clone, Default)]
 pub(super) struct Placement {
-    /// The names of the named groups it runs in, outermost first, joined with ` / `.
+    /// The names of the named suites it runs in, outermost first, joined with ` / `.
     pub(super) path: Option<String>,
-    /// The name of its [`TestGroup`](crate::TestGroup).
-    pub(super) group: Option<String>,
-    /// Whether it runs even after a failure stopped the run (see [`BrowserTests::run_always`]).
+    /// Whether it runs even after a failure stopped the run (see [`TestSuite::run_always`]).
     pub(super) run_always: bool,
 }
 
-/// A test whose metadata (name, settings) was read successfully.
-pub(super) struct PreparedTest<Context>
+/// A test of the run, numbered in definition order, with its metadata.
+pub(super) struct QueuedTest<Context>
 where
     Context: Sync + ?Sized,
 {
     pub(super) index: usize,
+    /// The test's name, or a placeholder if reading it panicked.
     pub(super) name: String,
     pub(super) placement: Placement,
+    /// See [`BrowserTest::tags`]. Empty if reading them panicked.
+    pub(super) tags: Vec<String>,
+    /// The test, ready to run, or the message of the panic its metadata methods raised. Such a
+    /// test fails without running.
+    pub(super) prepared: Result<PreparedTest<Context>, String>,
+}
+
+impl<Context> QueuedTest<Context>
+where
+    Context: Sync + ?Sized,
+{
+    /// The ready test, which only tests assigned a session are.
+    pub(super) fn ready(&self) -> &PreparedTest<Context> {
+        self.prepared
+            .as_ref()
+            .unwrap_or_else(|_| unreachable!("only ready tests are assigned to sessions"))
+    }
+
+    /// The record of this test, without the steps and the teardown of its session, which the
+    /// session worker of a test that ran adds.
+    pub(super) fn record(
+        &self,
+        outcome: TestOutcome,
+        session: Option<SessionTiming>,
+        body: Option<Duration>,
+    ) -> BrowserTestRecord {
+        BrowserTestRecord {
+            index: self.index,
+            name: self.name.clone(),
+            outcome,
+            path: self.placement.path.clone(),
+            tags: self.tags.clone(),
+            session,
+            body,
+            teardown: None,
+            steps: BTreeMap::new(),
+        }
+    }
+}
+
+/// What a test whose metadata was read needs to run.
+pub(super) struct PreparedTest<Context>
+where
+    Context: Sync + ?Sized,
+{
     /// The test's timeouts, completed with the runner's.
     pub(super) timeouts: Timeouts,
     pub(super) element_query_wait: Option<ElementQueryWait>,
@@ -50,37 +94,11 @@ where
     }
 }
 
-pub(super) enum QueuedTest<Context>
-where
-    Context: Sync + ?Sized,
-{
-    Ready(PreparedTest<Context>),
-    /// Reading the test's metadata panicked. The test fails without running.
-    Broken {
-        index: usize,
-        name: String,
-        placement: Placement,
-        panic_message: String,
-    },
-}
-
-impl<Context> QueuedTest<Context>
-where
-    Context: Sync + ?Sized,
-{
-    pub(super) fn placement(&self) -> &Placement {
-        match self {
-            Self::Ready(test) => &test.placement,
-            Self::Broken { placement, .. } => placement,
-        }
-    }
-}
-
-/// A group of the test tree, with its tests referenced by index.
-pub(super) struct Group {
-    /// Definition order, for sorting group records.
+/// A suite of the test tree, with its tests referenced by index.
+pub(super) struct Suite {
+    /// Definition order, for sorting suite records.
     pub(super) id: usize,
-    /// The group's name path, if the group is named.
+    /// The suite's name path, if the suite is named.
     pub(super) name: Option<String>,
     pub(super) parallelism: Parallelism,
     pub(super) children: Vec<Node>,
@@ -88,18 +106,18 @@ pub(super) struct Group {
 
 pub(super) enum Node {
     Test(usize),
-    Group(Group),
+    Suite(Suite),
 }
 
-impl Group {
-    /// How many tests of this group can run at the same time.
+impl Suite {
+    /// How many tests of this suite can run at the same time.
     pub(super) fn max_concurrency(&self) -> usize {
         let mut children: Vec<usize> = self
             .children
             .iter()
             .map(|child| match child {
                 Node::Test(_) => 1,
-                Node::Group(group) => group.max_concurrency(),
+                Node::Suite(suite) => suite.max_concurrency(),
             })
             .collect();
         children.sort_unstable_by(|a, b| b.cmp(a));
@@ -111,24 +129,37 @@ impl Group {
     }
 }
 
-/// Number the tests of `tests`, placed in `parent`, in definition order into `prepared` and build
-/// the tree.
-pub(super) fn prepare_group<Context>(
-    tests: BrowserTests<Context>,
-    parent: &Placement,
-    prepared: &mut Vec<QueuedTest<Context>>,
-    next_group: &mut usize,
+/// Number the tests of `suite` in definition order, complete them with the runner's `defaults`,
+/// and build the tree they run in.
+pub(super) fn plan<Context>(
+    suite: TestSuite<Context>,
     defaults: TestDefaults,
-) -> Group
+) -> (Suite, Vec<QueuedTest<Context>>)
 where
     Context: Sync + ?Sized,
 {
-    let BrowserTests {
+    let mut tests = Vec::new();
+    let root = plan_suite(suite, &Placement::default(), &mut tests, &mut 0, defaults);
+    (root, tests)
+}
+
+/// Plan `suite`, placed in `parent`, adding its tests to `tests`.
+fn plan_suite<Context>(
+    suite: TestSuite<Context>,
+    parent: &Placement,
+    tests: &mut Vec<QueuedTest<Context>>,
+    next_suite: &mut usize,
+    defaults: TestDefaults,
+) -> Suite
+where
+    Context: Sync + ?Sized,
+{
+    let TestSuite {
         parallelism,
         name,
         run_always,
         entries,
-    } = tests;
+    } = suite;
     let named = name.is_some();
     let path = match (parent.path.as_deref(), name) {
         (Some(parent), Some(name)) => Some(format!("{parent} / {name}")),
@@ -137,36 +168,24 @@ where
     };
     let placement = Placement {
         path,
-        group: None,
         run_always: parent.run_always || run_always,
     };
-    let id = *next_group;
-    *next_group += 1;
+    let id = *next_suite;
+    *next_suite += 1;
     let mut children = Vec::new();
     for entry in entries {
         match entry {
-            BrowserTestEntry::Test(test) => {
-                let index = prepared.len();
-                prepared.push(prepare_test(index, test, placement.clone(), defaults));
+            SuiteEntry::Test(test) => {
+                let index = tests.len();
+                tests.push(plan_test(index, test, placement.clone(), defaults));
                 children.push(Node::Test(index));
             }
-            BrowserTestEntry::Group(group) => children.push(Node::Group(prepare_group(
-                group, &placement, prepared, next_group, defaults,
+            SuiteEntry::Suite(suite) => children.push(Node::Suite(plan_suite(
+                suite, &placement, tests, next_suite, defaults,
             ))),
-            BrowserTestEntry::TestGroup(group) => {
-                let placement = Placement {
-                    group: Some(group.name),
-                    ..placement.clone()
-                };
-                for test in group.tests {
-                    let index = prepared.len();
-                    prepared.push(prepare_test(index, test, placement.clone(), defaults));
-                    children.push(Node::Test(index));
-                }
-            }
         }
     }
-    Group {
+    Suite {
         id,
         name: if named { placement.path } else { None },
         parallelism,
@@ -174,7 +193,8 @@ where
     }
 }
 
-fn prepare_test<Context>(
+/// Read the metadata of `test`, the test at `index`, and complete its settings with `defaults`.
+fn plan_test<Context>(
     index: usize,
     test: Box<dyn BrowserTest<Context>>,
     placement: Placement,
@@ -183,17 +203,16 @@ fn prepare_test<Context>(
 where
     Context: Sync + ?Sized,
 {
-    // Used in the panic report. We need a fallback for the case that `.name()` panics.
+    // What was read before a metadata method panicked is kept, with a fallback for the name.
     let mut name = format!("unnamed test at index {index}");
+    let mut tags = Vec::new();
     let settings = std::panic::catch_unwind(AssertUnwindSafe(|| {
         name = test.name().into_owned();
+        tags = test.tags().into_iter().map(Cow::into_owned).collect();
         test.settings()
     }));
-    match settings {
-        Ok(settings) => QueuedTest::Ready(PreparedTest {
-            index,
-            name,
-            placement,
+    let prepared = match settings {
+        Ok(settings) => Ok(PreparedTest {
             timeouts: settings.timeouts().or(defaults.timeouts),
             element_query_wait: settings
                 .element_query_wait()
@@ -205,110 +224,127 @@ where
         Err(payload) => {
             let panic_message = panic_payload_message(payload.as_ref());
             tracing::error!("Browser test '{name}' panicked: {panic_message}");
-            QueuedTest::Broken {
-                index,
-                name,
-                placement,
-                panic_message,
-            }
+            Err(panic_message)
         }
+    };
+    QueuedTest {
+        index,
+        name,
+        placement,
+        tags,
+        prepared,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use assertr::prelude::*;
-    use rootcause::Report;
-    use thirtyfour::WebDriver;
 
     use super::*;
-    use crate::TestSettings;
+    use crate::{
+        TestSettings,
+        test_support::{Metadata, StubTest},
+    };
 
     #[test]
-    fn logical_groups_share_parent_concurrency_and_keep_their_names_apart_from_the_path() {
-        async fn passes((): &()) -> Result<(), Report> {
-            Ok(())
-        }
-        let tests = BrowserTests::parallel(Parallelism::parallel(2))
+    fn tests_keep_their_names_tags_and_paths() {
+        let tests = TestSuite::parallel(Parallelism::parallel(2))
             .named("ui")
-            .with_test_group(
-                crate::TestGroup::new("one")
-                    .with(passes.named("a"))
-                    .with(passes.named("b")),
-            )
-            .with_test_group(
-                crate::TestGroup::new("two")
-                    .with(passes.named("c"))
-                    .with(passes.named("d")),
-            );
-        let mut prepared = Vec::new();
-        let defaults = TestDefaults::new();
-        let root = prepare_group(
-            tests,
-            &Placement::default(),
-            &mut prepared,
-            &mut 0,
-            defaults,
-        );
-        assert_eq!(root.max_concurrency(), 2);
-        assert_eq!(root.children.len(), 4);
-        assert!(
-            root.children
-                .iter()
-                .all(|child| matches!(child, Node::Test(_)))
-        );
-        let metadata: Vec<_> = prepared
+            .with(StubTest::new("a").with_tags(&["one"]))
+            .with(StubTest::new("b").with_tags(&["one", "two"]))
+            .with(StubTest::new("c"));
+        let (_root, tests) = plan(tests, TestDefaults::new());
+        let metadata: Vec<_> = tests
             .iter()
-            .map(|test| match test {
-                QueuedTest::Ready(test) => (
+            .map(|test| {
+                (
                     test.index,
                     test.name.as_str(),
                     test.placement.path.as_deref(),
-                    test.placement.group.as_deref(),
-                ),
-                QueuedTest::Broken { .. } => panic!("metadata must be valid"),
+                    test.tags.clone(),
+                    test.prepared.is_ok(),
+                )
             })
             .collect();
         assert_eq!(
             metadata,
             [
-                (0, "a", Some("ui"), Some("one")),
-                (1, "b", Some("ui"), Some("one")),
-                (2, "c", Some("ui"), Some("two")),
-                (3, "d", Some("ui"), Some("two")),
+                (0, "a", Some("ui"), vec!["one".to_owned()], true),
+                (
+                    1,
+                    "b",
+                    Some("ui"),
+                    vec!["one".to_owned(), "two".to_owned()],
+                    true
+                ),
+                (2, "c", Some("ui"), Vec::new(), true),
             ]
         );
     }
 
     #[test]
-    fn nested_groups_join_their_names_and_inherit_run_always() {
-        async fn passes((): &()) -> Result<(), Report> {
-            Ok(())
-        }
-        let tests = BrowserTests::sequential()
-            .named("checkout")
-            .with(passes.named("a"))
-            .with_nested(
-                BrowserTests::sequential()
-                    .named("final checks")
-                    .run_always()
-                    .with_nested(BrowserTests::sequential().with(passes.named("b"))),
+    fn a_test_whose_metadata_panics_keeps_what_was_read_before() {
+        let tests = TestSuite::sequential()
+            .with(StubTest::new("named").panicking_in(Metadata::Name))
+            .with(
+                StubTest::new("tagged")
+                    .with_tags(&["one"])
+                    .panicking_in(Metadata::Tags),
+            )
+            .with(
+                StubTest::new("settings")
+                    .with_tags(&["one"])
+                    .panicking_in(Metadata::Settings),
             );
-        let mut prepared = Vec::new();
-        let defaults = TestDefaults::new();
-        prepare_group(
-            tests,
-            &Placement::default(),
-            &mut prepared,
-            &mut 0,
-            defaults,
-        );
-        let placements: Vec<_> = prepared
+        let (_root, tests) = plan(tests, TestDefaults::new());
+        let metadata: Vec<_> = tests
             .iter()
             .map(|test| {
-                let placement = test.placement();
-                (placement.path.as_deref(), placement.run_always)
+                (
+                    test.name.as_str(),
+                    test.tags.clone(),
+                    test.prepared.as_ref().err().cloned(),
+                )
             })
+            .collect();
+        assert_eq!(
+            metadata,
+            [
+                (
+                    "unnamed test at index 0",
+                    Vec::new(),
+                    Some("named panics".to_owned())
+                ),
+                ("tagged", Vec::new(), Some("tagged panics".to_owned())),
+                (
+                    "settings",
+                    vec!["one".to_owned()],
+                    Some("settings panics".to_owned())
+                ),
+            ]
+        );
+        let record = tests[2].record(TestOutcome::Panicked, None, None);
+        assert_eq!(
+            (record.index, record.name.as_str(), record.tags),
+            (2, "settings", vec!["one".to_owned()])
+        );
+    }
+
+    #[test]
+    fn nested_suites_join_their_names_and_inherit_run_always() {
+        let tests = TestSuite::sequential()
+            .named("checkout")
+            .with(StubTest::new("a"))
+            .with_nested(
+                TestSuite::sequential()
+                    .named("final checks")
+                    .run_always()
+                    .with_nested(TestSuite::sequential().with(StubTest::new("b"))),
+            );
+        let (_root, tests) = plan(tests, TestDefaults::new());
+        let placements: Vec<_> = tests
+            .iter()
+            .map(|test| (test.placement.path.as_deref(), test.placement.run_always))
             .collect();
         assert_eq!(
             placements,
@@ -319,32 +355,16 @@ mod tests {
         );
     }
 
-    mod prepare_test {
+    mod plan_test {
         use super::*;
 
-        struct SettingsTest(TestSettings);
-
-        #[async_trait::async_trait]
-        impl BrowserTest for SettingsTest {
-            fn settings(&self) -> TestSettings {
-                self.0
-            }
-
-            async fn run(&self, _driver: &WebDriver, _context: &()) -> Result<(), Report> {
-                Ok(())
-            }
-        }
-
         fn prepared(test: TestSettings, runner: TestDefaults) -> PreparedTest<()> {
-            match prepare_test(
-                0,
-                Box::new(SettingsTest(test)),
-                Placement::default(),
-                runner,
-            ) {
-                QueuedTest::Ready(test) => test,
-                QueuedTest::Broken { .. } => panic!("the settings are readable"),
-            }
+            let test = StubTest::new("test").with_settings(test);
+            let Ok(prepared) = plan_test(0, Box::new(test), Placement::default(), runner).prepared
+            else {
+                panic!("the settings are readable")
+            };
+            prepared
         }
 
         #[test]

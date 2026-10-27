@@ -1,6 +1,6 @@
 //! Executes a tree of browser tests.
 //!
-//! Groups run recursively: a group starts its entries in order, at most its parallelism at once.
+//! Suites run recursively: a suite starts its entries in order, at most its parallelism at once.
 //! Every test runs in a browser session taken from the [`SessionPool`], which keeps spare
 //! sessions ready so that a starting test rarely waits for a browser to start. A session's
 //! lifetime is bound to `chrome-for-testing-manager`'s scoped session API, so each session is
@@ -16,7 +16,6 @@
 //!   limit, and turns what happened into its record and report.
 
 use std::{
-    collections::BTreeMap,
     future::Future,
     pin::{Pin, pin},
     sync::{
@@ -38,16 +37,16 @@ mod test_run;
 mod worker;
 
 use self::{
-    plan::{Group, Node, Placement, PreparedTest, QueuedTest, prepare_group},
+    plan::{Node, QueuedTest, Suite, plan},
     session_pool::{CreationFailure, Delivery, SessionPool, Upcoming},
     worker::{Job, drive_workers},
 };
 use crate::{
-    BrowserTestError, BrowserTests, FailurePolicy, ProgressWarnings, SessionReuse,
+    BrowserTestError, FailurePolicy, ProgressWarnings, SessionReuse, TestSuite,
     profile::RunProfiles,
     progress::{Activity, ProgressBoard},
     report::{
-        BrowserTestRecord, FormatDuration, GroupRecord, SessionPreparation, SessionTiming,
+        BrowserTestRecord, FormatDuration, SessionPreparation, SessionTiming, SuiteRecord,
         TestOutcome, timing_breakdown,
     },
     scheduler::BrowserTestFailures,
@@ -79,8 +78,8 @@ pub(crate) struct ExecutionConfig<'a> {
 pub(crate) struct Execution {
     /// A record per started test, in test order.
     pub(crate) records: Vec<BrowserTestRecord>,
-    /// The timing of every named group, in definition order.
-    pub(crate) groups: Vec<GroupRecord>,
+    /// The timing of every named suite, in definition order.
+    pub(crate) suites: Vec<SuiteRecord>,
     /// Time spent quitting sessions without a test.
     pub(crate) released_session_teardown: Duration,
     /// How many tests did not start, after a fail-fast stop or a cancellation.
@@ -92,29 +91,21 @@ pub(crate) struct Execution {
 pub(crate) async fn execute_tests<Context>(
     config: &ExecutionConfig<'_>,
     context: &Context,
-    tests: BrowserTests<Context>,
+    tests: TestSuite<Context>,
 ) -> Execution
 where
     Context: Sync + ?Sized,
 {
-    let mut prepared = Vec::new();
-    let mut next_group = 0;
-    let root = prepare_group(
-        tests,
-        &Placement::default(),
-        &mut prepared,
-        &mut next_group,
-        config.test_defaults,
-    );
+    let (root, prepared) = plan(tests, config.test_defaults);
     let max_concurrency = root.max_concurrency();
     let default_wait = config.test_defaults.element_query_wait;
     let pooled = |fresh: bool, only_run_always: bool| {
         prepared
             .iter()
             .filter(|test| {
-                matches!(test, QueuedTest::Ready(test)
-                    if test.uses_pool(default_wait)
-                        && test.fresh_session == fresh
+                matches!(&test.prepared, Ok(prepared)
+                    if prepared.uses_pool(default_wait)
+                        && prepared.fresh_session == fresh
                         && (test.placement.run_always || !only_run_always))
             })
             .count()
@@ -135,7 +126,7 @@ where
         keep_starting: AtomicBool::new(true),
         failures: Mutex::default(),
         records: Mutex::default(),
-        groups: Mutex::default(),
+        suites: Mutex::default(),
         released_session_teardown: Mutex::default(),
         board: ProgressBoard::default(),
         pool: SessionPool::new(
@@ -153,7 +144,7 @@ where
 
     env.pool.replenish(true);
     let execution = async {
-        run_group(&env, &root).await;
+        run_suite(&env, &root).await;
         env.pool.close();
     };
     let run = futures_util::future::join(execution, drive_workers(&env, requests_rx));
@@ -165,22 +156,22 @@ where
         tests,
         failures,
         records,
-        groups,
+        suites,
         released_session_teardown,
         ..
     } = env;
     let mut records = records.into_inner().unwrap_or_else(PoisonError::into_inner);
     let not_started = tests.len() - records.len();
     records.sort_by_key(|record| record.index);
-    let mut groups = groups.into_inner().unwrap_or_else(PoisonError::into_inner);
-    groups.sort_by_key(|(id, _)| *id);
+    let mut suites = suites.into_inner().unwrap_or_else(PoisonError::into_inner);
+    suites.sort_by_key(|(id, _)| *id);
     let failures = failures
         .into_inner()
         .unwrap_or_else(PoisonError::into_inner);
     let result = failures.into_result();
     Execution {
         records,
-        groups: groups.into_iter().map(|(_, group)| group).collect(),
+        suites: suites.into_iter().map(|(_, suite)| suite).collect(),
         released_session_teardown: released_session_teardown
             .into_inner()
             .unwrap_or_else(PoisonError::into_inner),
@@ -212,7 +203,7 @@ where
     keep_starting: AtomicBool,
     failures: Mutex<BrowserTestFailures>,
     records: Mutex<Vec<BrowserTestRecord>>,
-    groups: Mutex<Vec<(usize, GroupRecord)>>,
+    suites: Mutex<Vec<(usize, SuiteRecord)>>,
     /// Time spent quitting sessions without a test.
     released_session_teardown: Mutex<Duration>,
     board: ProgressBoard,
@@ -224,11 +215,8 @@ where
     Context: Sync + ?Sized,
 {
     /// The test at `index`, which a session was assigned. Only ready tests are.
-    fn assigned_test(&self, index: usize) -> &PreparedTest<Context> {
-        match &self.tests[index] {
-            QueuedTest::Ready(test) => test,
-            QueuedTest::Broken { .. } => unreachable!("only ready tests are assigned to sessions"),
-        }
+    fn assigned_test(&self, index: usize) -> &QueuedTest<Context> {
+        &self.tests[index]
     }
 
     /// Whether further tests start: the run neither stopped on a failure nor was cancelled.
@@ -319,10 +307,10 @@ where
     }
 }
 
-/// Run `group`, recording its wall time if it is named.
-fn run_group<'r, Context>(
+/// Run `suite`, recording its wall time if it is named.
+fn run_suite<'r, Context>(
     env: &'r Env<'_, Context>,
-    group: &'r Group,
+    suite: &'r Suite,
 ) -> Pin<Box<dyn Future<Output = ()> + Send + 'r>>
 where
     Context: Sync + ?Sized,
@@ -330,22 +318,22 @@ where
     Box::pin(async move {
         let start = Instant::now();
         // The futures only start running when the stream polls them, in order.
-        let children: Vec<_> = group
+        let children: Vec<_> = suite
             .children
             .iter()
             .map(|child| run_node(env, child))
             .collect();
         futures_util::stream::iter(children)
-            .buffer_unordered(group.parallelism.max_parallel_tests().get())
+            .buffer_unordered(suite.parallelism.max_parallel_tests().get())
             .collect::<()>()
             .await;
-        if let Some(name) = &group.name {
-            env.groups
+        if let Some(name) = &suite.name {
+            env.suites
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push((
-                    group.id,
-                    GroupRecord {
+                    suite.id,
+                    SuiteRecord {
                         name: name.clone(),
                         duration: start.elapsed(),
                     },
@@ -360,11 +348,11 @@ where
 {
     match node {
         // Tests not started because of fail-fast or a cancellation are not recorded.
-        Node::Test(index) if env.may_start(env.tests[*index].placement().run_always) => {
+        Node::Test(index) if env.may_start(env.tests[*index].placement.run_always) => {
             run_test(env, *index).await;
         }
         Node::Test(_) => {}
-        Node::Group(group) => run_group(env, group).await,
+        Node::Suite(suite) => run_suite(env, suite).await,
     }
 }
 
@@ -374,40 +362,34 @@ async fn run_test<Context>(env: &Env<'_, Context>, index: usize)
 where
     Context: Sync + ?Sized,
 {
-    let test = match &env.tests[index] {
-        QueuedTest::Ready(test) => test,
-        QueuedTest::Broken {
-            index,
-            name,
-            placement,
-            panic_message,
-        } => {
+    let test = &env.tests[index];
+    let prepared = match &test.prepared {
+        Ok(prepared) => prepared,
+        Err(panic_message) => {
             let report = Report::new(BrowserTestError::Panic {
-                test_name: name.clone(),
+                test_name: test.name.clone(),
                 message: panic_message.clone(),
             });
-            let record =
-                record_without_steps(*index, name, placement, TestOutcome::Panicked, None, None);
-            env.finish(record, Err(report));
+            env.finish(test.record(TestOutcome::Panicked, None, None), Err(report));
             return;
         }
     };
 
     let run_always = test.placement.run_always;
     let requested = Instant::now();
-    let pooled = test.uses_pool(env.pool.default_wait);
+    let pooled = prepared.uses_pool(env.pool.default_wait);
     let ticket = if pooled {
         // Tests not started because of fail-fast or a cancellation are not recorded.
         let Some(ticket) = env
             .pool
-            .take(test.fresh_session, run_always, || env.keep_starting())
+            .take(prepared.fresh_session, run_always, || env.keep_starting())
             .await
         else {
             return;
         };
         ticket
     } else {
-        env.pool.dedicated(test.element_query_wait).await
+        env.pool.dedicated(prepared.element_query_wait).await
     };
     let wait = requested.elapsed();
     if !env.may_start(run_always) {
@@ -436,10 +418,7 @@ where
                     if pooled {
                         env.pool.test_finished();
                     }
-                    let record = record_without_steps(
-                        index,
-                        &test.name,
-                        &test.placement,
+                    let record = test.record(
                         TestOutcome::Cancelled,
                         Some(SessionTiming { preparation, wait }),
                         Some(started.elapsed()),
@@ -463,41 +442,11 @@ where
         preparation: failure.preparation,
         wait,
     };
-    let record = record_without_steps(
-        index,
-        &test.name,
-        &test.placement,
-        TestOutcome::Failed,
-        Some(session),
-        None,
-    );
+    let record = test.record(TestOutcome::Failed, Some(session), None);
     let report = failure.report.context(BrowserTestError::PrepareSession {
         test_name: test.name.clone(),
     });
     env.finish(record, Err(report));
-}
-
-/// The record of a test that failed before its body ran, or was cancelled while it ran: no session
-/// worker recorded its steps or the teardown of its session.
-fn record_without_steps(
-    index: usize,
-    name: &str,
-    placement: &Placement,
-    outcome: TestOutcome,
-    session: Option<SessionTiming>,
-    body: Option<Duration>,
-) -> BrowserTestRecord {
-    BrowserTestRecord {
-        index,
-        name: name.to_owned(),
-        outcome,
-        path: placement.path.clone(),
-        group: placement.group.clone(),
-        session,
-        body,
-        teardown: None,
-        steps: BTreeMap::new(),
-    }
 }
 
 #[cfg(test)]

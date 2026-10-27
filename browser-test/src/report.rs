@@ -32,9 +32,9 @@ pub struct BrowserTestRunReport {
     /// ([`crate::FailurePolicy::FailFast`]) or the run was cancelled.
     pub not_started: usize,
 
-    /// Every named group (see [`crate::BrowserTests::named`]) that ran, in the order the groups
+    /// Every named suite (see [`crate::TestSuite::named`]) that ran, in the order the suites
     /// were defined.
-    pub groups: Vec<GroupRecord>,
+    pub suites: Vec<SuiteRecord>,
 
     /// Time spent quitting sessions without a test: spares no test took, and, with
     /// [`crate::SessionReuse`], sessions the pool released after resetting them, or whose reset
@@ -42,14 +42,14 @@ pub struct BrowserTestRunReport {
     pub released_session_teardown: Duration,
 }
 
-/// Timing of one named group of tests.
+/// Timing of one named suite of tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct GroupRecord {
-    /// The group's name, prefixed with the names of enclosing named groups (`outer / inner`).
+pub struct SuiteRecord {
+    /// The suite's name, prefixed with the names of enclosing named suites (`outer / inner`).
     pub name: String,
 
-    /// Wall time from the group's start until its last test finished.
+    /// Wall time from the suite's start until its last test finished.
     pub duration: Duration,
 }
 
@@ -66,14 +66,14 @@ pub struct BrowserTestRecord {
     /// How the test ended: passed, failed, panicked, timed out or cancelled.
     pub outcome: TestOutcome,
 
-    /// The names of the named [`crate::BrowserTests`] the test runs in, outermost first, joined
-    /// with ` / `, as in the [`GroupRecord::name`] of the innermost one. `None` if it runs in no
-    /// named group.
+    /// The names of the named [`crate::TestSuite`]s the test runs in, outermost first, joined
+    /// with ` / `, as in the [`SuiteRecord::name`] of the innermost one. `None` if it runs in no
+    /// named suite.
     pub path: Option<String>,
 
-    /// The name of the test's [`crate::TestGroup`], if it is in one. The name
-    /// [`TestFilter::with_group`](crate::TestFilter::with_group) selects it by.
-    pub group: Option<String>,
+    /// The test's tags (see [`crate::BrowserTest::tags`]), which
+    /// [`TestFilter::with_tag`](crate::TestFilter::with_tag) selects it by.
+    pub tags: Vec<String>,
 
     /// How the test's session was prepared (created, or reset after an earlier test), and how long
     /// the test waited for it. `None` if no session was requested (e.g. one of the test's metadata
@@ -381,14 +381,14 @@ impl Display for BrowserTestRunReport {
             FormatDuration(self.session_teardown_time()),
         )?;
         writeln!(f, "  test bodies:    {}", FormatDuration(self.body_time()))?;
-        if !self.groups.is_empty() {
-            writeln!(f, "  groups:")?;
-            for group in &self.groups {
+        if !self.suites.is_empty() {
+            writeln!(f, "  suites:")?;
+            for suite in &self.suites {
                 writeln!(
                     f,
                     "    {:>9}  {}",
-                    FormatDuration(group.duration),
-                    group.name
+                    FormatDuration(suite.duration),
+                    suite.name
                 )?;
             }
         }
@@ -520,7 +520,7 @@ mod tests {
             name: name.to_owned(),
             outcome: TestOutcome::Passed,
             path: None,
-            group: None,
+            tags: Vec::new(),
             session: Some(session),
             body: Some(Duration::from_millis(body_ms)),
             teardown: None,
@@ -692,7 +692,7 @@ mod tests {
             webdriver_startup: Duration::from_millis(300),
             webdriver_shutdown: Duration::from_millis(50),
             tests: vec![record(0, "works", session(800, 0), 1000), failed],
-            groups: vec![GroupRecord {
+            suites: vec![SuiteRecord {
                 name: "after all".to_owned(),
                 duration: Duration::from_millis(1200),
             }],
@@ -709,7 +709,7 @@ mod tests {
         assert_that!(summary.as_str())
             .contains("broken [failed] (session 400ms, waited 15ms, body 2.50s, quit 40ms)");
         assert_that!(summary.as_str()).contains("works (session 800ms, body 1.00s)");
-        assert_that!(summary.as_str()).contains("  groups:\n        1.20s  after all");
+        assert_that!(summary.as_str()).contains("  suites:\n        1.20s  after all");
         let broken = summary.find("broken").expect("summary lists the slow test");
         let works = summary.find("works").expect("summary lists the fast test");
         assert_that!(broken).is_less_than(works);

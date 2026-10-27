@@ -11,7 +11,7 @@ use futures_util::FutureExt as _;
 use rootcause::{Report, markers::Dynamic};
 use tracing::Instrument as _;
 
-use super::{Env, plan::PreparedTest, worker::Job};
+use super::{Env, plan::QueuedTest, worker::Job};
 use crate::{
     BrowserTestError,
     failure_report::{
@@ -75,19 +75,14 @@ where
         let test = self.assigned_test(run.index);
         let (outcome, result) =
             test_outcome(&test.name, run.failure, run.recent_steps, session_result);
+        let session = SessionTiming {
+            preparation: run.preparation,
+            wait: run.wait,
+        };
         let record = BrowserTestRecord {
-            index: run.index,
-            name: test.name.clone(),
-            outcome,
-            path: test.placement.path.clone(),
-            group: test.placement.group.clone(),
-            session: Some(SessionTiming {
-                preparation: run.preparation,
-                wait: run.wait,
-            }),
-            body: run.body,
             teardown,
             steps: run.steps,
+            ..test.record(outcome, Some(session), run.body)
         };
         self.finish(record, result);
     }
@@ -114,11 +109,12 @@ where
         failure: None,
         quit_start: None,
     };
-    let timeouts = if test.timeouts.is_empty() {
+    let timeouts = test.ready().timeouts;
+    let timeouts = if timeouts.is_empty() {
         Ok(())
     } else {
         session
-            .update_timeouts(test.timeouts.into_thirtyfour_timeout_configuration())
+            .update_timeouts(timeouts.into_thirtyfour_timeout_configuration())
             .await
     };
     match timeouts {
@@ -213,7 +209,7 @@ fn failure_report(name: &str, failure: Failure) -> (TestOutcome, Report<BrowserT
 async fn run_body<Context>(
     env: &Env<'_, Context>,
     session: &Session,
-    test: &PreparedTest<Context>,
+    test: &QueuedTest<Context>,
     run: &mut JobRun,
 ) where
     Context: Sync + ?Sized,
@@ -230,16 +226,17 @@ async fn run_body<Context>(
         "browser_test",
         test = %name,
         path = test.placement.path.as_deref().unwrap_or_default(),
-        group = test.placement.group.as_deref().unwrap_or_default(),
+        tags = %test.tags.join(", "),
     );
     let start = Instant::now();
     // `run` is called in the block, so that a panic before it returns its future (in a
     // hand-written implementation) is caught as well.
-    let body = async { test.test.run(session, env.context).await };
+    let prepared = test.ready();
+    let body = async { prepared.test.run(session, env.context).await };
     let body = recorder
         .scope(AssertUnwindSafe(body).catch_unwind())
         .instrument(span);
-    let result = tokio::time::timeout(test.time_limit, body).await;
+    let result = tokio::time::timeout(prepared.time_limit, body).await;
     run.body = Some(start.elapsed());
     run.steps = recorder.take();
     run.recent_steps = recorder.recent_steps();
@@ -261,7 +258,7 @@ async fn run_body<Context>(
         Err(_elapsed) => {
             tracing::error!("Browser test '{name}' exceeded its time limit, checking its pages.");
             Some(Failure::TimedOut {
-                limit: test.time_limit,
+                limit: prepared.time_limit,
                 pages: close_frozen_pages(session).await,
             })
         }

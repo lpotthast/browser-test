@@ -15,8 +15,8 @@ use thirtyfour::{ChromeCapabilities, error::WebDriverResult};
 #[cfg(doc)]
 use crate::TestSettings;
 use crate::{
-    BrowserTestError, BrowserTests, Cancellation, DriverOutput, ElementQueryWait, FailurePolicy,
-    Pause, ProgressWarnings, SessionReuse, Timeouts,
+    BrowserTestError, Cancellation, DriverOutput, ElementQueryWait, FailurePolicy, Pause,
+    ProgressWarnings, SessionReuse, TestSuite, Timeouts,
     cancellation::cancelled_result,
     driver_output::{DriverOutputCapture, attach_browser_driver_output_to_result},
     env::{InvalidEnvVar, env_flag},
@@ -80,7 +80,7 @@ impl Visibility {
 
 /// Runs browser tests.
 ///
-/// Pass the tests to [`Self::run`] as [`BrowserTests`], together with the context every test
+/// Pass the tests to [`Self::run`] as [`TestSuite`], together with the context every test
 /// receives. The runner downloads Chrome for Testing, starts chromedriver, runs every test in a
 /// `WebDriver` session of its own, and shuts chromedriver down at the end. The builder methods
 /// configure the browser, how sessions are prepared, and what happens when tests fail or run
@@ -302,7 +302,7 @@ impl BrowserTestRunner {
     /// session ready when its turn comes. Sessions are quit in the background after their test.
     ///
     /// Defaults to the number of tests that can run at the same time (see
-    /// [`BrowserTests::parallel`]): one spare session per running test. With
+    /// [`TestSuite::parallel`]): one spare session per running test. With
     /// [`Self::with_session_reuse`], sessions return to the pool reset after their test, which is
     /// much faster than starting a browser: the default is then one spare session per eight tests
     /// that can run at the same time (rounded up). Up to `parallel tests + spare sessions`
@@ -385,7 +385,7 @@ impl BrowserTestRunner {
     /// resumed.
     ///
     /// `tests` decides which tests run one after another and which at the same time, see
-    /// [`BrowserTests`]. The run stops on the first failure by default. Use
+    /// [`TestSuite`]. The run stops on the first failure by default. Use
     /// [`Self::with_failure_policy`] to run every test and return all failures as child reports on
     /// one aggregate report.
     ///
@@ -410,7 +410,7 @@ impl BrowserTestRunner {
     pub async fn run<Context>(
         &self,
         context: &Context,
-        tests: BrowserTests<Context>,
+        tests: TestSuite<Context>,
     ) -> Result<(), Report<BrowserTestError>>
     where
         Context: Sync + ?Sized,
@@ -444,7 +444,7 @@ impl BrowserTestRunner {
     async fn run_reporting<Context>(
         &self,
         context: &Context,
-        tests: BrowserTests<Context>,
+        tests: TestSuite<Context>,
         cancellation: &CancellationToken,
         report: &mut BrowserTestRunReport,
     ) -> Result<(), Report<BrowserTestError>>
@@ -486,7 +486,7 @@ impl BrowserTestRunner {
             .run_tests(&chrome, &profiles, cancellation, context, tests)
             .await;
         report.tests = execution.records;
-        report.groups = execution.groups;
+        report.suites = execution.suites;
         report.released_session_teardown = execution.released_session_teardown;
         report.not_started = execution.not_started;
         let test_result = execution.result;
@@ -533,7 +533,7 @@ impl BrowserTestRunner {
         profiles: &RunProfiles,
         cancellation: &CancellationToken,
         context: &Context,
-        tests: BrowserTests<Context>,
+        tests: TestSuite<Context>,
     ) -> Execution
     where
         Context: Sync + ?Sized,
@@ -710,7 +710,7 @@ mod tests {
             },
         );
 
-        let result = runner.run(&(), BrowserTests::<()>::sequential()).await;
+        let result = runner.run(&(), TestSuite::<()>::sequential()).await;
 
         assert_that!(result).is_ok();
         assert_that!(calls.load(Ordering::SeqCst)).is_equal_to(0);

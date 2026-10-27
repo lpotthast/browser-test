@@ -72,6 +72,14 @@ pub(crate) fn expand(args: Arguments, mut function: ItemFn) -> manyhow::Result<T
     let crate_path = crate_path()?;
     let function_name = function.sig.ident.unraw().to_string();
     let name = struct_name(&function.sig.ident, &function_name)?;
+    // Only a test with tags has tags of its own.
+    let tags = args.tags.filter(|tags| !tags.is_empty()).map(|tags| {
+        quote! {
+            fn tags(&self) -> ::std::vec::Vec<::std::borrow::Cow<'_, str>> {
+                ::std::vec![#(::std::borrow::Cow::Borrowed(#tags)),*]
+            }
+        }
+    });
     // Only a test with a time limit has settings of its own. Spanned at the expression, where one
     // of another type is reported.
     let settings = args.time_limit.map(|limit| {
@@ -154,6 +162,8 @@ pub(crate) fn expand(args: Arguments, mut function: ItemFn) -> manyhow::Result<T
             fn description(&self) -> ::std::option::Option<::std::borrow::Cow<'_, str>> {
                 #description
             }
+
+            #tags
 
             #settings
 

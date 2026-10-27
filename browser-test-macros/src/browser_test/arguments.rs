@@ -2,8 +2,9 @@
 
 use manyhow::error_message;
 use syn::{
-    Expr, Ident, LitStr, Token,
+    Expr, Ident, LitStr, Token, bracketed,
     parse::{Parse, ParseStream},
+    punctuated::Punctuated,
 };
 
 /// The arguments of `#[browser_test(...)]`, all optional.
@@ -11,6 +12,8 @@ use syn::{
 pub(crate) struct Arguments {
     /// `name = "..."`: the test's name, replacing the module-qualified function name.
     pub(super) name: Option<LitStr>,
+    /// `tags = ["...", ...]`: the test's tags.
+    pub(super) tags: Option<Vec<LitStr>>,
     /// `time_limit = <expr>`: the test's time limit, a `std::time::Duration`.
     pub(super) time_limit: Option<Expr>,
 }
@@ -22,11 +25,12 @@ impl Parse for Arguments {
             let key: Ident = input.parse()?;
             let duplicate = match key.to_string().as_str() {
                 "name" => args.name.is_some(),
+                "tags" => args.tags.is_some(),
                 "time_limit" => args.time_limit.is_some(),
                 _ => {
                     return Err(error_message!(
                         key,
-                        "expected `name = \"...\"` or `time_limit = <Duration>`"
+                        "expected `name = \"...\"`, `tags = [\"...\"]` or `time_limit = <Duration>`"
                     )
                     .into());
                 }
@@ -41,6 +45,27 @@ impl Parse for Arguments {
                     return Err(error_message!(name, "test names must not be empty").into());
                 }
                 args.name = Some(name);
+            } else if key == "tags" {
+                let content;
+                bracketed!(content in input);
+                let tags = Punctuated::<LitStr, Token![,]>::parse_terminated(&content)?;
+                let mut seen = Vec::new();
+                for tag in &tags {
+                    let value = tag.value();
+                    let problem = if value.is_empty() {
+                        "tags must not be empty"
+                    } else if value.contains(',') || value.trim() != value {
+                        // `BROWSER_TEST_TAG` splits at commas and trims, so it couldn't select it.
+                        "tags must not contain commas or start or end with whitespace"
+                    } else if seen.contains(&value) {
+                        "duplicate tag"
+                    } else {
+                        seen.push(value);
+                        continue;
+                    };
+                    return Err(error_message!(tag, "{problem}").into());
+                }
+                args.tags = Some(tags.into_iter().collect());
             } else {
                 args.time_limit = Some(input.parse()?);
             }
@@ -55,6 +80,8 @@ impl Parse for Arguments {
 #[cfg(test)]
 mod tests {
     use quote::ToTokens;
+
+    use syn::LitStr;
 
     use super::Arguments;
 
@@ -78,6 +105,16 @@ mod tests {
     }
 
     #[test]
+    fn tags_arguments_accept_lists_of_strings() {
+        assert!(syn::parse_str::<Arguments>("").unwrap().tags.is_none());
+        let args = syn::parse_str::<Arguments>("tags = [\"button\", \"keyboard\",]").unwrap();
+        let tags: Vec<_> = args.tags.unwrap().iter().map(LitStr::value).collect();
+        assert_eq!(tags, ["button", "keyboard"]);
+        let args = syn::parse_str::<Arguments>("tags = []").unwrap();
+        assert_eq!(args.tags.unwrap(), Vec::<LitStr>::new());
+    }
+
+    #[test]
     fn name_arguments_accept_strings_and_reject_invalid_options() {
         assert!(syn::parse_str::<Arguments>("").unwrap().name.is_none());
         let args = syn::parse_str::<Arguments>("name = \"keyboard::events\",").unwrap();
@@ -85,7 +122,7 @@ mod tests {
         for (source, message) in [
             (
                 "path = \"/keyboard\"",
-                "expected `name = \"...\"` or `time_limit = <Duration>`",
+                "expected `name = \"...\"`, `tags = [\"...\"]` or `time_limit = <Duration>`",
             ),
             (
                 "name = \"one\", name = \"two\"",
@@ -93,6 +130,19 @@ mod tests {
             ),
             ("name = 42", "expected string literal"),
             ("name = \"\"", "test names must not be empty"),
+            ("tags = \"button\"", "expected square brackets"),
+            ("tags = [\"button\", 42]", "expected string literal"),
+            ("tags = [\"button\", \"\"]", "tags must not be empty"),
+            (
+                "tags = [\"button,focus\"]",
+                "tags must not contain commas or start or end with whitespace",
+            ),
+            (
+                "tags = [\" button\"]",
+                "tags must not contain commas or start or end with whitespace",
+            ),
+            ("tags = [\"button\", \"button\"]", "duplicate tag"),
+            ("tags = [], tags = []", "duplicate `tags` argument"),
             (
                 "time_limit = Duration::from_secs(1), time_limit = Duration::from_secs(2)",
                 "duplicate `time_limit` argument",

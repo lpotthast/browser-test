@@ -1,8 +1,14 @@
 use std::{
+    borrow::Cow,
     env,
     ffi::{OsStr, OsString},
     sync::{Mutex, MutexGuard},
 };
+
+use rootcause::Report;
+use thirtyfour::WebDriver;
+
+use crate::{BrowserTest, TestSettings};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -59,5 +65,73 @@ impl Drop for EnvVarGuard {
                 None => env::remove_var(self.name),
             }
         }
+    }
+}
+
+/// A metadata method of [`StubTest`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Metadata {
+    Name,
+    Tags,
+    Settings,
+}
+
+/// A passing test with the given metadata, or one whose metadata method panics.
+pub(crate) struct StubTest {
+    name: &'static str,
+    tags: &'static [&'static str],
+    settings: TestSettings,
+    panics_in: Option<Metadata>,
+}
+
+impl StubTest {
+    pub(crate) const fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            tags: &[],
+            settings: TestSettings::new(),
+            panics_in: None,
+        }
+    }
+
+    pub(crate) const fn with_tags(mut self, tags: &'static [&'static str]) -> Self {
+        self.tags = tags;
+        self
+    }
+
+    pub(crate) const fn with_settings(mut self, settings: TestSettings) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    pub(crate) const fn panicking_in(mut self, metadata: Metadata) -> Self {
+        self.panics_in = Some(metadata);
+        self
+    }
+
+    fn panic_if(&self, metadata: Metadata) {
+        assert!(self.panics_in != Some(metadata), "{} panics", self.name);
+    }
+}
+
+#[async_trait::async_trait]
+impl BrowserTest for StubTest {
+    fn name(&self) -> Cow<'_, str> {
+        self.panic_if(Metadata::Name);
+        Cow::Borrowed(self.name)
+    }
+
+    fn tags(&self) -> Vec<Cow<'_, str>> {
+        self.panic_if(Metadata::Tags);
+        self.tags.iter().copied().map(Cow::Borrowed).collect()
+    }
+
+    fn settings(&self) -> TestSettings {
+        self.panic_if(Metadata::Settings);
+        self.settings
+    }
+
+    async fn run(&self, _driver: &WebDriver, (): &()) -> Result<(), Report> {
+        Ok(())
     }
 }

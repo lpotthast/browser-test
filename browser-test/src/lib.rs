@@ -39,15 +39,15 @@ pub use filter::TestFilter;
 pub use pause::Pause;
 pub use progress::ProgressWarnings;
 pub use report::{
-    BrowserTestRecord, BrowserTestRunReport, GroupRecord, SessionPreparation, SessionTiming,
-    StepStats, TestOutcome,
+    BrowserTestRecord, BrowserTestRunReport, SessionPreparation, SessionTiming, StepStats,
+    SuiteRecord, TestOutcome,
 };
 pub use report_consumer::{RunReportConsumer, StderrSummary, StdoutSummary, TracingSummary};
 pub use runner::{BrowserTestRunner, Visibility};
 pub use scheduler::{FailurePolicy, Parallelism};
 pub use session_reuse::{CachedData, KeptCaches, SessionReset, SessionReuse};
 pub use step::{Step, StepExt};
-pub use test_case::{BrowserTest, BrowserTests, NamedTest, TestGroup};
+pub use test_case::{BrowserTest, TestSuite};
 pub use test_settings::TestSettings;
 pub use timeout::Timeouts;
 pub use wait::ElementQueryWait;

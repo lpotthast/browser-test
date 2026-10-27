@@ -14,7 +14,7 @@ use syn::ItemFn;
 /// ```
 /// use std::time::Duration;
 ///
-/// use browser_test::{BrowserTest, BrowserTests, browser_test, thirtyfour::WebDriver};
+/// use browser_test::{BrowserTest, TestSuite, browser_test, thirtyfour::WebDriver};
 /// use rootcause::Report;
 ///
 /// /// The home page greets the visitor.
@@ -25,7 +25,7 @@ use syn::ItemFn;
 /// }
 ///
 /// /// Opens the page itself, through the session's `WebDriver`.
-/// #[browser_test(name = "navigation::home", time_limit = Duration::from_secs(10))]
+/// #[browser_test(name = "navigation::home", tags = ["smoke"], time_limit = Duration::from_secs(10))]
 /// async fn opens_home_page(driver: &WebDriver, base_url: &str) -> Result<(), Report> {
 ///     driver.goto(base_url).await?;
 ///     Ok(())
@@ -34,10 +34,11 @@ use syn::ItemFn;
 /// assert!(ShowsGreeting.name().ends_with("::shows_greeting"));
 /// assert_eq!(ShowsGreeting.description().as_deref(), Some("The home page greets the visitor."));
 /// assert_eq!(OpensHomePage.name(), "navigation::home");
+/// assert_eq!(OpensHomePage.tags(), ["smoke"]);
 /// assert_eq!(OpensHomePage.settings().time_limit(), Some(Duration::from_secs(10)));
 /// assert_eq!(ShowsGreeting.settings().time_limit(), None);
 ///
-/// let tests: BrowserTests<str> = BrowserTests::sequential()
+/// let tests: TestSuite<str> = TestSuite::sequential()
 ///     .with(ShowsGreeting)
 ///     .with(OpensHomePage);
 /// ```
@@ -46,7 +47,7 @@ use syn::ItemFn;
 ///
 /// `async fn shows_greeting` becomes `struct ShowsGreeting;`, a unit struct named in `PascalCase`
 /// with the function's visibility, its doc comments and its `#[cfg]`s. It derives `Debug`,
-/// `Clone`, `Copy` and `Default`. Register it with `BrowserTests::with(ShowsGreeting)`. The
+/// `Clone`, `Copy` and `Default`. Register it with `TestSuite::with(ShowsGreeting)`. The
 /// function itself stays as the test's body, private to its module, under its own name (which
 /// failure reports and `#[tracing::instrument]` show), and all its other attributes (e.g.
 /// `#[allow]`, `#[expect]`, `#[tracing::instrument]`) stay on it.
@@ -57,6 +58,8 @@ use syn::ItemFn;
 ///   one that stays the same when the function moves to another module.
 /// - **Description**: `BrowserTest::description` returns the doc comments, as written, without the
 ///   space after each `///`. Paragraphs and indentation are kept. `None` without doc comments.
+/// - **Tags**: `BrowserTest::tags` returns the tags `tags = ["...", ...]` lists, if given, which
+///   `TestFilter::with_tag` selects. No tags otherwise.
 /// - **Settings**: `BrowserTest::settings` takes everything from the runner, except the time limit
 ///   `time_limit = ...` sets, if given (any expression of type `std::time::Duration`). Implement
 ///   `BrowserTest` yourself, with `BrowserTest::settings`, for tests that need their own timeouts,
@@ -81,7 +84,7 @@ use syn::ItemFn;
 /// A single `&WebDriver` argument is rejected, as a single argument is the context. Take
 /// `(driver: &WebDriver, context: &Context)`, with `&()` for a run without context.
 ///
-/// A test never registered with `BrowserTests` warns as an unused function (`dead_code`), unless
+/// A test never registered with `TestSuite` warns as an unused function (`dead_code`), unless
 /// its struct is public.
 ///
 /// Functions whose struct would shadow a name of the standard prelude in the function's module are

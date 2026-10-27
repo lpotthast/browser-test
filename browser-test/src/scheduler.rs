@@ -10,7 +10,7 @@ use crate::{
 /// Default environment variable read by [`Parallelism::from_env`].
 pub(crate) const DEFAULT_PARALLELISM_ENV: &str = "BROWSER_TEST_PARALLELISM";
 
-/// How many entries of a [`crate::BrowserTests`] group run at the same time, each test in its own
+/// How many entries of a [`crate::TestSuite`] run at the same time, each test in its own
 /// session.
 ///
 /// Sequential by default. Tests take parallel slots in their given order. A test whose browser is
@@ -45,9 +45,9 @@ impl Parallelism {
     /// # Examples
     ///
     /// ```rust
-    /// use browser_test::{BrowserTests, Parallelism};
+    /// use browser_test::{TestSuite, Parallelism};
     ///
-    /// let tests = BrowserTests::<()>::parallel(Parallelism::parallel(4));
+    /// let tests = TestSuite::<()>::parallel(Parallelism::parallel(4));
     /// ```
     #[must_use]
     #[track_caller]
@@ -96,7 +96,7 @@ impl Parallelism {
 pub enum FailurePolicy {
     /// Stop starting tests after the first failed test.
     ///
-    /// Tests in groups marked [`crate::BrowserTests::run_always`] still run. Tests that already
+    /// Tests in suites marked [`crate::TestSuite::run_always`] still run. Tests that already
     /// started when the failure occurred run to completion, and their failures are reported too.
     /// A test still waiting for its browser session doesn't start. The failures are returned as
     /// child reports of one [`crate::BrowserTestError::RunTests`] report.

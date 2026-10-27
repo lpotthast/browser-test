@@ -10,7 +10,7 @@
 
 You write a test as an async function marked with `#[browser_test]`, or as a type that implements the `BrowserTest`
 trait. Each test gets a [`thirtyfour`](https://docs.rs/thirtyfour) `WebDriver` to control the browser, and a context
-of your choice, such as your app's base URL. Collect the tests in `BrowserTests` and pass them to a `BrowserTestRunner`,
+of your choice, such as your app's base URL. Collect the tests in a `TestSuite` and pass it to a `BrowserTestRunner`,
 which handles everything else. It downloads Chrome for Testing, starts chromedriver, creates a browser session for each
 test, runs the tests one after another or in parallel, and shuts everything down at the end. When a test fails, the
 runner shows the line of test code that failed and the steps the test took before. It also records how long each test
@@ -40,8 +40,9 @@ test for you.
 ## What It Does
 
 - Downloads and caches Chrome for Testing and starts the matching chromedriver, using `chrome-for-testing-manager`.
-- Runs tests one after another or in parallel, in named groups that can be nested. By default, it stops at the first
+- Runs tests one after another or in parallel, in named suites that can be nested. By default, it stops at the first
   failure.
+- Runs only the tests you select by name or tag, e.g. through environment variables.
 - Gives every test a clean browser. New sessions start in the background while earlier tests run. With session reuse,
   a finished test's browser is reset and handed to the next test instead.
 - Points each failure at the line of test code that failed, along with the calls that led there and the last steps
@@ -71,7 +72,7 @@ Tests return `rootcause` reports as their errors, and Tokio provides the async r
 your tests and the runner always use the same version:
 
 ```rust
-use browser_test::{BrowserTest, BrowserTestRunner, BrowserTests};
+use browser_test::{BrowserTest, BrowserTestRunner, TestSuite};
 use browser_test::thirtyfour::{By, WebDriver, prelude::*};
 ```
 
@@ -83,7 +84,7 @@ This test opens Wikipedia and checks the page title.
 
 ```rust,no_run
 use browser_test::thirtyfour::WebDriver;
-use browser_test::{BrowserTestError, BrowserTestRunner, BrowserTests, Cancellation, browser_test};
+use browser_test::{BrowserTestError, BrowserTestRunner, Cancellation, TestSuite, browser_test};
 use rootcause::{Report, report};
 
 struct Context {
@@ -111,14 +112,14 @@ async fn main() -> Result<(), Report<BrowserTestError>> {
     };
 
     BrowserTestRunner::new(Cancellation::on_shutdown_signals())
-        .run(&context, BrowserTests::sequential().with(PageTitle))
+        .run(&context, TestSuite::sequential().with(PageTitle))
         .await
 }
 ```
 
 `#[browser_test]` turns `page_title` into a unit struct named `PageTitle` that implements `BrowserTest<Context>` (see
-[Writing Tests](#writing-tests)). You add it to a `BrowserTests` collection and pass that to the runner together with
-the context. `run` returns an error if the runner itself fails, a test returns an error, panics or times out, or the
+[Writing Tests](#writing-tests)). You add it to a `TestSuite` and pass that to the runner together with the
+context. `run` returns an error if the runner itself fails, a test returns an error, panics or times out, or the
 run is cancelled. The error is a `Report<BrowserTestError>` with the details.
 
 The runner works without further settings. [Configuring the Runner](#configuring-the-runner) shows every option, and
@@ -178,18 +179,19 @@ timeouts or a browser no other test has used.
 
 ## Organizing Tests
 
-[`BrowserTests`] is a group of tests. A group runs its entries one after another (`BrowserTests::sequential()`) or up
-to a given number at a time (`BrowserTests::parallel(...)`), and groups can be nested. For example, a sequential group
+[`TestSuite`] holds tests and nested suites, and decides how they run: one after another (`TestSuite::sequential()`)
+or up to a given number at a time (`TestSuite::parallel(...)`). For example, a sequential suite
 inside a parallel one keeps a few tests that share server state from overlapping, while the other tests run in
 parallel. Only run tests in parallel if they can safely share your application's state.
 
-By default, the runner starts no further tests after the first failure. Groups marked with `run_always()` still run,
+By default, the runner starts no further tests after the first failure. Suites marked with `run_always()` still run,
 which suits checks that need to see the whole run. With [`FailurePolicy::RunAll`][FailurePolicy], every test runs and
 all failures are reported together.
 
-To run only some of your tests, select them with a [`TestFilter`], by name or by the [`TestGroup`] you put them in.
-`TestFilter::from_env()` reads the selection from `BROWSER_TEST_FILTER` and `BROWSER_TEST_GROUP`. The runner runs every
-test it is given, so apply the filter with `BrowserTests::filter`.
+To run only some of your tests, select them with a [`TestFilter`], by name or by tag. Tag a test with
+`#[browser_test(tags = ["button"])]`, or return its tags from `BrowserTest::tags`. Tags don't change how tests run, and
+are independent of the suites they run in. `TestFilter::from_env()` reads the selection from `BROWSER_TEST_FILTER` and
+`BROWSER_TEST_TAG`. The runner runs every test it is given, so apply the filter with `TestSuite::filter`.
 
 ## Configuring the Runner
 
@@ -259,7 +261,7 @@ BROWSER_TEST_VISIBLE=1 BROWSER_TEST_PAUSE=1 BROWSER_TEST_DRIVER_OUTPUT=1 cargo t
 | `BROWSER_TEST_PARALLELISM`              | `Parallelism::from_env()`  | Number of tests to run at the same time.      |
 | `BROWSER_TEST_SESSION_REUSE`            | `SessionReuse::from_env()` | Turn session reuse on or off.                 |
 | `BROWSER_TEST_FILTER`                   | `TestFilter::from_env()`   | Test name substrings, comma-separated.        |
-| `BROWSER_TEST_GROUP`                    | `TestFilter::from_env()`   | Exact test group names, comma-separated.      |
+| `BROWSER_TEST_TAG`                      | `TestFilter::from_env()`   | Exact test tags, comma-separated.             |
 
 Boolean variables accept `0`/`1`, `false`/`true`, `no`/`yes`, `off`/`on` and `disabled`/`enabled`, regardless of case.
 The pause gives you time to look at the app or attach a debugger before the browser starts.
@@ -379,8 +381,9 @@ cargo run --manifest-path examples/minimal/Cargo.toml
 cargo run --manifest-path examples/advanced/Cargo.toml
 ```
 
-Both open Wikipedia in a visible browser. The advanced example adds a parallel group, timed steps, the run summary,
-tracing spans, a custom error type for tests, explicit timeouts, driver output capture and the pause prompt.
+Both open Wikipedia in a visible browser. The advanced example adds a parallel suite, test tags and filters, timed steps,
+the run summary, tracing spans, a custom error type for tests, explicit timeouts, driver output capture and the pause
+prompt.
 
 ## Leptos Projects
 
@@ -399,10 +402,9 @@ at your option.
 
 [browser_test]: https://docs.rs/browser-test/latest/browser_test/attr.browser_test.html
 [`BrowserTest`]: https://docs.rs/browser-test/latest/browser_test/trait.BrowserTest.html
-[`BrowserTests`]: https://docs.rs/browser-test/latest/browser_test/struct.BrowserTests.html
+[`TestSuite`]: https://docs.rs/browser-test/latest/browser_test/struct.TestSuite.html
 [FailurePolicy]: https://docs.rs/browser-test/latest/browser_test/enum.FailurePolicy.html
 [`TestFilter`]: https://docs.rs/browser-test/latest/browser_test/struct.TestFilter.html
-[`TestGroup`]: https://docs.rs/browser-test/latest/browser_test/struct.TestGroup.html
 [`BrowserTestRunner`]: https://docs.rs/browser-test/latest/browser_test/struct.BrowserTestRunner.html
 [with_spare_sessions]: https://docs.rs/browser-test/latest/browser_test/struct.BrowserTestRunner.html#method.with_spare_sessions
 [`SessionReuse`]: https://docs.rs/browser-test/latest/browser_test/struct.SessionReuse.html

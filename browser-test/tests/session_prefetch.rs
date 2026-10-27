@@ -12,9 +12,9 @@ use std::{
 
 use assertr::prelude::*;
 use browser_test::{
-    BrowserTest, BrowserTestError, BrowserTestRunReport, BrowserTestRunner, BrowserTests,
-    CachedData, Cancellation, ElementQueryWait, FailurePolicy, Parallelism, SessionPreparation,
-    SessionReset, SessionReuse, StepExt, TestOutcome, TestSettings, TracingSummary, async_trait,
+    BrowserTest, BrowserTestError, BrowserTestRunReport, BrowserTestRunner, CachedData,
+    Cancellation, ElementQueryWait, FailurePolicy, Parallelism, SessionPreparation, SessionReset,
+    SessionReuse, StepExt, TestOutcome, TestSettings, TestSuite, TracingSummary, async_trait,
     thirtyfour::{ChromiumLikeCapabilities, WebDriver},
 };
 use rootcause::{Report, report};
@@ -81,6 +81,7 @@ struct Visit {
     fresh_session: bool,
     /// Whether the test has an element query wait of its own, and so a session created for it.
     dedicated: bool,
+    tags: &'static [&'static str],
     tracker: Arc<Tracker>,
 }
 
@@ -92,6 +93,7 @@ impl Visit {
             fail: false,
             fresh_session: false,
             dedicated: false,
+            tags: &[],
             tracker: Arc::clone(tracker),
         }
     }
@@ -101,6 +103,10 @@ impl Visit {
 impl BrowserTest<str> for Visit {
     fn name(&self) -> Cow<'_, str> {
         format!("visit {}", self.index).into()
+    }
+
+    fn tags(&self) -> Vec<Cow<'_, str>> {
+        self.tags.iter().copied().map(Cow::Borrowed).collect()
     }
 
     fn settings(&self) -> TestSettings {
@@ -136,17 +142,17 @@ impl BrowserTest<str> for Visit {
     }
 }
 
-fn visits(count: usize, body: Duration, tracker: &Arc<Tracker>) -> BrowserTests<str> {
-    visits_in(BrowserTests::sequential(), count, body, tracker)
+fn visits(count: usize, body: Duration, tracker: &Arc<Tracker>) -> TestSuite<str> {
+    visits_in(TestSuite::sequential(), count, body, tracker)
 }
 
 fn visits_in(
-    group: BrowserTests<str>,
+    suite: TestSuite<str>,
     count: usize,
     body: Duration,
     tracker: &Arc<Tracker>,
-) -> BrowserTests<str> {
-    (0..count).fold(group, |tests, index| {
+) -> TestSuite<str> {
+    (0..count).fold(suite, |tests, index| {
         tests.with(Visit::new(index, body, tracker))
     })
 }
@@ -158,7 +164,7 @@ struct Run {
 }
 
 /// Run `tests`, capturing the run's report through a report consumer.
-async fn run(runner: BrowserTestRunner, base_url: &str, tests: BrowserTests<str>) -> Run {
+async fn run(runner: BrowserTestRunner, base_url: &str, tests: TestSuite<str>) -> Run {
     let captured = Arc::new(Mutex::new(None));
     let consumer_capture = Arc::clone(&captured);
     let result = runner
@@ -262,7 +268,7 @@ async fn parallel_tests_start_in_order_on_bounded_slots() {
         runner(),
         base_url.as_str(),
         visits_in(
-            BrowserTests::parallel(Parallelism::parallel(2)),
+            TestSuite::parallel(Parallelism::parallel(2)),
             5,
             Duration::from_millis(500),
             &tracker,
@@ -291,7 +297,7 @@ async fn fail_fast_does_not_start_tests_whose_session_is_ready() {
     let outcome = run(
         runner().with_failure_policy(FailurePolicy::FailFast),
         base_url.as_str(),
-        BrowserTests::sequential()
+        TestSuite::sequential()
             .with(failing)
             .with(Visit::new(1, Duration::ZERO, &tracker))
             .with(Visit::new(2, Duration::ZERO, &tracker)),
@@ -319,11 +325,11 @@ async fn fail_fast_does_not_start_tests_waiting_for_their_session() {
     let outcome = run(
         runner().with_failure_policy(FailurePolicy::FailFast),
         base_url.as_str(),
-        BrowserTests::sequential()
+        TestSuite::sequential()
             // While it runs, a spare session gets ready for the failing test.
             .with(Visit::new(0, Duration::from_secs(1), &tracker))
             .with_nested(
-                BrowserTests::parallel(Parallelism::parallel(2))
+                TestSuite::parallel(Parallelism::parallel(2))
                     .with(failing)
                     .with(waiting),
             ),
@@ -383,7 +389,7 @@ async fn every_test_gets_a_fresh_browser() {
     let result = runner()
         .run(
             base_url.as_str(),
-            BrowserTests::sequential()
+            TestSuite::sequential()
                 .with(Storage { write: true })
                 .with(Storage { write: false }),
         )
@@ -394,18 +400,24 @@ async fn every_test_gets_a_fresh_browser() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
-async fn nested_groups_limit_what_runs_at_the_same_time() {
+async fn nested_suites_limit_what_runs_at_the_same_time() {
     let base_url = serve_fixture().await;
     let all = Arc::new(Tracker::default());
     let serial = Arc::new(Tracker::default());
     let body = Duration::from_millis(700);
-    let tests = BrowserTests::parallel(Parallelism::parallel(3))
-        .with(Visit::new(0, body, &all))
+    let tests = TestSuite::parallel(Parallelism::parallel(3))
+        .with(Visit {
+            tags: &["smoke"],
+            ..Visit::new(0, body, &all)
+        })
         .with(Visit::new(1, body, &all))
         .with_nested(
-            BrowserTests::sequential()
+            TestSuite::sequential()
                 .named("serial")
-                .with(Visit::new(2, body, &serial))
+                .with(Visit {
+                    tags: &["smoke", "checkout"],
+                    ..Visit::new(2, body, &serial)
+                })
                 .with(Visit::new(3, body, &serial)),
         );
 
@@ -422,15 +434,27 @@ async fn nested_groups_limit_what_runs_at_the_same_time() {
         .map(|test| test.path.as_deref())
         .collect();
     assert_that!(paths).is_equal_to(vec![None, None, Some("serial"), Some("serial")]);
-    assert_that!(outcome.report.groups).has_length(1);
-    assert_that!(outcome.report.groups[0].name.as_str()).is_equal_to("serial");
-    // The serial group ran its two tests one after another, alongside the other two tests.
-    assert_that!(outcome.report.groups[0].duration).is_greater_or_equal_to(body * 2);
+    let tags: Vec<Vec<String>> = outcome
+        .report
+        .tests
+        .iter()
+        .map(|test| test.tags.clone())
+        .collect();
+    assert_that!(tags).is_equal_to(vec![
+        vec!["smoke".to_owned()],
+        Vec::new(),
+        vec!["smoke".to_owned(), "checkout".to_owned()],
+        Vec::new(),
+    ]);
+    assert_that!(outcome.report.suites).has_length(1);
+    assert_that!(outcome.report.suites[0].name.as_str()).is_equal_to("serial");
+    // The serial suite ran its two tests one after another, alongside the other two tests.
+    assert_that!(outcome.report.suites[0].duration).is_greater_or_equal_to(body * 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
-async fn run_all_runs_the_rest_of_a_sequential_group_after_a_failure() {
+async fn run_all_runs_the_rest_of_a_sequential_suite_after_a_failure() {
     let base_url = serve_fixture().await;
     let tracker = Arc::new(Tracker::default());
     let mut failing = Visit::new(0, Duration::ZERO, &tracker);
@@ -439,7 +463,7 @@ async fn run_all_runs_the_rest_of_a_sequential_group_after_a_failure() {
     let outcome = run(
         runner(),
         base_url.as_str(),
-        BrowserTests::sequential()
+        TestSuite::sequential()
             .with(failing)
             .with(Visit::new(1, Duration::ZERO, &tracker)),
     )
@@ -458,7 +482,7 @@ async fn run_all_runs_the_rest_of_a_sequential_group_after_a_failure() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
-async fn fail_fast_still_runs_run_always_groups() {
+async fn fail_fast_still_runs_run_always_suites() {
     let base_url = serve_fixture().await;
     let tracker = Arc::new(Tracker::default());
     let mut failing = Visit::new(0, Duration::ZERO, &tracker);
@@ -467,11 +491,11 @@ async fn fail_fast_still_runs_run_always_groups() {
     let outcome = run(
         runner().with_failure_policy(FailurePolicy::FailFast),
         base_url.as_str(),
-        BrowserTests::sequential()
+        TestSuite::sequential()
             .with(failing)
             .with(Visit::new(1, Duration::ZERO, &tracker))
             .with_nested(
-                BrowserTests::sequential()
+                TestSuite::sequential()
                     .named("after all")
                     .run_always()
                     .with(Visit::new(2, Duration::ZERO, &tracker)),
@@ -662,7 +686,7 @@ async fn assert_reset_keeps_no_state(reset: SessionReset, second_window: bool, w
             .with_session_reuse(SessionReuse::enabled().with_reset(reset))
             .with_spare_sessions(0),
         base_url.as_str(),
-        BrowserTests::sequential()
+        TestSuite::sequential()
             .with(Dirty {
                 initial_rect: Arc::clone(&initial_rect),
                 second_window,
@@ -762,7 +786,7 @@ async fn manual_resets_clear_the_storage_of_replaced_pages() {
             .with_session_reuse(SessionReuse::enabled().with_reset(SessionReset::manual([])))
             .with_spare_sessions(0),
         base_url.as_str(),
-        BrowserTests::sequential()
+        TestSuite::sequential()
             .with(LeavesByReplacing)
             .with(FindsNoStorage),
     )
@@ -819,7 +843,7 @@ async fn manual_resets_clear_the_storage_of_file_pages() {
             .with_session_reuse(SessionReuse::enabled().with_reset(SessionReset::manual([])))
             .with_spare_sessions(0),
         "",
-        BrowserTests::sequential()
+        TestSuite::sequential()
             .with(FileStorage {
                 url: url.clone(),
                 write: true,
@@ -892,7 +916,7 @@ async fn resets_run_with_the_sessions_timeouts() {
             )
             .with_spare_sessions(0),
         base_url.as_str(),
-        BrowserTests::sequential()
+        TestSuite::sequential()
             .with(ImpatientPageLoads)
             .with(Visit::new(0, Duration::ZERO, &Arc::default())),
     )
@@ -945,7 +969,7 @@ async fn new_context_sessions_quit_after_tests_using_the_default_context() {
             .with_session_reuse(SessionReuse::enabled())
             .with_spare_sessions(0),
         base_url.as_str(),
-        BrowserTests::sequential()
+        TestSuite::sequential()
             .with(UsesDefaultContext { new_window: true })
             .with(UsesDefaultContext { new_window: false })
             .with(Visit::new(0, Duration::ZERO, &Arc::default())),
@@ -1031,7 +1055,7 @@ async fn script_requests(reset: SessionReset) -> usize {
             .with_session_reuse(SessionReuse::enabled().with_reset(reset))
             .with_spare_sessions(0),
         base_url.as_str(),
-        BrowserTests::sequential()
+        TestSuite::sequential()
             .with(LoadsCachedScript(1))
             .with(LoadsCachedScript(2)),
     )
@@ -1098,7 +1122,7 @@ async fn restored_from_back_forward_cache(reuse: SessionReuse, dedicated: bool) 
     let outcome = run(
         runner().with_session_reuse(reuse).with_spare_sessions(0),
         base_url.as_str(),
-        BrowserTests::sequential().with(GoesBack {
+        TestSuite::sequential().with(GoesBack {
             restored: Arc::clone(&restored),
             dedicated,
         }),
@@ -1135,7 +1159,7 @@ async fn reused_sessions_run_tests_while_more_tests_need_them() {
         runner().with_session_reuse(SessionReuse::enabled()),
         base_url.as_str(),
         visits_in(
-            BrowserTests::parallel(Parallelism::parallel(2)),
+            TestSuite::parallel(Parallelism::parallel(2)),
             8,
             Duration::from_millis(300),
             &tracker,
@@ -1165,7 +1189,7 @@ async fn fresh_session_tests_get_a_session_no_test_ran_in() {
             .with_session_reuse(SessionReuse::enabled())
             .with_spare_sessions(0),
         base_url.as_str(),
-        BrowserTests::sequential()
+        TestSuite::sequential()
             .with(Visit::new(0, Duration::ZERO, &tracker))
             .with(failing)
             .with(Visit::new(2, Duration::ZERO, &tracker))

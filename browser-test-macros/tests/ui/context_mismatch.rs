@@ -1,4 +1,4 @@
-use browser_test::{BrowserTests, browser_test};
+use browser_test::{TestSuite, browser_test};
 use rootcause::Report;
 
 #[browser_test]
@@ -7,5 +7,5 @@ async fn takes_a_number(_context: &u32) -> Result<(), Report> {
 }
 
 fn main() {
-    let _: BrowserTests<str> = BrowserTests::sequential().with(TakesANumber);
+    let _: TestSuite<str> = TestSuite::sequential().with(TakesANumber);
 }

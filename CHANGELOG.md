@@ -7,15 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.8.0] - 2026-10-27
 
+### Added
+
+- Tags, to select tests by independently of their names and of the suites they run in: `BrowserTest::tags`, set
+  with `#[browser_test(tags = ["button", "keyboard"])]`. `TestFilter::with_tag` and `BROWSER_TEST_TAG` select tests by
+  tag, and `BrowserTestRecord::tags` lists a test's tags. A test can have several tags.
+
 ### Changed
 
-- **Breaking:** `BrowserTest`, `BrowserTests` and `TestGroup` lost their `TestError` type parameter, so that tests of
-  different error types can share a group. `BrowserTest::run` returns a `Report`, into which a `Report<E>` converts
-  with `?`. Replace `impl BrowserTest<Context, E>` with `impl BrowserTest<Context>` returning `Result<(), Report>`,
-  `BrowserTests<Context, E>` with `BrowserTests<Context>`, and `TestGroup<Context, E>` with `TestGroup<Context>`.
-  `#[browser_test]` functions and `async fn`s used as tests can still return a non-dynamic `Report<E>`. A closure used
-  as a test that only returns `Ok(())` needs its error type spelled out, e.g. `Ok::<(), Report>(())`. A test wrapping
-  another one gets its error as a `Report` and downcasts it to inspect a typed error.
+- **Breaking:** Tests are either `#[browser_test]` functions or hand-written `BrowserTest` implementations, so that
+  everything about a test (name, description, tags, settings) is declared with it. An `async fn` or closure taking the
+  context is no longer a test by itself, and `BrowserTest::named` and `NamedTest` were removed. Mark such functions
+  `#[browser_test]`, with `#[browser_test(name = "...")]` instead of `.named("...")`. Turn a closure, or a function
+  that needs state of its own, into a type implementing `BrowserTest`. Rename a hand-written test by returning the
+  name from `BrowserTest::name`.
+- **Breaking:** `BrowserTests` became `TestSuite`, so that it no longer reads like the `BrowserTest` trait, and
+  `GroupRecord` became `SuiteRecord`. `BrowserTestRunReport::groups` became `suites`, and the run summary lists them
+  under `suites:`. `BrowserTests::filter_tests` was removed: select tests with a `TestFilter` and `TestSuite::filter`.
+- **Breaking:** Tags replace logical groups. `TestGroup`, `BrowserTests::with_test_group`,
+  `BrowserTests::filter_groups`, `TestFilter::with_group`, `TestFilter::with_groups_from_env_var` and
+  `BROWSER_TEST_GROUP` were removed, and `BrowserTestRecord::group` became `tags`. Tag the tests of a group instead,
+  e.g. with `#[browser_test(tags = ["button"])]`, and add them to the suite with `TestSuite::with`. Replace
+  `with_group` with `with_tag`, `with_groups_from_env_var` with `with_tags_from_env_var`, `BROWSER_TEST_GROUP` with
+  `BROWSER_TEST_TAG`, and `filter_groups` with a `TestFilter` selecting tags. `#[browser_test]` rejects tags that
+  `BROWSER_TEST_TAG` can't select: empty ones, ones containing commas or starting or ending with whitespace, and
+  duplicates. A test wrapping another one should forward `BrowserTest::tags` as well.
+- **Breaking:** `BrowserTest` and `BrowserTests` (now `TestSuite`) lost their `TestError` type parameter, so that tests
+  of different error types can share a suite. `BrowserTest::run` returns a `Report`, into which a `Report<E>` converts
+  with `?`. Replace `impl BrowserTest<Context, E>` with `impl BrowserTest<Context>` returning `Result<(), Report>`, and
+  `BrowserTests<Context, E>` with `TestSuite<Context>`. `#[browser_test]` functions can still return a non-dynamic
+  `Report<E>`. A test wrapping another one gets its error as a `Report` and downcasts it to inspect a typed error.
 - **Breaking:** Updated `thirtyfour` to version `0.38`.
 - Updated `chrome-for-testing-manager` to version `0.15`.
 - Updated `assertr` to version `0.9`.

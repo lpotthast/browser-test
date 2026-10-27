@@ -6,7 +6,7 @@ use crate::Context;
 use crate::tests::{WikipediaTestError, goto, title_contains};
 
 /// The page title names Wikipedia.
-#[browser_test]
+#[browser_test(tags = ["smoke"])]
 pub(crate) async fn title_contains_wikipedia(
     driver: &WebDriver,
     context: &Context,

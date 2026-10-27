@@ -1,24 +1,24 @@
-use std::{borrow::Cow, fmt, future::Future, panic::AssertUnwindSafe};
+use std::{borrow::Cow, fmt, panic::AssertUnwindSafe};
 
 use async_trait::async_trait;
 use rootcause::Report;
 use thirtyfour::WebDriver;
 
-use crate::{__private::TestResult, Parallelism, TestFilter, TestSettings};
+use crate::{Parallelism, TestFilter, TestSettings};
 
 /// A browser test: a named async body run in a `WebDriver` session, with the run's context.
 ///
 /// Every test runs in a session of its own: a fresh one, or, with
-/// [`SessionReuse`](crate::SessionReuse), one an earlier test ran in, reset. There are three ways
+/// [`SessionReuse`](crate::SessionReuse), one an earlier test ran in, reset. There are two ways
 /// to define a test:
 ///
 /// - [`#[browser_test]`](macro@crate::browser_test) on an `async fn`, for most tests: it generates a
 ///   unit struct implementing this trait, named after the function and documented by its doc
 ///   comments.
-/// - An `async fn` taking `&Context` is a test as it is, named by its Rust path. Use
-///   [`Self::named`] to name it.
 /// - Implement the trait, with [`async_trait`](crate::async_trait), for tests with settings of
 ///   their own ([`Self::settings`]), tests with parameters, and wrappers around other tests.
+///
+/// Either way, a test's metadata (name, description, tags, settings) is declared with the test.
 ///
 /// `Context` is what [`BrowserTestRunner::run`](crate::BrowserTestRunner::run) gives every test,
 /// e.g. the app's base URL. A failing test returns a [`Report`], to which the runner adds the
@@ -60,8 +60,8 @@ use crate::{__private::TestResult, Parallelism, TestFilter, TestSettings};
 /// # Wrapping tests
 ///
 /// A test running another one, e.g. to check something after every test, must forward
-/// [`Self::name`], [`Self::description`] and [`Self::settings`] to it, or the wrapped
-/// test's are lost:
+/// [`Self::name`], [`Self::description`], [`Self::tags`] and [`Self::settings`] to it, or the
+/// wrapped test's are lost:
 ///
 /// ```
 /// use std::borrow::Cow;
@@ -80,6 +80,10 @@ use crate::{__private::TestResult, Parallelism, TestFilter, TestSettings};
 ///
 ///     fn description(&self) -> Option<Cow<'_, str>> {
 ///         self.0.description()
+///     }
+///
+///     fn tags(&self) -> Vec<Cow<'_, str>> {
+///         self.0.tags()
 ///     }
 ///
 ///     fn settings(&self) -> TestSettings {
@@ -103,9 +107,9 @@ where
     /// The test's name, used in logs, reports and failures, and matched by
     /// [`TestFilter`].
     ///
-    /// Defaults to the Rust type name, e.g. `my_tests::checkout::ShowsTotal`, or the path of an
-    /// `async fn`. Names need not be unique, but distinct names keep reports unambiguous. The
-    /// runner reads the name once, before the test runs: return a borrowed or a generated name.
+    /// Defaults to the Rust type name, e.g. `my_tests::checkout::ShowsTotal`. Names need not be
+    /// unique, but distinct names keep reports unambiguous. The runner and filters read the name
+    /// before the test runs: return the same name each time, borrowed or generated.
     fn name(&self) -> Cow<'_, str> {
         std::any::type_name::<Self>().into()
     }
@@ -118,6 +122,19 @@ where
         None
     }
 
+    /// Tags to select the test by, e.g. the component it checks, with [`TestFilter::with_tag`] and
+    /// `BROWSER_TEST_TAG`.
+    ///
+    /// Tags don't change how the test runs, and are independent of its name and of the
+    /// [`TestSuite`]s it runs in. `#[browser_test(tags = ["button"])]` sets them. Defaults to none.
+    /// Tags that are empty, contain commas or start or end with whitespace can't be selected
+    /// through `BROWSER_TEST_TAG`, so the attribute rejects them.
+    ///
+    /// The runner and filters read the tags before the test runs: return the same tags each time.
+    fn tags(&self) -> Vec<Cow<'_, str>> {
+        Vec::new()
+    }
+
     /// What the test needs of the runner: timeouts, element query wait, a session no other test
     /// ran in, or a time limit. Defaults to [`TestSettings::new`], the runner's settings.
     /// `#[browser_test(time_limit = ...)]` sets a time limit.
@@ -125,31 +142,6 @@ where
     /// The runner reads the settings once, before the test runs.
     fn settings(&self) -> TestSettings {
         TestSettings::new()
-    }
-
-    /// This test under the name `name`, with its behavior, description and settings.
-    ///
-    /// ```
-    /// use browser_test::{BrowserTest, BrowserTests};
-    /// use rootcause::Report;
-    ///
-    /// async fn opens_menu(_base_url: &str) -> Result<(), Report> {
-    ///     Ok(())
-    /// }
-    ///
-    /// let test = opens_menu.named("menu::opens");
-    /// assert_eq!(test.name(), "menu::opens");
-    /// let tests: BrowserTests<str> = BrowserTests::sequential().with(test);
-    /// ```
-    #[must_use]
-    fn named(self, name: impl Into<String>) -> NamedTest<Self>
-    where
-        Self: Sized,
-    {
-        NamedTest {
-            name: name.into(),
-            test: self,
-        }
     }
 
     /// Run the test in the session of `driver`, with the run's `context`.
@@ -163,88 +155,27 @@ where
     async fn run(&self, driver: &WebDriver, context: &Context) -> Result<(), Report>;
 }
 
-// Express the Send bound for a function's future without requiring callers to box it.
-// Using the complete argument type keeps borrowed contexts valid under higher-ranked bounds.
-trait TestFn<Argument>: Fn(Argument) -> Self::Run {
-    type Run: Future<Output: TestResult> + Send;
-}
-
-impl<Argument, F, Run> TestFn<Argument> for F
-where
-    F: Fn(Argument) -> Run,
-    Run: Future<Output: TestResult> + Send,
-{
-    type Run = Run;
-}
-
-/// An `async fn` taking the run's context is a test, named by its path, e.g.
-/// `my_tests::checkout::shows_total`.
+/// A suite of browser tests and nested suites, and how they run.
 ///
-/// [`BrowserTest::named`] names it independently of its module. Use
-/// [`#[browser_test]`](macro@crate::browser_test) for tests that also take the `WebDriver`, or should be
-/// described by their doc comments.
-#[async_trait]
-impl<Context, F> BrowserTest<Context> for F
-where
-    Context: Sync + ?Sized,
-    F: for<'a> TestFn<&'a Context> + Send + Sync,
-{
-    async fn run(&self, _driver: &WebDriver, context: &Context) -> Result<(), Report> {
-        self(context).await.into_dynamic()
-    }
-}
-
-/// A test under another name, created by [`BrowserTest::named`].
-#[derive(Debug, Clone)]
-pub struct NamedTest<T> {
-    name: String,
-    test: T,
-}
-
-#[async_trait]
-impl<Context, T> BrowserTest<Context> for NamedTest<T>
-where
-    Context: Sync + ?Sized,
-    T: BrowserTest<Context>,
-{
-    fn name(&self) -> Cow<'_, str> {
-        self.name.as_str().into()
-    }
-
-    fn description(&self) -> Option<Cow<'_, str>> {
-        self.test.description()
-    }
-
-    fn settings(&self) -> TestSettings {
-        self.test.settings()
-    }
-
-    async fn run(&self, driver: &WebDriver, context: &Context) -> Result<(), Report> {
-        self.test.run(driver, context).await
-    }
-}
-
-/// A group of browser tests and nested groups, and how they run.
-///
-/// A group runs its entries either one after another ([`Self::sequential`]) or up to a number of
+/// A suite runs its entries either one after another ([`Self::sequential`]) or up to a number of
 /// entries at the same time ([`Self::parallel`]). Entries are tests ([`Self::with`]) and nested
-/// groups ([`Self::with_nested`]), so any mix of sequential and parallel execution can be expressed:
-/// a sequential group of groups runs stages one after another, and a sequential group inside a
-/// parallel group keeps its tests from running at the same time while other tests run alongside.
-/// The tests of a logical [`TestGroup`] ([`Self::with_test_group`]) are entries of their own.
+/// suites ([`Self::with_nested`]), so any mix of sequential and parallel execution can be expressed:
+/// a sequential suite of suites runs stages one after another, and a sequential suite inside a
+/// parallel suite keeps its tests from running at the same time while other tests run alongside.
+/// To select tests independently of the suites they run in, tag them (see [`BrowserTest::tags`]).
 ///
 /// Entries start in the order they were added. Every test runs in a fresh browser session, or in
 /// the reset session of an earlier test (see [`crate::SessionReuse`]). How
 /// failures affect the run is decided by [`crate::BrowserTestRunner::with_failure_policy`]. With
 /// [`crate::FailurePolicy::RunAll`], every test runs. With [`crate::FailurePolicy::FailFast`], no
-/// further test starts after a failure, except in groups marked [`Self::run_always`].
+/// further test starts after a failure, except in suites marked [`Self::run_always`].
 ///
 /// # Examples
 ///
 /// ```rust,no_run
 /// # use std::borrow::Cow;
 /// # use browser_test::thirtyfour::WebDriver;
-/// # use browser_test::{async_trait, BrowserTest, BrowserTests, Parallelism};
+/// # use browser_test::{async_trait, BrowserTest, TestSuite, Parallelism};
 /// # use rootcause::Report;
 /// # macro_rules! test {
 /// #     ($name:ident) => {
@@ -257,126 +188,52 @@ where
 /// #     };
 /// # }
 /// # test!(Buttons); test!(Tables); test!(CreateUser); test!(DeleteUser); test!(ServerDidNotPanic);
-/// let tests = BrowserTests::sequential()
+/// let tests = TestSuite::sequential()
 ///     .with_nested(
-///         BrowserTests::parallel(Parallelism::from_env()?.unwrap_or(Parallelism::parallel(4)))
+///         TestSuite::parallel(Parallelism::from_env()?.unwrap_or(Parallelism::parallel(4)))
 ///             .with(Buttons)
 ///             .with(Tables)
 ///             // These two share server state, so they must not run at the same time.
-///             .with_nested(BrowserTests::sequential().with(CreateUser).with(DeleteUser)),
+///             .with_nested(TestSuite::sequential().with(CreateUser).with(DeleteUser)),
 ///     )
 ///     .with_nested(
-///         BrowserTests::sequential()
+///         TestSuite::sequential()
 ///             .named("after all")
 ///             .run_always()
 ///             .with(ServerDidNotPanic),
 ///     );
 /// # Ok::<(), browser_test::InvalidEnvVar>(())
 /// ```
-pub struct BrowserTests<Context = ()>
+pub struct TestSuite<Context = ()>
 where
     Context: Sync + ?Sized,
 {
     pub(crate) parallelism: Parallelism,
     pub(crate) name: Option<String>,
     pub(crate) run_always: bool,
-    pub(crate) entries: Vec<BrowserTestEntry<Context>>,
+    pub(crate) entries: Vec<SuiteEntry<Context>>,
 }
 
-/// A logical group of tests, e.g. the tests of one component, for selecting them by name.
-///
-/// [`TestFilter::with_group`](crate::TestFilter::with_group) and `BROWSER_TEST_GROUP` select the
-/// tests of logical groups. A logical group does not change how its tests run: added with
-/// [`BrowserTests::with_test_group`], they run like tests added to that [`BrowserTests`] one by
-/// one, in its parallelism limit. Use nested [`BrowserTests`] to decide how tests run.
-///
-/// A test's group is independent of its Rust module and does not change its name. Test records
-/// carry the group's name (see [`BrowserTestRecord::group`](crate::BrowserTestRecord::group)).
-///
-/// # Examples
-///
-/// ```
-/// use browser_test::{BrowserTests, Parallelism, TestGroup, browser_test};
-/// use rootcause::Report;
-///
-/// #[browser_test]
-/// async fn presses(_base_url: &str) -> Result<(), Report> { Ok(()) }
-/// #[browser_test]
-/// async fn presses_with_keyboard(_base_url: &str) -> Result<(), Report> { Ok(()) }
-///
-/// let tests: BrowserTests<str> = BrowserTests::parallel(Parallelism::parallel(4))
-///     .with_test_group(TestGroup::new("button").with(Presses).with(PressesWithKeyboard));
-/// ```
-pub struct TestGroup<Context = ()>
-where
-    Context: Sync + ?Sized,
-{
-    pub(crate) name: String,
-    pub(crate) tests: Vec<Box<dyn BrowserTest<Context>>>,
-}
-
-impl<Context> TestGroup<Context>
-where
-    Context: Sync + ?Sized,
-{
-    /// An empty group named `name`, which [`TestFilter::with_group`](crate::TestFilter::with_group)
-    /// selects.
-    #[must_use]
-    pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            tests: Vec::new(),
-        }
-    }
-
-    /// Add a test.
-    #[must_use]
-    pub fn with(mut self, test: impl BrowserTest<Context> + 'static) -> Self {
-        self.tests.push(Box::new(test));
-        self
-    }
-}
-
-impl<Context> fmt::Debug for TestGroup<Context>
-where
-    Context: Sync + ?Sized,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TestGroup")
-            .field("name", &self.name)
-            .field(
-                "tests",
-                &self
-                    .tests
-                    .iter()
-                    .map(|test| DebugName(test.as_ref()))
-                    .collect::<Vec<_>>(),
-            )
-            .finish()
-    }
-}
-
-/// An entry of a [`BrowserTests`] group.
-pub(crate) enum BrowserTestEntry<Context>
+/// An entry of a [`TestSuite`].
+pub(crate) enum SuiteEntry<Context>
 where
     Context: Sync + ?Sized,
 {
     Test(Box<dyn BrowserTest<Context>>),
-    Group(BrowserTests<Context>),
-    TestGroup(TestGroup<Context>),
+    Suite(TestSuite<Context>),
 }
 
-impl<Context> BrowserTests<Context>
+impl<Context> TestSuite<Context>
 where
     Context: Sync + ?Sized,
 {
-    /// A group running its entries one after another.
+    /// A suite running its entries one after another.
     #[must_use]
     pub const fn sequential() -> Self {
         Self::parallel(Parallelism::sequential())
     }
 
-    /// A group running up to `parallelism` of its entries at the same time.
+    /// A suite running up to `parallelism` of its entries at the same time.
     #[must_use]
     pub const fn parallel(parallelism: Parallelism) -> Self {
         Self {
@@ -387,7 +244,7 @@ where
         }
     }
 
-    /// Name this group. The run report lists the wall time of named groups, and the records of
+    /// Name this suite. The run report lists the wall time of named suites, and the records of
     /// their tests carry the name.
     #[must_use]
     pub fn named(mut self, name: impl Into<String>) -> Self {
@@ -395,7 +252,7 @@ where
         self
     }
 
-    /// Run this group's tests even after a failure stopped the run under
+    /// Run this suite's tests even after a failure stopped the run under
     /// [`crate::FailurePolicy::FailFast`], e.g. for checks that must see the whole run.
     #[must_use]
     pub const fn run_always(mut self) -> Self {
@@ -409,105 +266,61 @@ where
     where
         T: BrowserTest<Context> + 'static,
     {
-        self.entries.push(BrowserTestEntry::Test(Box::new(test)));
+        self.entries.push(SuiteEntry::Test(Box::new(test)));
         self
     }
 
-    /// Add a nested group as one entry of this group. The nested group runs its own entries
+    /// Add a nested suite as one entry of this suite. The nested suite runs its own entries
     /// sequentially or in parallel, as it was created.
-    ///
-    /// Not to be confused with [`Self::with_test_group`], which adds the tests of a logical group
-    /// as entries of this group.
     #[must_use]
-    pub fn with_nested(mut self, group: Self) -> Self {
-        self.entries.push(BrowserTestEntry::Group(group));
+    pub fn with_nested(mut self, suite: Self) -> Self {
+        self.entries.push(SuiteEntry::Suite(suite));
         self
     }
 
-    /// Add the tests of a logical group, to run like tests added with [`Self::with`], in order.
+    /// Keep only the tests `filter` selects, in this suite and nested ones, e.g.
+    /// [`TestFilter::from_env`].
     ///
-    /// The group does not change how its tests run. It only makes them selectable by its name,
-    /// see [`TestGroup`].
+    /// A test whose name or tags panic while the filter reads them is kept, so that the run
+    /// reports it as failed. Nested suites keep how they run, and empty ones are removed. Add tests
+    /// that must always run, e.g. checks of the whole run, after filtering: [`Self::run_always`]
+    /// does not exempt tests from filters.
     #[must_use]
-    pub fn with_test_group(mut self, group: TestGroup<Context>) -> Self {
-        self.entries.push(BrowserTestEntry::TestGroup(group));
+    pub fn filter(mut self, filter: &TestFilter) -> Self {
+        if !filter.selects_all() {
+            self.retain(&mut |test| filter.selects(test));
+        }
         self
     }
 
-    /// Keep only the tests `filter` selects, e.g. [`TestFilter::from_env`](crate::TestFilter::from_env).
-    ///
-    /// Nested groups keep how they run, and empty ones are removed. Add tests that must always run,
-    /// e.g. checks of the whole run, after filtering: [`Self::run_always`] does not exempt tests
-    /// from filters.
-    #[must_use]
-    pub fn filter(self, filter: &TestFilter) -> Self {
-        filter.apply(self)
-    }
-
-    /// Keep only the tests of the logical [`TestGroup`]s whose name `include` accepts.
-    ///
-    /// Tests outside of logical groups are removed. The names of nested [`BrowserTests`] are not
-    /// matched: they keep how they run, and empty ones are removed. Groups marked
-    /// [`Self::run_always`] are filtered too: add tests that must always run after filtering.
-    #[must_use]
-    pub fn filter_groups(mut self, mut include: impl FnMut(&str) -> bool) -> Self {
-        self.retain_groups(&mut include);
-        self
-    }
-
-    fn retain_groups(&mut self, include: &mut impl FnMut(&str) -> bool) {
+    /// Keep only the tests `include` accepts, in this suite and nested ones, and remove nested
+    /// suites left empty.
+    fn retain(&mut self, include: &mut impl FnMut(&dyn BrowserTest<Context>) -> bool) {
         self.entries.retain_mut(|entry| match entry {
-            BrowserTestEntry::Test(_) => false,
-            BrowserTestEntry::TestGroup(group) => include(&group.name) && !group.tests.is_empty(),
-            BrowserTestEntry::Group(group) => {
-                group.retain_groups(include);
-                !group.is_empty()
+            SuiteEntry::Test(test) => include(test.as_ref()),
+            SuiteEntry::Suite(suite) => {
+                suite.retain(include);
+                !suite.is_empty()
             }
         });
     }
 
-    /// Keep only the tests whose name `include` accepts, in this group and nested ones.
-    ///
-    /// A test whose [`BrowserTest::name`] panics is kept, so that the run reports it as failed.
-    /// Nested groups keep how they run, and empty ones are removed. Groups marked
-    /// [`Self::run_always`] are filtered too: add tests that must always run after filtering.
-    #[must_use]
-    pub fn filter_tests(mut self, mut include: impl FnMut(&str) -> bool) -> Self {
-        self.retain_tests(&mut include);
-        self
-    }
-
-    fn retain_tests(&mut self, include: &mut impl FnMut(&str) -> bool) {
-        self.entries.retain_mut(|entry| match entry {
-            BrowserTestEntry::Test(test) => includes(include, test.as_ref()),
-            BrowserTestEntry::TestGroup(group) => {
-                group.tests.retain(|test| includes(include, test.as_ref()));
-                !group.tests.is_empty()
-            }
-            BrowserTestEntry::Group(group) => {
-                group.retain_tests(include);
-                !group.is_empty()
-            }
-        });
-    }
-
-    /// Whether this group contains no test, directly or in nested groups.
+    /// Whether this suite contains no test, directly or in nested suites.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.iter().all(|entry| match entry {
-            BrowserTestEntry::Test(_) => false,
-            BrowserTestEntry::Group(group) => group.is_empty(),
-            BrowserTestEntry::TestGroup(group) => group.tests.is_empty(),
+            SuiteEntry::Test(_) => false,
+            SuiteEntry::Suite(suite) => suite.is_empty(),
         })
     }
 }
 
-impl<Context> fmt::Debug for BrowserTests<Context>
+impl<Context> fmt::Debug for TestSuite<Context>
 where
     Context: Sync + ?Sized,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("BrowserTests")
+        f.debug_struct("TestSuite")
             .field("parallelism", &self.parallelism)
             .field("name", &self.name)
             .field("run_always", &self.run_always)
@@ -516,50 +329,17 @@ where
     }
 }
 
-impl<Context> fmt::Debug for BrowserTestEntry<Context>
+impl<Context> fmt::Debug for SuiteEntry<Context>
 where
     Context: Sync + ?Sized,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Test(test) => DebugName(test.as_ref()).fmt(f),
-            Self::Group(group) => group.fmt(f),
-            Self::TestGroup(group) => group.fmt(f),
-        }
-    }
-}
-
-/// The name of `test`, or `None` if reading it panics.
-fn name_of<Context>(test: &dyn BrowserTest<Context>) -> Option<Cow<'_, str>>
-where
-    Context: Sync + ?Sized,
-{
-    std::panic::catch_unwind(AssertUnwindSafe(|| test.name())).ok()
-}
-
-/// Whether `include` accepts the name of `test`. A test whose name panics is kept, so that the
-/// run reports it as failed.
-fn includes<Context>(
-    include: &mut impl FnMut(&str) -> bool,
-    test: &dyn BrowserTest<Context>,
-) -> bool
-where
-    Context: Sync + ?Sized,
-{
-    name_of(test).is_none_or(|name| include(&name))
-}
-
-/// A test's name in `Debug` output, also if reading it panics.
-struct DebugName<'a, Context: Sync + ?Sized>(&'a dyn BrowserTest<Context>);
-
-impl<Context> fmt::Debug for DebugName<'_, Context>
-where
-    Context: Sync + ?Sized,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match name_of(self.0) {
-            Some(name) => name.fmt(f),
-            None => f.write_str("<name() panicked>"),
+            Self::Test(test) => match std::panic::catch_unwind(AssertUnwindSafe(|| test.name())) {
+                Ok(name) => name.fmt(f),
+                Err(_) => f.write_str("<name() panicked>"),
+            },
+            Self::Suite(suite) => suite.fmt(f),
         }
     }
 }
@@ -567,65 +347,44 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct NamedTest(&'static str);
-
-    #[async_trait::async_trait]
-    impl BrowserTest for NamedTest {
-        fn name(&self) -> Cow<'_, str> {
-            Cow::Borrowed(self.0)
-        }
-
-        async fn run(&self, _driver: &WebDriver, _context: &()) -> Result<(), Report> {
-            Ok(())
-        }
-    }
-
-    struct UnnamedTest;
-
-    #[async_trait::async_trait]
-    impl BrowserTest for UnnamedTest {
-        fn name(&self) -> Cow<'_, str> {
-            panic!("no name")
-        }
-
-        async fn run(&self, _driver: &WebDriver, _context: &()) -> Result<(), Report> {
-            Ok(())
-        }
-    }
+    use crate::test_support::{Metadata, StubTest};
 
     #[test]
-    fn tests_whose_name_panics_survive_filters_and_debug_output() {
-        let tests = BrowserTests::sequential()
-            .with(NamedTest("menu"))
-            .with(UnnamedTest)
-            .with_test_group(TestGroup::new("group").with(UnnamedTest))
-            .filter_tests(|name| name.contains("checkout"));
+    fn filters_keep_tests_whose_metadata_panics_as_they_read_it() {
+        let suite = || {
+            TestSuite::sequential()
+                .with(StubTest::new("menu"))
+                .with(StubTest::new("unnamed").panicking_in(Metadata::Name))
+                .with(StubTest::new("untagged").panicking_in(Metadata::Tags))
+        };
+        let entries = |tests: TestSuite| format!("{:?}", tests.entries);
 
-        // Kept, so that the run reports them as failed.
+        // Kept, so that the run reports them as failed. A filter by name doesn't read tags.
         assert_eq!(
-            format!("{tests:?}"),
-            "BrowserTests { parallelism: Parallelism { max_parallel_tests: 1 }, name: None, \
-             run_always: false, entries: [<name() panicked>, TestGroup { name: \"group\", \
-             tests: [<name() panicked>] }] }"
+            entries(suite().filter(&TestFilter::new().with_name_containing("checkout"))),
+            "[<name() panicked>]"
+        );
+        assert_eq!(
+            entries(suite().filter(&TestFilter::new().with_tag("checkout"))),
+            r#"["untagged"]"#
         );
     }
 
     #[test]
-    fn browser_tests_debug_prints_the_tree_with_test_names() {
-        let tests = BrowserTests::sequential()
-            .with(NamedTest("opens home page"))
+    fn test_suite_debug_prints_the_tree_with_test_names() {
+        let tests = TestSuite::sequential()
+            .with(StubTest::new("opens home page"))
             .with_nested(
-                BrowserTests::sequential()
+                TestSuite::sequential()
                     .named("nested")
-                    .with(NamedTest("search works")),
+                    .with(StubTest::new("search works")),
             );
 
         assert_eq!(
             format!("{tests:?}"),
             concat!(
-                r#"BrowserTests { parallelism: Parallelism { max_parallel_tests: 1 }, name: None, "#,
-                r#"run_always: false, entries: ["opens home page", BrowserTests { parallelism: "#,
+                r#"TestSuite { parallelism: Parallelism { max_parallel_tests: 1 }, name: None, "#,
+                r#"run_always: false, entries: ["opens home page", TestSuite { parallelism: "#,
                 r#"Parallelism { max_parallel_tests: 1 }, name: Some("nested"), run_always: false, "#,
                 r#"entries: ["search works"] }] }"#,
             )
@@ -633,58 +392,43 @@ mod tests {
     }
 
     #[test]
-    fn groups_without_tests_are_empty() {
-        let empty = BrowserTests::<()>::sequential().with_nested(BrowserTests::sequential());
+    fn suites_without_tests_are_empty() {
+        let empty = TestSuite::<()>::sequential().with_nested(TestSuite::sequential());
         assert!(empty.is_empty());
-        assert!(!empty.with(NamedTest("test")).is_empty());
-        assert!(
-            BrowserTests::<()>::sequential()
-                .with_test_group(TestGroup::new("empty"))
-                .is_empty()
-        );
+        assert!(!empty.with(StubTest::new("test")).is_empty());
     }
 
-    fn test_names(tests: &BrowserTests) -> Vec<String> {
+    fn test_names(tests: &TestSuite) -> Vec<String> {
         tests
             .entries
             .iter()
             .flat_map(|entry| match entry {
-                BrowserTestEntry::Test(test) => vec![test.name().into_owned()],
-                BrowserTestEntry::TestGroup(group) => group
-                    .tests
-                    .iter()
-                    .map(|test| test.name().into_owned())
-                    .collect(),
-                BrowserTestEntry::Group(group) => test_names(group),
+                SuiteEntry::Test(test) => vec![test.name().into_owned()],
+                SuiteEntry::Suite(suite) => test_names(suite),
             })
             .collect()
     }
 
-    fn suite() -> BrowserTests {
-        BrowserTests::parallel(Parallelism::parallel(2))
-            .with(NamedTest("ungrouped hover"))
-            .with_test_group(
-                TestGroup::new("buttons")
-                    .with(NamedTest("atom::hover"))
-                    .with(NamedTest("hook::press")),
-            )
+    fn suite() -> TestSuite {
+        TestSuite::parallel(Parallelism::parallel(2))
+            .with(StubTest::new("untagged hover"))
+            .with(StubTest::new("atom::hover").with_tags(&["buttons"]))
+            .with(StubTest::new("hook::press").with_tags(&["buttons"]))
             .with_nested(
-                BrowserTests::sequential()
+                TestSuite::sequential()
                     .named("stage")
                     .run_always()
-                    .with_test_group(
-                        TestGroup::new("buttons-extra").with(NamedTest("other::hover")),
-                    )
-                    .with_test_group(TestGroup::new("focus").with(NamedTest("keyboard::focus"))),
+                    .with(StubTest::new("other::hover").with_tags(&["buttons-extra"]))
+                    .with(StubTest::new("keyboard::focus").with_tags(&["focus", "keyboard"])),
             )
     }
 
     #[test]
-    fn selection_combines_exact_groups_with_name_substrings_in_registration_order() {
+    fn selection_combines_exact_tags_with_name_substrings_in_registration_order() {
         assert_eq!(
             test_names(&suite().filter(&TestFilter::new())),
             [
-                "ungrouped hover",
+                "untagged hover",
                 "atom::hover",
                 "hook::press",
                 "other::hover",
@@ -693,18 +437,22 @@ mod tests {
         );
         assert_eq!(
             test_names(&suite().filter(&TestFilter::new().with_name_containing("hover"))),
-            ["ungrouped hover", "atom::hover", "other::hover"]
+            ["untagged hover", "atom::hover", "other::hover"]
         );
         assert_eq!(
-            test_names(&suite().filter(&TestFilter::new().with_group("buttons"))),
+            test_names(&suite().filter(&TestFilter::new().with_tag("buttons"))),
             ["atom::hover", "hook::press"]
+        );
+        assert_eq!(
+            test_names(&suite().filter(&TestFilter::new().with_tag("keyboard"))),
+            ["keyboard::focus"]
         );
         assert_eq!(
             test_names(
                 &suite().filter(
                     &TestFilter::new()
-                        .with_group("buttons")
-                        .with_group("focus")
+                        .with_tag("buttons")
+                        .with_tag("focus")
                         .with_name_containing("press")
                         .with_name_containing("focus")
                 )
@@ -713,14 +461,14 @@ mod tests {
         );
         assert!(
             suite()
-                .filter(&TestFilter::new().with_group("missing"))
+                .filter(&TestFilter::new().with_tag("missing"))
                 .is_empty()
         );
         assert!(
             suite()
                 .filter(
                     &TestFilter::new()
-                        .with_group("buttons")
+                        .with_tag("buttons")
                         .with_name_containing("absent")
                 )
                 .is_empty()
@@ -729,65 +477,19 @@ mod tests {
 
     #[test]
     fn selection_preserves_execution_policy_and_allows_unconditional_checks() {
-        let tests = suite().filter(&TestFilter::new().with_group("focus"));
+        let tests = suite().filter(&TestFilter::new().with_tag("focus"));
         assert_eq!(tests.parallelism, Parallelism::parallel(2));
-        let BrowserTestEntry::Group(stage) = &tests.entries[0] else {
+        let SuiteEntry::Suite(stage) = &tests.entries[0] else {
             panic!("expected stage")
         };
         assert_eq!(stage.name.as_deref(), Some("stage"));
         assert_eq!(stage.parallelism, Parallelism::sequential());
         assert!(stage.run_always);
         let tests = tests.with_nested(
-            BrowserTests::sequential()
+            TestSuite::sequential()
                 .run_always()
-                .with(NamedTest("after all")),
+                .with(StubTest::new("after all")),
         );
         assert_eq!(test_names(&tests), ["keyboard::focus", "after all"]);
-    }
-
-    #[test]
-    fn async_functions_accept_borrowed_contexts_and_explicit_names() {
-        struct Page<'a>(&'a str);
-        async fn reads_page(page: &Page<'_>) -> Result<(), Report> {
-            assert_eq!(page.0, "page");
-            Ok(())
-        }
-        fn accepts_page_test(_test: impl for<'a> BrowserTest<Page<'a>>) {}
-        accepts_page_test(reads_page);
-        let test = reads_page.named("explicit name");
-        assert_eq!(test.name(), "explicit name");
-        accepts_page_test(test);
-    }
-
-    #[test]
-    fn naming_preserves_description_and_settings() {
-        use std::time::Duration;
-
-        use crate::{ElementQueryWait, Timeouts};
-
-        struct Settings;
-        #[async_trait]
-        impl BrowserTest for Settings {
-            fn description(&self) -> Option<Cow<'_, str>> {
-                Some("described".into())
-            }
-            fn settings(&self) -> TestSettings {
-                TestSettings::new()
-                    .with_timeouts(Timeouts::new().with_implicit_wait(Duration::ZERO))
-                    .with_element_query_wait(ElementQueryWait::new(
-                        Duration::from_secs(1),
-                        Duration::from_millis(10),
-                    ))
-                    .with_fresh_session(true)
-                    .with_time_limit(Duration::from_secs(5))
-            }
-            async fn run(&self, _: &WebDriver, (): &()) -> Result<(), Report> {
-                Ok(())
-            }
-        }
-        let test = Settings.named("renamed");
-        assert_eq!(test.name(), "renamed");
-        assert_eq!(test.description(), Settings.description());
-        assert_eq!(test.settings(), Settings.settings());
     }
 }

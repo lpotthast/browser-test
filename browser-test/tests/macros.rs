@@ -1,6 +1,6 @@
 //! The attribute's public API, including contexts borrowed for only one test run.
 
-use browser_test::{BrowserTest, BrowserTests, TestFilter, TestGroup, browser_test};
+use browser_test::{BrowserTest, TestFilter, TestSuite, browser_test};
 use rootcause::Report;
 
 struct Page<'a> {
@@ -43,14 +43,14 @@ async fn raw_driver(
     Ok(())
 }
 
-#[browser_test]
+#[browser_test(tags = ["smoke"])]
 async fn no_context() -> Result<(), Report> {
     tokio::task::yield_now().await;
     Ok(())
 }
 
 /// Keyboard events reach their handler.
-#[browser_test(name = "keyboard::events")]
+#[browser_test(name = "keyboard::events", tags = ["smoke", "keyboard"])]
 async fn handles_keyboard_events() -> Result<(), Report> {
     tokio::task::yield_now().await;
     Ok(())
@@ -140,7 +140,7 @@ mod shadowed_macros {
 mod other {
     use super::*;
 
-    #[browser_test]
+    #[browser_test(tags = ["smoke"])]
     pub(super) async fn borrowed_page(_context: &()) -> Result<(), Report> {
         tokio::task::yield_now().await;
         Ok(())
@@ -163,34 +163,37 @@ fn generated_tests_implement_the_trait_with_distinct_module_qualified_names() {
         shadowed_macros::NamedByItsPath.name(),
         "macros::shadowed_macros::named_by_its_path"
     );
-    let _: BrowserTests = BrowserTests::sequential().with(FunctionAttributes);
-    let _: BrowserTests<str> = BrowserTests::sequential().with(RawDriver);
-    // Tests of different error types share a group.
-    let _: BrowserTests = BrowserTests::sequential()
+    let _: TestSuite<str> = TestSuite::sequential().with(RawDriver);
+    // Tests of different error types share a suite.
+    let _: TestSuite = TestSuite::sequential()
         .with(TypedError)
+        .with(FunctionAttributes);
+}
+
+#[test]
+fn tags_select_generated_tests() {
+    assert_eq!(HandlesKeyboardEvents.tags(), ["smoke", "keyboard"]);
+    assert_eq!(NoContext.tags(), ["smoke"]);
+    assert_eq!(FunctionAttributes.tags(), [""; 0]);
+    let tests = TestSuite::sequential()
+        .with(HandlesKeyboardEvents)
+        .with(NoContext)
+        .with(other::BorrowedPage)
         .with(FunctionAttributes)
-        .with_test_group(TestGroup::new("typed").with(TypedError));
-    let tests = BrowserTests::sequential()
-        .with_test_group(
-            TestGroup::new("smoke")
-                .with(NoContext)
-                .with(other::BorrowedPage),
-        )
         .filter(
             &TestFilter::new()
-                .with_group("smoke")
-                .with_name_containing("other::borrowed_page"),
+                .with_tag("smoke")
+                .with_name_containing("other::borrowed_page")
+                .with_name_containing("no_context"),
         );
-    assert!(!tests.is_empty());
     assert!(
-        tests
-            .filter(&TestFilter::new().with_name_containing("no_context"))
-            .is_empty()
+        format!("{tests:?}")
+            .contains(r#"entries: ["macros::no_context", "macros::other::borrowed_page"]"#)
     );
 }
 
 #[test]
-fn names_and_descriptions_are_independent_and_survive_wrapping() {
+fn names_and_descriptions_are_independent() {
     let test = HandlesKeyboardEvents;
     assert_eq!(test.name(), "keyboard::events");
     assert_eq!(
@@ -198,23 +201,16 @@ fn names_and_descriptions_are_independent_and_survive_wrapping() {
         Some("Keyboard events reach their handler.")
     );
     assert!(
-        !BrowserTests::sequential()
+        !TestSuite::sequential()
             .with(test)
             .filter(&TestFilter::new().with_name_containing("keyboard::events"))
             .is_empty()
     );
     assert!(
-        BrowserTests::sequential()
+        TestSuite::sequential()
             .with(HandlesKeyboardEvents)
             .filter(&TestFilter::new().with_name_containing("Keyboard events reach"))
             .is_empty()
-    );
-    assert_eq!(
-        HandlesKeyboardEvents
-            .named("renamed")
-            .description()
-            .as_deref(),
-        Some("Keyboard events reach their handler.")
     );
     assert_eq!(
         BorrowedPage.description().as_deref(),

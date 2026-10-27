@@ -1,44 +1,46 @@
-//! Selecting the tests of a run by name and logical group.
+//! Selecting the tests of a run by name and tag.
 
-use crate::{BrowserTests, InvalidEnvVar};
+use std::panic::AssertUnwindSafe;
+
+use crate::{BrowserTest, InvalidEnvVar};
 
 /// Default environment variable read by [`TestFilter::from_env`] for name substrings.
 pub(crate) const DEFAULT_NAME_FILTER_ENV: &str = "BROWSER_TEST_FILTER";
 
-/// Default environment variable read by [`TestFilter::from_env`] for group names.
-pub(crate) const DEFAULT_GROUP_FILTER_ENV: &str = "BROWSER_TEST_GROUP";
+/// Default environment variable read by [`TestFilter::from_env`] for tags.
+pub(crate) const DEFAULT_TAG_FILTER_ENV: &str = "BROWSER_TEST_TAG";
 
-/// Selects tests by name substring and by exact [`TestGroup`](crate::TestGroup) name.
+/// Selects tests by name substring and by exact [tag](BrowserTest::tags).
 ///
-/// A test is selected if its [name](crate::BrowserTest::name) contains any of the name
-/// substrings, and it belongs to a logical group with any of the group names. A filter without
-/// name substrings selects tests of any name, and one without group names selects tests of any
-/// group, including ungrouped tests. [`Self::new`] selects every test. Matching is case-sensitive.
+/// A test is selected if its [name](BrowserTest::name) contains any of the name
+/// substrings, and it has any of the tags. A filter without name substrings selects tests of any
+/// name, and one without tags selects tests with any tags, including untagged tests.
+/// [`Self::new`] selects every test. Matching is case-sensitive.
 ///
-/// Apply a filter with [`BrowserTests::filter`]. Selection is never implicit: a runner runs every
-/// test it is given, whatever the environment says.
+/// Apply a filter with [`TestSuite::filter`](crate::TestSuite::filter). Selection is never
+/// implicit: a runner runs every test it is given, whatever the environment says.
 ///
 /// # Examples
 ///
-/// Select the tests of the groups `button` and `focus` whose names contain `keyboard`:
+/// Select the tests tagged `button` or `focus` whose names contain `keyboard`:
 ///
 /// ```
 /// use browser_test::TestFilter;
 ///
 /// let filter = TestFilter::new()
-///     .with_group("button")
-///     .with_group("focus")
+///     .with_tag("button")
+///     .with_tag("focus")
 ///     .with_name_containing("keyboard");
 /// ```
 ///
-/// Let whoever runs the tests select them through `BROWSER_TEST_FILTER` and `BROWSER_TEST_GROUP`,
+/// Let whoever runs the tests select them through `BROWSER_TEST_FILTER` and `BROWSER_TEST_TAG`,
 /// and add checks of the whole run after filtering, so that they always run:
 ///
 /// ```
-/// # use browser_test::{BrowserTests, Parallelism, TestFilter};
-/// # fn suite() -> BrowserTests { BrowserTests::sequential() }
-/// # fn checks() -> BrowserTests { BrowserTests::sequential() }
-/// let tests = BrowserTests::sequential()
+/// # use browser_test::{TestFilter, TestSuite};
+/// # fn suite() -> TestSuite { TestSuite::sequential() }
+/// # fn checks() -> TestSuite { TestSuite::sequential() }
+/// let tests = TestSuite::sequential()
 ///     .with_nested(suite().filter(&TestFilter::from_env()?))
 ///     .with_nested(checks());
 /// # Ok::<(), browser_test::InvalidEnvVar>(())
@@ -46,7 +48,7 @@ pub(crate) const DEFAULT_GROUP_FILTER_ENV: &str = "BROWSER_TEST_GROUP";
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TestFilter {
     name_substrings: Vec<String>,
-    groups: Vec<String>,
+    tags: Vec<String>,
 }
 
 impl TestFilter {
@@ -69,22 +71,22 @@ impl TestFilter {
         self
     }
 
-    /// Also select tests of the [`TestGroup`](crate::TestGroup) named exactly `group`.
+    /// Also select tests tagged exactly `tag` (see [`BrowserTest::tags`]).
     ///
-    /// The first group restricts the selection to tests of matching groups, every further one
-    /// widens it. Ungrouped tests are no longer selected then. An empty `group` is ignored.
+    /// The first tag restricts the selection to tests with that tag, every further one widens it.
+    /// Untagged tests are no longer selected then. An empty `tag` is ignored.
     #[must_use]
-    pub fn with_group(mut self, group: impl Into<String>) -> Self {
-        let group = group.into();
-        if !group.is_empty() {
-            self.groups.push(group);
+    pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
+        let tag = tag.into();
+        if !tag.is_empty() {
+            self.tags.push(tag);
         }
         self
     }
 
-    /// Read name substrings from `BROWSER_TEST_FILTER` and group names from `BROWSER_TEST_GROUP`.
+    /// Read name substrings from `BROWSER_TEST_FILTER` and tags from `BROWSER_TEST_TAG`.
     ///
-    /// See [`Self::with_name_substrings_from_env_var`] and [`Self::with_groups_from_env_var`] for
+    /// See [`Self::with_name_substrings_from_env_var`] and [`Self::with_tags_from_env_var`] for
     /// the syntax. Unset variables select every test.
     ///
     /// # Errors
@@ -93,7 +95,7 @@ impl TestFilter {
     pub fn from_env() -> Result<Self, InvalidEnvVar> {
         Self::new()
             .with_name_substrings_from_env_var(DEFAULT_NAME_FILTER_ENV)?
-            .with_groups_from_env_var(DEFAULT_GROUP_FILTER_ENV)
+            .with_tags_from_env_var(DEFAULT_TAG_FILTER_ENV)
     }
 
     /// Add the comma-separated name substrings of the variable `env_var`, as
@@ -115,43 +117,45 @@ impl TestFilter {
             .fold(self, Self::with_name_containing))
     }
 
-    /// Add the comma-separated group names of the variable `env_var`, as [`Self::with_group`]
-    /// does.
+    /// Add the comma-separated tags of the variable `env_var`, as [`Self::with_tag`] does.
     ///
-    /// Whitespace around each name is ignored, and so are empty ones: an unset or empty variable
-    /// adds none. `BROWSER_TEST_GROUP=button,focus` selects the tests of these two groups. The
-    /// variable is read when this function is called.
+    /// Whitespace around each tag is ignored, and so are empty ones: an unset or empty variable
+    /// adds none. `BROWSER_TEST_TAG=button,focus` selects the tests tagged `button` or `focus`.
+    /// The variable is read when this function is called.
     ///
     /// # Errors
     ///
     /// Returns [`InvalidEnvVar`] if the variable is not valid Unicode.
-    pub fn with_groups_from_env_var(self, env_var: impl AsRef<str>) -> Result<Self, InvalidEnvVar> {
+    pub fn with_tags_from_env_var(self, env_var: impl AsRef<str>) -> Result<Self, InvalidEnvVar> {
         Ok(env_list(env_var.as_ref())?
             .into_iter()
-            .fold(self, Self::with_group))
+            .fold(self, Self::with_tag))
     }
 
     /// Whether this filter selects every test.
     #[must_use]
     pub fn selects_all(&self) -> bool {
-        self.name_substrings.is_empty() && self.groups.is_empty()
+        self.name_substrings.is_empty() && self.tags.is_empty()
     }
 
-    pub(crate) fn apply<Context: Sync + ?Sized>(
-        &self,
-        mut tests: BrowserTests<Context>,
-    ) -> BrowserTests<Context> {
-        if !self.groups.is_empty() {
-            tests = tests.filter_groups(|name| self.groups.iter().any(|group| group == name));
-        }
-        if !self.name_substrings.is_empty() {
-            tests = tests.filter_tests(|name| {
+    /// Whether this filter selects `test`. Reads only the metadata it filters by, and selects a
+    /// test whose name or tags panic, so that the run reports it as failed.
+    pub(crate) fn selects<Context: Sync + ?Sized>(&self, test: &dyn BrowserTest<Context>) -> bool {
+        std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let name_matches = self.name_substrings.is_empty() || {
+                let name = test.name();
                 self.name_substrings
                     .iter()
                     .any(|substring| name.contains(substring.as_str()))
-            });
-        }
-        tests
+            };
+            name_matches
+                && (self.tags.is_empty()
+                    || test
+                        .tags()
+                        .iter()
+                        .any(|tag| self.tags.iter().any(|wanted| wanted == tag)))
+        }))
+        .unwrap_or(true)
     }
 }
 
@@ -181,23 +185,23 @@ mod tests {
     #[test]
     fn environment_lists_trim_and_ignore_empty_parts() {
         let names = EnvVarGuard::new(DEFAULT_NAME_FILTER_ENV);
-        let groups = EnvVarGuard::new_unlocked(DEFAULT_GROUP_FILTER_ENV);
+        let tags = EnvVarGuard::new_unlocked(DEFAULT_TAG_FILTER_ENV);
         names.remove();
-        groups.remove();
+        tags.remove();
         assert_eq!(TestFilter::from_env().unwrap(), TestFilter::new());
         assert!(TestFilter::from_env().unwrap().selects_all());
         names.set(" , \t,");
-        groups.set("");
+        tags.set("");
         assert_eq!(TestFilter::from_env().unwrap(), TestFilter::new());
         names.set(" hover, ,press ");
-        groups.set(" button, focus, ");
+        tags.set(" button, focus, ");
         assert_eq!(
             TestFilter::from_env().unwrap(),
             TestFilter::new()
                 .with_name_containing("hover")
                 .with_name_containing("press")
-                .with_group("button")
-                .with_group("focus")
+                .with_tag("button")
+                .with_tag("focus")
         );
     }
 
@@ -221,7 +225,7 @@ mod tests {
         assert!(
             TestFilter::new()
                 .with_name_containing("")
-                .with_group("")
+                .with_tag("")
                 .selects_all()
         );
     }

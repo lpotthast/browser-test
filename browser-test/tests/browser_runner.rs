@@ -13,9 +13,9 @@ use std::{
 
 use assertr::prelude::*;
 use browser_test::{
-    BrowserTest, BrowserTestError, BrowserTestRunReport, BrowserTestRunner, BrowserTests,
-    Cancellation, CancellationToken, FailurePolicy, Parallelism, StepExt, TestOutcome,
-    TestSettings, async_trait, browser_test,
+    BrowserTest, BrowserTestError, BrowserTestRunReport, BrowserTestRunner, Cancellation,
+    CancellationToken, FailurePolicy, Parallelism, StepExt, TestOutcome, TestSettings, TestSuite,
+    async_trait, browser_test,
     thirtyfour::{By, ChromiumLikeCapabilities, WebDriver, prelude::ElementQueryable},
 };
 use rootcause::{Report, prelude::ResultExt};
@@ -291,6 +291,7 @@ impl BrowserTest<IntegrationContext> for PanicTest {
 #[derive(Clone, Copy)]
 enum MetadataPanicHook {
     Name,
+    Tags,
     Settings,
 }
 
@@ -306,6 +307,14 @@ impl BrowserTest<IntegrationContext> for MetadataPanicTest {
         }
 
         Cow::Borrowed("metadata panic")
+    }
+
+    fn tags(&self) -> Vec<Cow<'_, str>> {
+        if matches!(self.panic_in, MetadataPanicHook::Tags) {
+            panic!("tags hook failed");
+        }
+
+        Vec::new()
     }
 
     fn settings(&self) -> TestSettings {
@@ -354,7 +363,7 @@ async fn default_sequential_fail_fast_runs_page_title_test() -> RunnerResult {
     runner()
         .run(
             &IntegrationContext::default(),
-            BrowserTests::sequential().with(page_title_test("page title")),
+            TestSuite::sequential().with(page_title_test("page title")),
         )
         .await
 }
@@ -367,7 +376,7 @@ async fn failure_reports_locate_errors_in_test_code() {
     let err = runner()
         .run(
             &IntegrationContext::default(),
-            BrowserTests::sequential().with(MissingElementTest),
+            TestSuite::sequential().with(MissingElementTest),
         )
         .await
         .expect_err("the element is missing");
@@ -404,7 +413,7 @@ async fn failure_reports_name_browser_test_functions() {
     let err = runner()
         .run(
             &IntegrationContext::default(),
-            BrowserTests::sequential().with(MissingElement),
+            TestSuite::sequential().with(MissingElement),
         )
         .await
         .expect_err("the element is missing");
@@ -428,7 +437,7 @@ async fn failure_reports_locate_panics() {
     let err = runner()
         .run(
             &IntegrationContext::default(),
-            BrowserTests::sequential().with(PanickingTest),
+            TestSuite::sequential().with(PanickingTest),
         )
         .await
         .expect_err("the test panics");
@@ -448,7 +457,7 @@ async fn failure_reports_name_panics_outside_the_test_code() {
     let err = runner()
         .run(
             &IntegrationContext::default(),
-            BrowserTests::sequential().with(PanickingInADependencyTest),
+            TestSuite::sequential().with(PanickingInADependencyTest),
         )
         .await
         .expect_err("the test panics");
@@ -469,7 +478,7 @@ async fn sessions_start_with_a_focused_page() -> RunnerResult {
     runner()
         .run(
             &IntegrationContext::default(),
-            BrowserTests::sequential().with(FocusEventTest),
+            TestSuite::sequential().with(FocusEventTest),
         )
         .await
 }
@@ -480,7 +489,7 @@ async fn explicit_sequential_runs_page_title_test() -> RunnerResult {
     runner()
         .run(
             &IntegrationContext::default(),
-            BrowserTests::sequential().with(page_title_test("page title")),
+            TestSuite::sequential().with(page_title_test("page title")),
         )
         .await
 }
@@ -491,7 +500,7 @@ async fn bounded_parallel_runs_page_title_tests() -> RunnerResult {
     runner()
         .run(
             &IntegrationContext::default(),
-            BrowserTests::parallel(Parallelism::parallel(2))
+            TestSuite::parallel(Parallelism::parallel(2))
                 .with(page_title_test(String::from("page title one")))
                 .with(page_title_test("page title two")),
         )
@@ -505,7 +514,7 @@ async fn run_all_runs_successful_page_title_tests() -> RunnerResult {
         .with_failure_policy(FailurePolicy::RunAll)
         .run(
             &IntegrationContext::default(),
-            BrowserTests::sequential()
+            TestSuite::sequential()
                 .with(page_title_test("page title one"))
                 .with(page_title_test("page title two")),
         )
@@ -519,7 +528,7 @@ async fn run_all_reports_intentional_failure_and_runs_page_title_test() {
         .with_failure_policy(FailurePolicy::RunAll)
         .run(
             &IntegrationContext::default(),
-            BrowserTests::sequential()
+            TestSuite::sequential()
                 .with(IntentionalFailureTest { started: None })
                 .with(page_title_test("page title")),
         )
@@ -558,16 +567,17 @@ impl BrowserTest<IntegrationContext> for PanicsBeforeItsFuture {
 #[serial]
 async fn run_all_reports_panics_outside_test_bodies_and_runs_remaining_tests() {
     let started = Arc::new(AtomicUsize::new(0));
-    let err = runner()
-        .with_failure_policy(FailurePolicy::RunAll)
-        .run(
-            &IntegrationContext::default(),
-            BrowserTests::sequential().with(PanicsBeforeItsFuture).with(
-                page_title_test_with_counter("page title", Arc::clone(&started)),
-            ),
-        )
-        .await
-        .expect_err("run-all should report the panic");
+    let err =
+        runner()
+            .with_failure_policy(FailurePolicy::RunAll)
+            .run(
+                &IntegrationContext::default(),
+                TestSuite::sequential().with(PanicsBeforeItsFuture).with(
+                    page_title_test_with_counter("page title", Arc::clone(&started)),
+                ),
+            )
+            .await
+            .expect_err("run-all should report the panic");
 
     assert_that!(started.load(Ordering::SeqCst)).is_equal_to(1);
     assert_that!(err).has_child_count(1);
@@ -582,9 +592,12 @@ async fn run_all_reports_metadata_hook_panics_and_runs_remaining_page_title_test
         .with_failure_policy(FailurePolicy::RunAll)
         .run(
             &IntegrationContext::default(),
-            BrowserTests::sequential()
+            TestSuite::sequential()
                 .with(MetadataPanicTest {
                     panic_in: MetadataPanicHook::Name,
+                })
+                .with(MetadataPanicTest {
+                    panic_in: MetadataPanicHook::Tags,
                 })
                 .with(MetadataPanicTest {
                     panic_in: MetadataPanicHook::Settings,
@@ -599,9 +612,10 @@ async fn run_all_reports_metadata_hook_panics_and_runs_remaining_page_title_test
 
     assert_that!(started.load(Ordering::SeqCst)).is_equal_to(1);
     assert_that!(err.to_string())
-        .contains(BrowserTestError::RunTests { failed_tests: 2 }.to_string());
-    assert_that!(err).has_child_count(2);
+        .contains(BrowserTestError::RunTests { failed_tests: 3 }.to_string());
+    assert_that!(err).has_child_count(3);
     assert_that!(format!("{err:?}")).contains("unnamed test at index 0");
+    assert_that!(format!("{err:?}")).contains("tags hook failed");
     assert_that!(format!("{err:?}")).contains("settings hook failed");
 }
 
@@ -613,7 +627,7 @@ async fn parallel_run_all_reports_panic_and_runs_remaining_page_title_tests() {
         .with_failure_policy(FailurePolicy::RunAll)
         .run(
             &IntegrationContext::default(),
-            BrowserTests::parallel(Parallelism::parallel(2))
+            TestSuite::parallel(Parallelism::parallel(2))
                 .with(PanicTest {
                     started: Some(Arc::clone(&started)),
                 })
@@ -643,7 +657,7 @@ async fn parallel_fail_fast_waits_for_running_page_title_test_without_starting_m
         .with_failure_policy(FailurePolicy::FailFast)
         .run(
             &IntegrationContext::default(),
-            BrowserTests::parallel(Parallelism::parallel(2))
+            TestSuite::parallel(Parallelism::parallel(2))
                 .with(IntentionalFailureTest {
                     started: Some(Arc::clone(&started)),
                 })
@@ -674,7 +688,7 @@ async fn run_removes_the_chrome_profiles_of_its_sessions() -> RunnerResult {
         .with_chrome_profiles_dir(profiles_dir.path())
         .run(
             &IntegrationContext::default(),
-            BrowserTests::parallel(Parallelism::parallel(2))
+            TestSuite::parallel(Parallelism::parallel(2))
                 .with(page_title_test("page title one"))
                 .with(page_title_test("page title two")),
         )
@@ -692,7 +706,7 @@ async fn capability_setup_setting_user_data_dir_fails_the_session() {
         .with_chrome_capabilities(|caps| caps.add_arg("--user-data-dir=/custom"))
         .run(
             &IntegrationContext::default(),
-            BrowserTests::sequential().with(page_title_test_with_counter(
+            TestSuite::sequential().with(page_title_test_with_counter(
                 "page title",
                 Arc::clone(&started),
             )),
@@ -718,7 +732,7 @@ async fn unusable_chrome_profiles_dir_fails_the_run() {
         .with_chrome_profiles_dir(profiles_dir.path())
         .run(
             &IntegrationContext::default(),
-            BrowserTests::sequential().with(page_title_test("page title")),
+            TestSuite::sequential().with(page_title_test("page title")),
         )
         .await
         .expect_err("a profiles dir other users can access should be rejected");
@@ -735,7 +749,7 @@ async fn cancelled_token_cancels_the_run_before_any_test_starts() {
     let err = runner_with(Cancellation::from_token(cancellation))
         .run(
             &IntegrationContext::default(),
-            BrowserTests::sequential().with(page_title_test_with_counter(
+            TestSuite::sequential().with(page_title_test_with_counter(
                 "not started",
                 Arc::clone(&started),
             )),
@@ -762,7 +776,7 @@ async fn cancellation_stops_the_run_and_its_browsers() {
     let err = runner
         .run(
             &IntegrationContext::default(),
-            BrowserTests::sequential()
+            TestSuite::sequential()
                 .with(RunForeverTest::new(move || cancellation.cancel()))
                 .with(page_title_test_with_counter(
                     "not started",
@@ -856,7 +870,7 @@ async fn a_frozen_page_times_out_and_is_closed() {
     let err = runner
         .run(
             &IntegrationContext::default(),
-            BrowserTests::sequential()
+            TestSuite::sequential()
                 .with(FreezingTest)
                 .with(page_title_test("after a frozen page")),
         )
@@ -886,7 +900,7 @@ async fn a_test_waiting_forever_times_out() {
     let err = runner
         .run(
             &IntegrationContext::default(),
-            BrowserTests::sequential().with(RunForeverTest::new(|| {})),
+            TestSuite::sequential().with(RunForeverTest::new(|| {})),
         )
         .await
         .expect_err("the test times out");
@@ -997,7 +1011,7 @@ async fn a_frozen_frame_of_another_site_is_closed() {
     let err = runner
         .run(
             &IntegrationContext::default(),
-            BrowserTests::sequential()
+            TestSuite::sequential()
                 .with(FreezingFrameTest { url })
                 .with(page_title_test("after a frozen frame")),
         )
@@ -1052,7 +1066,7 @@ async fn a_dialog_is_named_rather_than_a_frozen_page() {
     let err = runner
         .run(
             &IntegrationContext::default(),
-            BrowserTests::sequential()
+            TestSuite::sequential()
                 .with(DialogTest)
                 .with(page_title_test("after a dialog")),
         )
@@ -1113,7 +1127,7 @@ fn child_run_on_a_second_runtime_to_be_cancelled_by_a_signal() -> RunnerResult {
     // with tests do.
     runtime().block_on(runner_with(Cancellation::on_shutdown_signals()).run(
         &IntegrationContext::default(),
-        BrowserTests::sequential().with(page_title_test("page title")),
+        TestSuite::sequential().with(page_title_test("page title")),
     ))?;
     runtime().block_on(child_run(runner_with(Cancellation::on_shutdown_signals())))
 }
@@ -1175,7 +1189,7 @@ async fn next_run_removes_the_chrome_profiles_of_a_killed_run() -> RunnerResult 
         .with_chrome_profiles_dir(&profiles_dir)
         .run(
             &IntegrationContext::default(),
-            BrowserTests::sequential().with(page_title_test("page title")),
+            TestSuite::sequential().with(page_title_test("page title")),
         )
         .await?;
 
@@ -1195,7 +1209,7 @@ async fn child_run(runner: BrowserTestRunner) -> RunnerResult {
         .with_chrome_profiles_dir(ChildRun::profiles_dir_in(&dir))
         .run(
             &IntegrationContext::default(),
-            BrowserTests::sequential().with(RunForeverTest::new(move || {
+            TestSuite::sequential().with(RunForeverTest::new(move || {
                 fs::write(&ready_file, "").expect("ready file should be writable");
             })),
         )

@@ -76,7 +76,7 @@ struct PoolState {
     /// Pool tests that have not requested a session yet.
     upcoming: Upcoming,
     /// Those of `upcoming` that start even after a failure stopped the run (see
-    /// [`BrowserTests::run_always`](crate::BrowserTests::run_always)).
+    /// [`TestSuite::run_always`](crate::TestSuite::run_always)).
     upcoming_always: Upcoming,
     next_session: usize,
     closed: bool,

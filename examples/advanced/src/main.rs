@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use browser_test::thirtyfour::ChromiumLikeCapabilities;
 use browser_test::{
-    BrowserTestRunReport, BrowserTestRunner, BrowserTests, CachedData, Cancellation, Channel,
-    ChromeBinary, DriverOutput, ElementQueryWait, FailurePolicy, Parallelism, Pause,
-    ProgressWarnings, SessionReset, SessionReuse, StderrSummary, Timeouts, Visibility,
+    BrowserTestRunReport, BrowserTestRunner, CachedData, Cancellation, Channel, ChromeBinary,
+    DriverOutput, ElementQueryWait, FailurePolicy, Parallelism, Pause, ProgressWarnings,
+    SessionReset, SessionReuse, StderrSummary, TestFilter, TestSuite, Timeouts, Visibility,
 };
 use rootcause::Report;
 use rootcause::hooks::Hooks;
@@ -55,8 +55,9 @@ async fn main() -> Result<(), Report> {
     };
 
     // Four tests, two at a time: later tests run in a spare session or in the reset session of an
-    // earlier test.
-    let tests = BrowserTests::parallel(
+    // earlier test. Set e.g. `BROWSER_TEST_TAG=smoke` or `BROWSER_TEST_FILTER=edition` to run only
+    // some of them.
+    let tests = TestSuite::parallel(
         Parallelism::from_env()
             .context("Reading the parallelism setting")?
             .unwrap_or(Parallelism::parallel(2)),
@@ -64,7 +65,8 @@ async fn main() -> Result<(), Report> {
     .with(TitleContainsWikipedia)
     .with(SearchInputIsVisible)
     .with(EditionIsLinked { language: "en" })
-    .with(EditionIsLinked { language: "de" });
+    .with(EditionIsLinked { language: "de" })
+    .filter(&TestFilter::from_env().context("Reading the test filter")?);
 
     // Set `BROWSER_TEST_VISIBLE=0` to run headless, in Chrome Headless Shell.
     let visibility = Visibility::from_env()
