@@ -737,7 +737,7 @@ mod tests {
         ))
         .is_equal_to("Page::css");
         assert_that!(function_name(
-            "<browser_runner::MissingElementTest as browser_test::test_case::BrowserTest<browser_runner::IntegrationContext, browser_runner::IntegrationTestError>>::run::{{closure}}"
+            "<browser_runner::MissingElementTest as browser_test::test_case::BrowserTest<browser_runner::IntegrationContext>>::run::{{closure}}"
         ))
         .is_equal_to("MissingElementTest::run");
         assert_that!(function_name(

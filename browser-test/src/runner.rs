@@ -407,14 +407,13 @@ impl BrowserTestRunner {
     /// [`Cancellation::on_shutdown_signals`]), if the directory for Chrome profiles cannot be
     /// created, if Chrome for Testing cannot be launched or shut down, if a session cannot be
     /// created, if any test fails, or [`BrowserTestError::Cancelled`] if the run is cancelled.
-    pub async fn run<Context, TestError>(
+    pub async fn run<Context>(
         &self,
         context: &Context,
-        tests: BrowserTests<Context, TestError>,
+        tests: BrowserTests<Context>,
     ) -> Result<(), Report<BrowserTestError>>
     where
         Context: Sync + ?Sized,
-        TestError: ?Sized + 'static,
     {
         // Before listening for shutdown signals, as an empty run has nothing to clean up.
         if tests.is_empty() {
@@ -442,16 +441,15 @@ impl BrowserTestRunner {
         result
     }
 
-    async fn run_reporting<Context, TestError>(
+    async fn run_reporting<Context>(
         &self,
         context: &Context,
-        tests: BrowserTests<Context, TestError>,
+        tests: BrowserTests<Context>,
         cancellation: &CancellationToken,
         report: &mut BrowserTestRunReport,
     ) -> Result<(), Report<BrowserTestError>>
     where
         Context: Sync + ?Sized,
-        TestError: ?Sized + 'static,
     {
         let decision = tokio::select! {
             biased;
@@ -529,17 +527,16 @@ impl BrowserTestRunner {
         }
     }
 
-    async fn run_tests<Context, TestError>(
+    async fn run_tests<Context>(
         &self,
         chrome: &ChromeForTesting,
         profiles: &RunProfiles,
         cancellation: &CancellationToken,
         context: &Context,
-        tests: BrowserTests<Context, TestError>,
+        tests: BrowserTests<Context>,
     ) -> Execution
     where
         Context: Sync + ?Sized,
-        TestError: ?Sized + 'static,
     {
         let config = ExecutionConfig {
             chrome,

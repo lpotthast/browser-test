@@ -165,7 +165,11 @@ fn generated_tests_implement_the_trait_with_distinct_module_qualified_names() {
     );
     let _: BrowserTests = BrowserTests::sequential().with(FunctionAttributes);
     let _: BrowserTests<str> = BrowserTests::sequential().with(RawDriver);
-    let _: BrowserTests<(), CustomError> = BrowserTests::sequential().with(TypedError);
+    // Tests of different error types share a group.
+    let _: BrowserTests = BrowserTests::sequential()
+        .with(TypedError)
+        .with(FunctionAttributes)
+        .with_test_group(TestGroup::new("typed").with(TypedError));
     let tests = BrowserTests::sequential()
         .with_test_group(
             TestGroup::new("smoke")

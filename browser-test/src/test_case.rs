@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use rootcause::Report;
 use thirtyfour::WebDriver;
 
-use crate::{Parallelism, TestFilter, TestSettings};
+use crate::{__private::TestResult, Parallelism, TestFilter, TestSettings};
 
 /// A browser test: a named async body run in a `WebDriver` session, with the run's context.
 ///
@@ -21,8 +21,9 @@ use crate::{Parallelism, TestFilter, TestSettings};
 ///   their own ([`Self::settings`]), tests with parameters, and wrappers around other tests.
 ///
 /// `Context` is what [`BrowserTestRunner::run`](crate::BrowserTestRunner::run) gives every test,
-/// e.g. the app's base URL. `TestError` is the error type of the [`Report`] a failing test
-/// returns. The runner adds the test's name to it.
+/// e.g. the app's base URL. A failing test returns a [`Report`], to which the runner adds the
+/// test's name. Helpers returning `Report<E>`s of an error type of their own convert into it with
+/// `?`. Return an error of your own type with `rootcause::bail!(error)`.
 ///
 /// # Examples
 ///
@@ -95,10 +96,9 @@ use crate::{Parallelism, TestFilter, TestSettings};
 // `async_trait` marks the boxed futures `#[must_use]`, which they are already.
 #[allow(clippy::double_must_use)]
 #[async_trait]
-pub trait BrowserTest<Context = (), TestError = rootcause::markers::Dynamic>: Send + Sync
+pub trait BrowserTest<Context = ()>: Send + Sync
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized,
 {
     /// The test's name, used in logs, reports and failures, and matched by
     /// [`TestFilter`].
@@ -160,19 +160,19 @@ where
     /// The runner polls the tests of a run on one task, as they borrow its context. Don't block
     /// the thread (`std::thread::sleep`, blocking I/O, heavy computation): that stalls every other
     /// test running at the same time. Await instead, or use `tokio::task::spawn_blocking`.
-    async fn run(&self, driver: &WebDriver, context: &Context) -> Result<(), Report<TestError>>;
+    async fn run(&self, driver: &WebDriver, context: &Context) -> Result<(), Report>;
 }
 
 // Express the Send bound for a function's future without requiring callers to box it.
 // Using the complete argument type keeps borrowed contexts valid under higher-ranked bounds.
-trait TestFn<Argument, TestError: ?Sized + 'static>: Fn(Argument) -> Self::Run {
-    type Run: Future<Output = Result<(), Report<TestError>>> + Send;
+trait TestFn<Argument>: Fn(Argument) -> Self::Run {
+    type Run: Future<Output: TestResult> + Send;
 }
 
-impl<Argument, TestError: ?Sized + 'static, F, Run> TestFn<Argument, TestError> for F
+impl<Argument, F, Run> TestFn<Argument> for F
 where
     F: Fn(Argument) -> Run,
-    Run: Future<Output = Result<(), Report<TestError>>> + Send,
+    Run: Future<Output: TestResult> + Send,
 {
     type Run = Run;
 }
@@ -184,14 +184,13 @@ where
 /// [`#[browser_test]`](macro@crate::browser_test) for tests that also take the `WebDriver`, or should be
 /// described by their doc comments.
 #[async_trait]
-impl<Context, TestError, F> BrowserTest<Context, TestError> for F
+impl<Context, F> BrowserTest<Context> for F
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized + 'static,
-    F: for<'a> TestFn<&'a Context, TestError> + Send + Sync,
+    F: for<'a> TestFn<&'a Context> + Send + Sync,
 {
-    async fn run(&self, _driver: &WebDriver, context: &Context) -> Result<(), Report<TestError>> {
-        self(context).await
+    async fn run(&self, _driver: &WebDriver, context: &Context) -> Result<(), Report> {
+        self(context).await.into_dynamic()
     }
 }
 
@@ -203,11 +202,10 @@ pub struct NamedTest<T> {
 }
 
 #[async_trait]
-impl<Context, TestError, T> BrowserTest<Context, TestError> for NamedTest<T>
+impl<Context, T> BrowserTest<Context> for NamedTest<T>
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized,
-    T: BrowserTest<Context, TestError>,
+    T: BrowserTest<Context>,
 {
     fn name(&self) -> Cow<'_, str> {
         self.name.as_str().into()
@@ -221,7 +219,7 @@ where
         self.test.settings()
     }
 
-    async fn run(&self, driver: &WebDriver, context: &Context) -> Result<(), Report<TestError>> {
+    async fn run(&self, driver: &WebDriver, context: &Context) -> Result<(), Report> {
         self.test.run(driver, context).await
     }
 }
@@ -275,15 +273,14 @@ where
 ///     );
 /// # Ok::<(), browser_test::InvalidEnvVar>(())
 /// ```
-pub struct BrowserTests<Context = (), TestError = rootcause::markers::Dynamic>
+pub struct BrowserTests<Context = ()>
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized,
 {
     pub(crate) parallelism: Parallelism,
     pub(crate) name: Option<String>,
     pub(crate) run_always: bool,
-    pub(crate) entries: Vec<BrowserTestEntry<Context, TestError>>,
+    pub(crate) entries: Vec<BrowserTestEntry<Context>>,
 }
 
 /// A logical group of tests, e.g. the tests of one component, for selecting them by name.
@@ -310,19 +307,17 @@ where
 /// let tests: BrowserTests<str> = BrowserTests::parallel(Parallelism::parallel(4))
 ///     .with_test_group(TestGroup::new("button").with(Presses).with(PressesWithKeyboard));
 /// ```
-pub struct TestGroup<Context = (), TestError = rootcause::markers::Dynamic>
+pub struct TestGroup<Context = ()>
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized,
 {
     pub(crate) name: String,
-    pub(crate) tests: Vec<Box<dyn BrowserTest<Context, TestError>>>,
+    pub(crate) tests: Vec<Box<dyn BrowserTest<Context>>>,
 }
 
-impl<Context, TestError> TestGroup<Context, TestError>
+impl<Context> TestGroup<Context>
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized,
 {
     /// An empty group named `name`, which [`TestFilter::with_group`](crate::TestFilter::with_group)
     /// selects.
@@ -336,16 +331,15 @@ where
 
     /// Add a test.
     #[must_use]
-    pub fn with(mut self, test: impl BrowserTest<Context, TestError> + 'static) -> Self {
+    pub fn with(mut self, test: impl BrowserTest<Context> + 'static) -> Self {
         self.tests.push(Box::new(test));
         self
     }
 }
 
-impl<Context, TestError> fmt::Debug for TestGroup<Context, TestError>
+impl<Context> fmt::Debug for TestGroup<Context>
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TestGroup")
@@ -363,20 +357,18 @@ where
 }
 
 /// An entry of a [`BrowserTests`] group.
-pub(crate) enum BrowserTestEntry<Context, TestError>
+pub(crate) enum BrowserTestEntry<Context>
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized,
 {
-    Test(Box<dyn BrowserTest<Context, TestError>>),
-    Group(BrowserTests<Context, TestError>),
-    TestGroup(TestGroup<Context, TestError>),
+    Test(Box<dyn BrowserTest<Context>>),
+    Group(BrowserTests<Context>),
+    TestGroup(TestGroup<Context>),
 }
 
-impl<Context, TestError> BrowserTests<Context, TestError>
+impl<Context> BrowserTests<Context>
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized,
 {
     /// A group running its entries one after another.
     #[must_use]
@@ -415,7 +407,7 @@ where
     #[must_use]
     pub fn with<T>(mut self, test: T) -> Self
     where
-        T: BrowserTest<Context, TestError> + 'static,
+        T: BrowserTest<Context> + 'static,
     {
         self.entries.push(BrowserTestEntry::Test(Box::new(test)));
         self
@@ -437,7 +429,7 @@ where
     /// The group does not change how its tests run. It only makes them selectable by its name,
     /// see [`TestGroup`].
     #[must_use]
-    pub fn with_test_group(mut self, group: TestGroup<Context, TestError>) -> Self {
+    pub fn with_test_group(mut self, group: TestGroup<Context>) -> Self {
         self.entries.push(BrowserTestEntry::TestGroup(group));
         self
     }
@@ -510,10 +502,9 @@ where
     }
 }
 
-impl<Context, TestError> fmt::Debug for BrowserTests<Context, TestError>
+impl<Context> fmt::Debug for BrowserTests<Context>
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BrowserTests")
@@ -525,10 +516,9 @@ where
     }
 }
 
-impl<Context, TestError> fmt::Debug for BrowserTestEntry<Context, TestError>
+impl<Context> fmt::Debug for BrowserTestEntry<Context>
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -540,36 +530,31 @@ where
 }
 
 /// The name of `test`, or `None` if reading it panics.
-fn name_of<Context, TestError>(test: &dyn BrowserTest<Context, TestError>) -> Option<Cow<'_, str>>
+fn name_of<Context>(test: &dyn BrowserTest<Context>) -> Option<Cow<'_, str>>
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized,
 {
     std::panic::catch_unwind(AssertUnwindSafe(|| test.name())).ok()
 }
 
 /// Whether `include` accepts the name of `test`. A test whose name panics is kept, so that the
 /// run reports it as failed.
-fn includes<Context, TestError>(
+fn includes<Context>(
     include: &mut impl FnMut(&str) -> bool,
-    test: &dyn BrowserTest<Context, TestError>,
+    test: &dyn BrowserTest<Context>,
 ) -> bool
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized,
 {
     name_of(test).is_none_or(|name| include(&name))
 }
 
 /// A test's name in `Debug` output, also if reading it panics.
-struct DebugName<'a, Context: Sync + ?Sized, TestError: ?Sized>(
-    &'a dyn BrowserTest<Context, TestError>,
-);
+struct DebugName<'a, Context: Sync + ?Sized>(&'a dyn BrowserTest<Context>);
 
-impl<Context, TestError> fmt::Debug for DebugName<'_, Context, TestError>
+impl<Context> fmt::Debug for DebugName<'_, Context>
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match name_of(self.0) {

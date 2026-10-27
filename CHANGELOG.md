@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** `BrowserTest`, `BrowserTests` and `TestGroup` lost their `TestError` type parameter, so that tests of
+  different error types can share a group. `BrowserTest::run` returns a `Report`, into which a `Report<E>` converts
+  with `?`. Replace `impl BrowserTest<Context, E>` with `impl BrowserTest<Context>` returning `Result<(), Report>`,
+  `BrowserTests<Context, E>` with `BrowserTests<Context>`, and `TestGroup<Context, E>` with `TestGroup<Context>`.
+  `#[browser_test]` functions and `async fn`s used as tests can still return a non-dynamic `Report<E>`. A closure used
+  as a test that only returns `Ok(())` needs its error type spelled out, e.g. `Ok::<(), Report>(())`. A test wrapping
+  another one gets its error as a `Report` and downcasts it to inspect a typed error.
 - **Breaking:** Updated `thirtyfour` to version `0.38`.
 - Updated `chrome-for-testing-manager` to version `0.15`.
 - Updated `assertr` to version `0.9`.

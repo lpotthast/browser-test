@@ -60,10 +60,9 @@ enum Failure {
     TimedOut { limit: Duration, pages: PageCheck },
 }
 
-impl<Context, TestError> Env<'_, Context, TestError>
+impl<Context> Env<'_, Context>
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized,
 {
     /// Record the finished test of `run`, whose session ended with `session_result` after
     /// `teardown` (`None`: the session runs further tests).
@@ -95,15 +94,14 @@ where
 }
 
 /// Run the test of `job` in `session`, prepared as `preparation`.
-pub(super) async fn run_job<Context, TestError>(
-    env: &Env<'_, Context, TestError>,
+pub(super) async fn run_job<Context>(
+    env: &Env<'_, Context>,
     session: &Session,
     job: &Job,
     preparation: SessionPreparation,
 ) -> JobRun
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized + 'static,
 {
     let test = env.assigned_test(job.test);
     let mut run = JobRun {
@@ -212,14 +210,13 @@ fn failure_report(name: &str, failure: Failure) -> (TestOutcome, Report<BrowserT
 
 /// Run the body of `test`, recording its duration, steps and failure into `run`. A body exceeding
 /// the time limit has its session's frozen pages closed.
-async fn run_body<Context, TestError>(
-    env: &Env<'_, Context, TestError>,
+async fn run_body<Context>(
+    env: &Env<'_, Context>,
     session: &Session,
-    test: &PreparedTest<Context, TestError>,
+    test: &PreparedTest<Context>,
     run: &mut JobRun,
 ) where
     Context: Sync + ?Sized,
-    TestError: ?Sized + 'static,
 {
     let name = test.name.as_str();
     tracing::debug!("Executing browser test: {name}");
@@ -252,7 +249,7 @@ async fn run_body<Context, TestError>(
     }
     run.failure = match result {
         Ok(Ok(Ok(()))) => None,
-        Ok(Ok(Err(error))) => Some(Failure::Error(error.into_dynamic())),
+        Ok(Ok(Err(error))) => Some(Failure::Error(error)),
         Ok(Err(payload)) => {
             let message = panic_payload_message(payload.as_ref());
             tracing::error!("Browser test '{name}' panicked: {message}");

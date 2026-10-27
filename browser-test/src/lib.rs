@@ -55,18 +55,41 @@ pub use wait::ElementQueryWait;
 /// Implementation details used by generated browser tests.
 #[doc(hidden)]
 pub mod __private {
-    /// Extract the error marker from a test's result, including through result aliases.
+    use std::future::Future;
+
+    use rootcause::Report;
+
+    /// What `BrowserTest::run` returns.
+    pub type DynamicResult = Result<(), Report>;
+
+    /// A test's result, including through result aliases, with its errors as dynamic reports, as
+    /// `BrowserTest::run` returns them.
     #[diagnostic::on_unimplemented(
-        message = "browser tests must return `Result<(), rootcause::Report<E>>`, not `{Self}`",
-        label = "the return type of this browser test",
-        note = "`rootcause::Report` without a type parameter is `Report<Dynamic>`, which any error converts into with `?`"
+        message = "browser tests must return `Result<(), rootcause::Report>` or `Result<(), rootcause::Report<E>>`, not `{Self}`",
+        label = "this browser test returns `{Self}`",
+        note = "any error converts into a `rootcause::Report` with `?`"
     )]
     pub trait TestResult {
-        /// The error marker expected by `BrowserTest`.
-        type Error: ?Sized + 'static;
+        /// This result, with its error as a dynamic report.
+        ///
+        /// # Errors
+        ///
+        /// Returns the test's error.
+        fn into_dynamic(self) -> DynamicResult;
     }
 
-    impl<E: ?Sized + 'static> TestResult for Result<(), rootcause::Report<E>> {
-        type Error = E;
+    impl<E: ?Sized + 'static> TestResult for Result<(), Report<E>> {
+        fn into_dynamic(self) -> DynamicResult {
+            self.map_err(Report::into_dynamic)
+        }
+    }
+
+    /// Run a test's `body`, and turn its result `into_dynamic`. Its frames are browser-test's,
+    /// which failure reports leave out.
+    pub async fn run_body<F>(body: F, into_dynamic: fn(F::Output) -> DynamicResult) -> DynamicResult
+    where
+        F: Future,
+    {
+        into_dynamic(body.await)
     }
 }

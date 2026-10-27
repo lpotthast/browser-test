@@ -71,6 +71,8 @@ use syn::ItemFn;
 /// - the run's context: `&Context`, implementing `BrowserTest<Context>`, or
 /// - the session's driver and the run's context: `&WebDriver, &Context`.
 ///
+/// `BrowserTest::run` returns a `Report<E>` as a `Report`, keeping `E` as its context.
+///
 /// The context can be unsized (`&str`) or borrow from the run (`&Page<'_>`): the generated test
 /// then implements `BrowserTest<Page<'a>>` for every lifetime `'a`. Lifetime parameters are
 /// allowed. Type and const parameters, `self` and `&mut` arguments are not. A test without

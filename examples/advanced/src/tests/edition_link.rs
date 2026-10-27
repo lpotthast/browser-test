@@ -5,7 +5,7 @@ use browser_test::{BrowserTest, async_trait};
 use rootcause::Report;
 
 use crate::Context;
-use crate::tests::{WikipediaTestError, goto, wait_for_visible};
+use crate::tests::{goto, wait_for_visible};
 
 /// The link to the Wikipedia edition in `language` is visible.
 ///
@@ -15,7 +15,7 @@ pub(crate) struct EditionIsLinked {
 }
 
 #[async_trait]
-impl BrowserTest<Context, WikipediaTestError> for EditionIsLinked {
+impl BrowserTest<Context> for EditionIsLinked {
     fn name(&self) -> Cow<'_, str> {
         format!("{}::edition_is_linked::{}", module_path!(), self.language).into()
     }
@@ -30,11 +30,7 @@ impl BrowserTest<Context, WikipediaTestError> for EditionIsLinked {
         )
     }
 
-    async fn run(
-        &self,
-        driver: &WebDriver,
-        context: &Context,
-    ) -> Result<(), Report<WikipediaTestError>> {
+    async fn run(&self, driver: &WebDriver, context: &Context) -> Result<(), Report> {
         goto(driver, context.base_url).await?;
         wait_for_visible(driver, &format!("#js-link-box-{}", self.language)).await?;
         Ok(())

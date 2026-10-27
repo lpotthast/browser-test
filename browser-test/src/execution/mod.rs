@@ -89,14 +89,13 @@ pub(crate) struct Execution {
 }
 
 /// Run every test of `tests`.
-pub(crate) async fn execute_tests<Context, TestError>(
+pub(crate) async fn execute_tests<Context>(
     config: &ExecutionConfig<'_>,
     context: &Context,
-    tests: BrowserTests<Context, TestError>,
+    tests: BrowserTests<Context>,
 ) -> Execution
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized + 'static,
 {
     let mut prepared = Vec::new();
     let mut next_group = 0;
@@ -203,14 +202,13 @@ fn default_spare_sessions(max_concurrency: usize, session_reuse: SessionReuse) -
 }
 
 /// State of one run, shared by the executor and the session workers.
-struct Env<'c, Context, TestError>
+struct Env<'c, Context>
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized,
 {
     config: &'c ExecutionConfig<'c>,
     context: &'c Context,
-    tests: Vec<QueuedTest<Context, TestError>>,
+    tests: Vec<QueuedTest<Context>>,
     keep_starting: AtomicBool,
     failures: Mutex<BrowserTestFailures>,
     records: Mutex<Vec<BrowserTestRecord>>,
@@ -221,13 +219,12 @@ where
     pool: SessionPool,
 }
 
-impl<Context, TestError> Env<'_, Context, TestError>
+impl<Context> Env<'_, Context>
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized,
 {
     /// The test at `index`, which a session was assigned. Only ready tests are.
-    fn assigned_test(&self, index: usize) -> &PreparedTest<Context, TestError> {
+    fn assigned_test(&self, index: usize) -> &PreparedTest<Context> {
         match &self.tests[index] {
             QueuedTest::Ready(test) => test,
             QueuedTest::Broken { .. } => unreachable!("only ready tests are assigned to sessions"),
@@ -323,13 +320,12 @@ where
 }
 
 /// Run `group`, recording its wall time if it is named.
-fn run_group<'r, Context, TestError>(
-    env: &'r Env<'_, Context, TestError>,
+fn run_group<'r, Context>(
+    env: &'r Env<'_, Context>,
     group: &'r Group,
 ) -> Pin<Box<dyn Future<Output = ()> + Send + 'r>>
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized + 'static,
 {
     Box::pin(async move {
         let start = Instant::now();
@@ -358,10 +354,9 @@ where
     })
 }
 
-async fn run_node<Context, TestError>(env: &Env<'_, Context, TestError>, node: &Node)
+async fn run_node<Context>(env: &Env<'_, Context>, node: &Node)
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized + 'static,
 {
     match node {
         // Tests not started because of fail-fast or a cancellation are not recorded.
@@ -375,10 +370,9 @@ where
 
 /// Run the test at `index` in a session of the pool (or one created for it) and return once its
 /// body finished. Its session quits or is reset, and its record is completed, in the background.
-async fn run_test<Context, TestError>(env: &Env<'_, Context, TestError>, index: usize)
+async fn run_test<Context>(env: &Env<'_, Context>, index: usize)
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized + 'static,
 {
     let test = match &env.tests[index] {
         QueuedTest::Ready(test) => test,

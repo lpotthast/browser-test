@@ -137,10 +137,10 @@ impl TestFilter {
         self.name_substrings.is_empty() && self.groups.is_empty()
     }
 
-    pub(crate) fn apply<Context: Sync + ?Sized, TestError: ?Sized>(
+    pub(crate) fn apply<Context: Sync + ?Sized>(
         &self,
-        mut tests: BrowserTests<Context, TestError>,
-    ) -> BrowserTests<Context, TestError> {
+        mut tests: BrowserTests<Context>,
+    ) -> BrowserTests<Context> {
         if !self.groups.is_empty() {
             tests = tests.filter_groups(|name| self.groups.iter().any(|group| group == name));
         }

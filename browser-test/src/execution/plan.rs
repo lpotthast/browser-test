@@ -21,10 +21,9 @@ pub(super) struct Placement {
 }
 
 /// A test whose metadata (name, settings) was read successfully.
-pub(super) struct PreparedTest<Context, TestError>
+pub(super) struct PreparedTest<Context>
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized,
 {
     pub(super) index: usize,
     pub(super) name: String,
@@ -37,13 +36,12 @@ where
     pub(super) fresh_session: bool,
     /// How long its body may run: its own time limit, else the runner's.
     pub(super) time_limit: Duration,
-    pub(super) test: Box<dyn BrowserTest<Context, TestError>>,
+    pub(super) test: Box<dyn BrowserTest<Context>>,
 }
 
-impl<Context, TestError> PreparedTest<Context, TestError>
+impl<Context> PreparedTest<Context>
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized,
 {
     /// Whether the test takes its session from the pool, rather than getting one created with
     /// its own settings.
@@ -52,12 +50,11 @@ where
     }
 }
 
-pub(super) enum QueuedTest<Context, TestError>
+pub(super) enum QueuedTest<Context>
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized,
 {
-    Ready(PreparedTest<Context, TestError>),
+    Ready(PreparedTest<Context>),
     /// Reading the test's metadata panicked. The test fails without running.
     Broken {
         index: usize,
@@ -67,10 +64,9 @@ where
     },
 }
 
-impl<Context, TestError> QueuedTest<Context, TestError>
+impl<Context> QueuedTest<Context>
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized,
 {
     pub(super) fn placement(&self) -> &Placement {
         match self {
@@ -117,16 +113,15 @@ impl Group {
 
 /// Number the tests of `tests`, placed in `parent`, in definition order into `prepared` and build
 /// the tree.
-pub(super) fn prepare_group<Context, TestError>(
-    tests: BrowserTests<Context, TestError>,
+pub(super) fn prepare_group<Context>(
+    tests: BrowserTests<Context>,
     parent: &Placement,
-    prepared: &mut Vec<QueuedTest<Context, TestError>>,
+    prepared: &mut Vec<QueuedTest<Context>>,
     next_group: &mut usize,
     defaults: TestDefaults,
 ) -> Group
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized + 'static,
 {
     let BrowserTests {
         parallelism,
@@ -179,15 +174,14 @@ where
     }
 }
 
-fn prepare_test<Context, TestError>(
+fn prepare_test<Context>(
     index: usize,
-    test: Box<dyn BrowserTest<Context, TestError>>,
+    test: Box<dyn BrowserTest<Context>>,
     placement: Placement,
     defaults: TestDefaults,
-) -> QueuedTest<Context, TestError>
+) -> QueuedTest<Context>
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized + 'static,
 {
     // Used in the panic report. We need a fallback for the case that `.name()` panics.
     let mut name = format!("unnamed test at index {index}");
@@ -224,7 +218,7 @@ where
 #[cfg(test)]
 mod tests {
     use assertr::prelude::*;
-    use rootcause::{Report, markers::Dynamic};
+    use rootcause::Report;
     use thirtyfour::WebDriver;
 
     use super::*;
@@ -341,7 +335,7 @@ mod tests {
             }
         }
 
-        fn prepared(test: TestSettings, runner: TestDefaults) -> PreparedTest<(), Dynamic> {
+        fn prepared(test: TestSettings, runner: TestDefaults) -> PreparedTest<()> {
             match prepare_test(
                 0,
                 Box::new(SettingsTest(test)),

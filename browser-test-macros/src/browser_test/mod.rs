@@ -111,18 +111,18 @@ pub(crate) fn expand(args: Arguments, mut function: ItemFn) -> manyhow::Result<T
     // `async_trait` names every lifetime elided in `run`'s arguments, including the higher-ranked
     // ones in `fn(&str)` or `Fn(&str)`. The alias hides them.
     let context_alias = format_ident!("__{name}Context");
-    // Spanned at the return type, where a wrong one is reported.
-    let error = quote_spanned! {result.span()=>
-        <#result as #crate_path::__private::TestResult>::Error
-    };
     let call_args = match inputs {
         Inputs::None => quote!(),
         Inputs::Context => quote!(__browser_test_context),
         Inputs::DriverAndContext => quote!(__browser_test_driver, __browser_test_context),
     };
+    // Spanned at the return type, where a wrong one is reported.
+    let into_dynamic = quote_spanned! {result.span()=>
+        <#result as #crate_path::__private::TestResult>::into_dynamic
+    };
     // Spanned at the function's name, where a future that is not `Send` is reported.
     let boxed_body = quote_spanned! {body.span()=>
-        ::std::boxed::Box::pin(#body(#call_args))
+        ::std::boxed::Box::pin(#crate_path::__private::run_body(#body(#call_args), #into_dynamic))
     };
     Ok(quote! {
         #(#docs)*
@@ -142,10 +142,11 @@ pub(crate) fn expand(args: Arguments, mut function: ItemFn) -> manyhow::Result<T
         type #context_alias #type_generics = #context;
 
         // `run` returns the function's future without an `async` block of its own (as
-        // `async_trait` would add one), so that no frame of generated code is on the stack while
-        // the test runs, and failure reports show the function as the test's outermost frame.
+        // `async_trait` would add one), only wrapped in browser-test's `run_body`, so that no frame
+        // of generated code is on the stack while the test runs, and failure reports show the
+        // function as the test's outermost frame.
         #(#cfgs)*
-        impl #impl_generics #crate_path::BrowserTest<#context, #error> for #name #where_clause {
+        impl #impl_generics #crate_path::BrowserTest<#context> for #name #where_clause {
             fn name(&self) -> ::std::borrow::Cow<'_, str> {
                 ::std::borrow::Cow::Borrowed(#test_name)
             }
@@ -161,7 +162,9 @@ pub(crate) fn expand(args: Arguments, mut function: ItemFn) -> manyhow::Result<T
                 __browser_test_driver: &'__driver #crate_path::thirtyfour::WebDriver,
                 __browser_test_context: &'__context #context_alias #type_generics,
             ) -> ::std::pin::Pin<::std::boxed::Box<
-                dyn ::std::future::Future<Output = #result> + ::std::marker::Send + '__future
+                dyn ::std::future::Future<Output = #crate_path::__private::DynamicResult>
+                    + ::std::marker::Send
+                    + '__future
             >>
             where
                 '__self: '__future,

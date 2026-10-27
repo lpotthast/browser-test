@@ -43,12 +43,11 @@ pub(super) struct Job {
 }
 
 /// Drive the session workers until the pool closed and every worker finished.
-pub(super) async fn drive_workers<Context, TestError>(
-    env: &Env<'_, Context, TestError>,
+pub(super) async fn drive_workers<Context>(
+    env: &Env<'_, Context>,
     mut requests: mpsc::UnboundedReceiver<Option<WorkerRequest>>,
 ) where
     Context: Sync + ?Sized,
-    TestError: ?Sized + 'static,
 {
     let mut workers = FuturesUnordered::new();
     let mut closing = false;
@@ -69,12 +68,9 @@ pub(super) async fn drive_workers<Context, TestError>(
 /// Create a session, offer it, run the test it is assigned, and quit it. With
 /// [`SessionReuse`](crate::SessionReuse), reset the session after its test and offer it again, as
 /// long as upcoming tests need sessions.
-async fn session_worker<Context, TestError>(
-    env: &Env<'_, Context, TestError>,
-    request: WorkerRequest,
-) where
+async fn session_worker<Context>(env: &Env<'_, Context>, request: WorkerRequest)
+where
     Context: Sync + ?Sized,
-    TestError: ?Sized + 'static,
 {
     let pooled = matches!(request.delivery, Delivery::Pool);
     run_session(env, request).await;
@@ -84,10 +80,9 @@ async fn session_worker<Context, TestError>(
 }
 
 /// The work of [`session_worker`].
-async fn run_session<Context, TestError>(env: &Env<'_, Context, TestError>, request: WorkerRequest)
+async fn run_session<Context>(env: &Env<'_, Context>, request: WorkerRequest)
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized + 'static,
 {
     let config = env.config;
     let activity = Activity::Session(request.session);
@@ -211,15 +206,14 @@ struct SessionEnd {
 /// Offer `session` through `end.delivery` (or, once it ran a test, to the pool), and run the tests
 /// it is assigned: one, or with [`SessionReuse`](crate::SessionReuse) several, resetting the
 /// session in between. What is left to do once the session quit is left in `end`.
-async fn serve_tests<Context, TestError>(
-    env: &Env<'_, Context, TestError>,
+async fn serve_tests<Context>(
+    env: &Env<'_, Context>,
     session: &Session,
     start: SessionStart,
     end: &mut SessionEnd,
 ) -> Result<(), Report>
 where
     Context: Sync + ?Sized,
-    TestError: ?Sized + 'static,
 {
     let config = env.config;
     let SessionStart {
