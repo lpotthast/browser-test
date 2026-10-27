@@ -15,7 +15,8 @@ use super::{Env, plan::QueuedTest, worker::Job};
 use crate::{
     BrowserTestError,
     failure_report::{
-        PanicDetails, PanicLocation, RecentSteps, panic_payload_message, without_own_location,
+        PanicDetails, PanicLocation, RecentSteps, TestCodeFramesHandler, panic_payload_message,
+        without_own_location,
     },
     frozen_pages::{PageCheck, close_frozen_pages},
     progress::{Activity, Phase},
@@ -181,17 +182,14 @@ fn failure_report(name: &str, failure: Failure) -> (TestOutcome, Report<BrowserT
                 without_own_location(Report::new(BrowserTestError::Panic { test_name, message }));
             if let Some(PanicDetails { location, frames }) = details {
                 if let Some(location) = location {
-                    let outside_test_code = frames
-                        .as_ref()
-                        .is_some_and(|frames| !frames.starts_at(&location));
                     report =
                         report.attach_custom::<rootcause::handlers::Display, _>(PanicLocation {
                             location,
-                            outside_test_code,
+                            frames: frames.clone(),
                         });
                 }
                 if let Some(frames) = frames {
-                    report = report.attach_custom::<rootcause::handlers::Display, _>(frames);
+                    report = report.attach_custom::<TestCodeFramesHandler, _>(frames);
                 }
             }
             (TestOutcome::Panicked, report)

@@ -21,7 +21,7 @@ use std::{
     fmt,
     path::{Path, PathBuf},
     sync::{
-        Mutex, OnceLock, PoisonError,
+        Arc, Mutex, OnceLock, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -29,8 +29,16 @@ use std::{
 
 use rootcause::{
     ReportMut, ReportRef,
-    handlers::{ContextFormattingStyle, FormattingFunction},
-    hooks::{Hooks, context_formatter::ContextFormatterHook, report_creation::ReportCreationHook},
+    handlers::{
+        AttachmentFormattingPlacement, AttachmentFormattingStyle, AttachmentHandler,
+        ContextFormattingStyle, FormattingFunction,
+    },
+    hooks::{
+        Hooks,
+        builtin_hooks::location::{Location, LocationHandler},
+        context_formatter::ContextFormatterHook,
+        report_creation::ReportCreationHook,
+    },
     markers::{Dynamic, Local, ObjectMarkerFor, SendSync, Uncloneable},
     report_attachment::ReportAttachment,
 };
@@ -103,7 +111,7 @@ pub(crate) fn install(report_hooks: bool) {
     PANIC_HOOK.get_or_init(|| {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            // Capturing frames symbolizes a backtrace: only for the panics of tests.
+            // Only the panics of tests are located.
             if !crate::step::in_test() {
                 previous(info);
                 return;
@@ -117,7 +125,7 @@ pub(crate) fn install(report_hooks: bool) {
                         location.column()
                     )
                 }),
-                frames: TestCodeFrames::capture(),
+                frames: Some(TestCodeFrames::capture()),
             });
             previous(info);
         }));
@@ -236,9 +244,19 @@ impl Dependencies {
 ///
 /// Test code is the code of the workspace whose tests run, without its dependencies, up to the
 /// frame that the runner called.
-#[derive(Clone, PartialEq, Eq)]
+///
+/// The stack is captured where the error is created, but only symbolized the first time the
+/// frames are needed, e.g. when the report is printed: symbolizing takes long, and many errors a
+/// test creates are never printed, as the test handles them itself (e.g. while retrying).
+#[derive(Clone)]
 pub struct TestCodeFrames {
-    frames: Vec<Frame>,
+    captured: Arc<CapturedFrames>,
+}
+
+/// A captured stack, until it is symbolized to the test code's frames.
+struct CapturedFrames {
+    backtrace: Mutex<Option<backtrace::Backtrace>>,
+    frames: OnceLock<Vec<Frame>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,49 +267,47 @@ struct Frame {
 }
 
 impl TestCodeFrames {
-    /// The test code's frames of the current stack, if any.
-    pub(crate) fn capture() -> Option<Self> {
-        let root = test_root();
-        let dependencies = Dependencies::of_test_root();
-        let backtrace = backtrace::Backtrace::new();
-        let mut frames: Vec<Frame> = Vec::new();
-        'frames: for frame in backtrace.frames() {
-            for symbol in frame.symbols() {
-                let Some(path) = symbol.filename() else {
-                    continue;
-                };
-                if path.starts_with(RUNNER_SOURCE) {
-                    // The runner called the test: everything below is not test code.
-                    break 'frames;
-                }
-                if path.starts_with(OWN_SOURCES) {
-                    // browser-test's helpers between the test's frames (steps, this hook).
-                    continue;
-                }
-                let (Ok(file), Some(line)) = (path.strip_prefix(root), symbol.lineno()) else {
-                    continue;
-                };
-                if dependencies.contains(path, root) {
-                    continue;
-                }
-                let entry = Frame {
-                    file: file.display().to_string(),
-                    line,
-                    function: symbol
-                        .name()
-                        .map(|name| function_name(&name.to_string()))
-                        .unwrap_or_default(),
-                };
-                if frames.last() != Some(&entry) {
-                    frames.push(entry);
-                }
-            }
+    /// The current stack, symbolized to the test code's frames when they are needed.
+    pub(crate) fn capture() -> Self {
+        Self {
+            captured: Arc::new(CapturedFrames {
+                backtrace: Mutex::new(Some(backtrace::Backtrace::new_unresolved())),
+                frames: OnceLock::new(),
+            }),
         }
-        (!frames.is_empty()).then_some(Self { frames })
     }
-}
 
-impl TestCodeFrames {
+    #[cfg(test)]
+    fn from_frames(frames: Vec<Frame>) -> Self {
+        Self {
+            captured: Arc::new(CapturedFrames {
+                backtrace: Mutex::new(None),
+                frames: OnceLock::from(frames),
+            }),
+        }
+    }
+
+    /// The test code's frames, symbolized on first use.
+    fn frames(&self) -> &[Frame] {
+        self.captured.frames.get_or_init(|| {
+            let backtrace = self
+                .captured
+                .backtrace
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            backtrace.map_or_else(Vec::new, |mut backtrace| {
+                backtrace.resolve();
+                test_code_frames(&backtrace)
+            })
+        })
+    }
+
+    /// Whether the stack holds no test code.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.frames().is_empty()
+    }
+
     /// Whether `location` (`file:line:column`, as a panic reports it) is the innermost frame: the
     /// test code itself panicked there.
     pub(crate) fn starts_at(&self, location: &str) -> bool {
@@ -300,22 +316,76 @@ impl TestCodeFrames {
         else {
             return false;
         };
-        self.frames.first().is_some_and(|frame| {
-            line.parse() == Ok(frame.line) && Path::new(file).ends_with(&frame.file)
-        })
+        line.parse()
+            .is_ok_and(|line| self.starts_at_line(file, line))
+    }
+
+    /// Whether `line` of `file` is the innermost frame.
+    fn starts_at_line(&self, file: &str, line: u32) -> bool {
+        self.frames()
+            .first()
+            .is_some_and(|frame| frame.line == line && Path::new(file).ends_with(&frame.file))
     }
 }
+
+/// The test code's frames of `backtrace`, a symbolized one.
+fn test_code_frames(backtrace: &backtrace::Backtrace) -> Vec<Frame> {
+    let root = test_root();
+    let dependencies = Dependencies::of_test_root();
+    let mut frames: Vec<Frame> = Vec::new();
+    'frames: for frame in backtrace.frames() {
+        for symbol in frame.symbols() {
+            let Some(path) = symbol.filename() else {
+                continue;
+            };
+            if path.starts_with(RUNNER_SOURCE) {
+                // The runner called the test: everything below is not test code.
+                break 'frames;
+            }
+            if path.starts_with(OWN_SOURCES) {
+                // browser-test's helpers between the test's frames (steps, this hook).
+                continue;
+            }
+            let (Ok(file), Some(line)) = (path.strip_prefix(root), symbol.lineno()) else {
+                continue;
+            };
+            if dependencies.contains(path, root) {
+                continue;
+            }
+            let entry = Frame {
+                file: file.display().to_string(),
+                line,
+                function: symbol
+                    .name()
+                    .map(|name| function_name(&name.to_string()))
+                    .unwrap_or_default(),
+            };
+            if frames.last() != Some(&entry) {
+                frames.push(entry);
+            }
+        }
+    }
+    frames
+}
+
+impl PartialEq for TestCodeFrames {
+    fn eq(&self, other: &Self) -> bool {
+        self.frames() == other.frames()
+    }
+}
+
+impl Eq for TestCodeFrames {}
 
 impl fmt::Display for TestCodeFrames {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let width = self
-            .frames
+            .frames()
             .iter()
             .map(|frame| frame.file.len() + 1 + frame.line.to_string().len())
             .max()
             .unwrap_or_default();
         write!(f, "Test code:")?;
-        for frame in &self.frames {
+        for frame in self.frames() {
             let location = format!("{}:{}", frame.file, frame.line);
             write!(f, "\n  {location:width$}  {}", frame.function)?;
         }
@@ -382,16 +452,20 @@ impl fmt::Debug for RecentSteps {
 
 /// Where a test panicked, as its failure report shows it. A panic outside the test code (in a
 /// dependency, e.g. an assertion library that raises from its own code) says so, as the test
-/// code's frames show where the test called it.
+/// code's `frames` show where the test called it.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct PanicLocation {
     pub(crate) location: String,
-    pub(crate) outside_test_code: bool,
+    pub(crate) frames: Option<TestCodeFrames>,
 }
 
 impl fmt::Display for PanicLocation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.outside_test_code {
+        let outside_test_code = self
+            .frames
+            .as_ref()
+            .is_some_and(|frames| !frames.is_empty() && !frames.starts_at(&self.location));
+        if outside_test_code {
             write!(f, "Panicked outside the test code at {}", self.location)
         } else {
             write!(f, "Panicked at {}", self.location)
@@ -405,25 +479,75 @@ impl fmt::Debug for PanicLocation {
     }
 }
 
-/// Drops the source location rootcause's default hooks attached last, if `frames` start there.
-/// A location elsewhere stays: an error created in a macro expansion has its frame in the
-/// macro's definition but its location at the macro's call site.
-fn pop_location_at<T>(report: &mut ReportMut<'_, Dynamic, T>, frames: &TestCodeFrames) {
-    let attachments = report.attachments_mut();
-    let is_innermost_frame = attachments.len().checked_sub(1).is_some_and(|last| {
-        attachments.get(last).is_some_and(|attachment| {
-            attachment
-                .downcast_inner::<rootcause::hooks::builtin_hooks::location::Location>()
-                .is_some_and(|location| {
-                    frames.frames.first().is_some_and(|frame| {
-                        frame.line == location.line
-                            && Path::new(location.file).ends_with(&frame.file)
-                    })
-                })
-        })
-    });
-    if is_innermost_frame {
-        attachments.pop();
+/// Prints [`TestCodeFrames`] with `Display`, unless the stack holds no test code.
+pub(crate) struct TestCodeFramesHandler;
+
+impl AttachmentHandler<TestCodeFrames> for TestCodeFramesHandler {
+    fn display(value: &TestCodeFrames, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(value, formatter)
+    }
+
+    fn debug(value: &TestCodeFrames, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(value, formatter)
+    }
+
+    fn preferred_formatting_style(
+        value: &TestCodeFrames,
+        report_formatting_function: FormattingFunction,
+    ) -> AttachmentFormattingStyle {
+        let placement = if value.is_empty() {
+            AttachmentFormattingPlacement::Hidden
+        } else {
+            AttachmentFormattingPlacement::Inline
+        };
+        AttachmentFormattingStyle {
+            placement,
+            function: report_formatting_function,
+            ..Default::default()
+        }
+    }
+}
+
+/// The source location rootcause's default hooks attached to a report created in a test, which
+/// the test code's frames replace if they start there. A location elsewhere stays: an error
+/// created in a macro expansion has its frame in the macro's definition but its location at the
+/// macro's call site. The frames are symbolized only when needed, so this is decided when the
+/// report is printed.
+struct TestCodeLocation {
+    location: Location,
+    frames: TestCodeFrames,
+}
+
+/// Prints a [`TestCodeLocation`] as rootcause prints a [`Location`], unless the frames start
+/// there.
+struct TestCodeLocationHandler;
+
+impl AttachmentHandler<TestCodeLocation> for TestCodeLocationHandler {
+    fn display(value: &TestCodeLocation, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        LocationHandler::display(&value.location, formatter)
+    }
+
+    fn debug(value: &TestCodeLocation, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        LocationHandler::debug(&value.location, formatter)
+    }
+
+    fn preferred_formatting_style(
+        value: &TestCodeLocation,
+        report_formatting_function: FormattingFunction,
+    ) -> AttachmentFormattingStyle {
+        let style = LocationHandler::preferred_formatting_style(
+            &value.location,
+            report_formatting_function,
+        );
+        let Location { file, line } = value.location;
+        if value.frames.starts_at_line(file, line) {
+            AttachmentFormattingStyle {
+                placement: AttachmentFormattingPlacement::Hidden,
+                ..style
+            }
+        } else {
+            style
+        }
     }
 }
 
@@ -434,11 +558,9 @@ pub(crate) fn without_own_location<C: ?Sized>(
 ) -> rootcause::Report<C> {
     let attachments = report.attachments();
     let is_location = attachments.len().checked_sub(1).is_some_and(|last| {
-        attachments.get(last).is_some_and(|attachment| {
-            attachment
-                .downcast_inner::<rootcause::hooks::builtin_hooks::location::Location>()
-                .is_some()
-        })
+        attachments
+            .get(last)
+            .is_some_and(|attachment| attachment.downcast_inner::<Location>().is_some())
     });
     if is_location {
         report.attachments_mut().pop();
@@ -467,18 +589,31 @@ impl ReportCreationHook for TestCodeFramesHook {
 fn attach_test_code_frames<T>(mut report: ReportMut<'_, Dynamic, T>)
 where
     TestCodeFrames: ObjectMarkerFor<T>,
+    TestCodeLocation: ObjectMarkerFor<T>,
 {
-    if report.children().is_empty()
-        && crate::step::in_test()
-        && let Some(frames) = TestCodeFrames::capture()
-    {
+    if !report.children().is_empty() || !crate::step::in_test() {
+        return;
+    }
+    let frames = TestCodeFrames::capture();
+    let attachments = report.attachments_mut();
+    let location = attachments
+        .len()
+        .checked_sub(1)
+        .and_then(|last| attachments.get(last))
+        .and_then(|attachment| attachment.downcast_inner::<Location>().copied());
+    if let Some(location) = location {
         // Frames that start where the location points replace it.
-        pop_location_at(&mut report, &frames);
-        report.attachments_mut().push(
-            ReportAttachment::<_, T>::new_custom::<rootcause::handlers::Display>(frames)
-                .into_dynamic(),
+        attachments.pop();
+        attachments.push(
+            ReportAttachment::<_, T>::new_custom::<TestCodeLocationHandler>(TestCodeLocation {
+                location,
+                frames: frames.clone(),
+            })
+            .into_dynamic(),
         );
     }
+    attachments
+        .push(ReportAttachment::<_, T>::new_custom::<TestCodeFramesHandler>(frames).into_dynamic());
 }
 
 /// A step of a test, as [`RecentSteps`] lists it.
@@ -633,20 +768,18 @@ mod tests {
 
     #[test]
     fn a_panic_location_is_test_code_when_it_is_the_innermost_frame() {
-        let frames = TestCodeFrames {
-            frames: vec![
-                Frame {
-                    file: "tests/ui/checkbox.rs".to_owned(),
-                    line: 84,
-                    function: "checkbox::selected_state".to_owned(),
-                },
-                Frame {
-                    file: "tests/main.rs".to_owned(),
-                    line: 12,
-                    function: "main".to_owned(),
-                },
-            ],
-        };
+        let frames = TestCodeFrames::from_frames(vec![
+            Frame {
+                file: "tests/ui/checkbox.rs".to_owned(),
+                line: 84,
+                function: "checkbox::selected_state".to_owned(),
+            },
+            Frame {
+                file: "tests/main.rs".to_owned(),
+                line: 12,
+                function: "main".to_owned(),
+            },
+        ]);
         assert_that!(frames.starts_at("tests/ui/checkbox.rs:84:9")).is_true();
         assert_that!(frames.starts_at("my_crate/tests/ui/checkbox.rs:84:9")).is_true();
         assert_that!(frames.starts_at("tests/ui/checkbox.rs:85:9")).is_false();
@@ -654,6 +787,25 @@ mod tests {
         assert_that!(frames.starts_at("/home/me/.cargo/registry/src/assertr/src/lib.rs:84:9"))
             .is_false();
         assert_that!(frames.starts_at("no location")).is_false();
+    }
+
+    #[test]
+    fn frames_are_symbolized_when_first_needed() {
+        let frames = TestCodeFrames::capture();
+        assert_that!(frames.captured.frames.get()).is_none();
+
+        // This crate's own frames are no test code.
+        assert_that!(frames.is_empty()).is_true();
+        assert_that!(frames.captured.frames.get()).is_some();
+        assert_that!(
+            frames
+                .captured
+                .backtrace
+                .lock()
+                .expect("not poisoned")
+                .is_none()
+        )
+        .is_true();
     }
 
     /// A directory tree for one test, removed when dropped.

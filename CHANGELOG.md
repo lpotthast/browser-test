@@ -99,6 +99,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The run summary's lists keep their durations aligned when one of them is 100 minutes or longer, as a step kind's total
   time can be in a long run.
+- Errors created in a test no longer symbolize a backtrace right away, which blocked every running test and counted
+  against the test's time limit, also for errors the test handles itself (e.g. while retrying). The stack is still
+  captured where the error is created, but only symbolized to its `TestCodeFrames` when the report is printed. The
+  source location `rootcause` attaches to such an error is now wrapped in an attachment of browser-test's, which hides
+  it when the frames start there.
 
 ## [0.7.0] - 2026-10-13
 
