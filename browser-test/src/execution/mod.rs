@@ -100,13 +100,12 @@ where
 {
     let (root, prepared) = plan(tests, config.test_defaults);
     let max_concurrency = root.max_concurrency();
-    let default_wait = config.test_defaults.element_query_wait;
     let pooled = |fresh: bool, only_run_always: bool| {
         prepared
             .iter()
             .filter(|test| {
                 matches!(&test.prepared, Ok(prepared)
-                    if prepared.uses_pool(default_wait)
+                    if prepared.pooled
                         && prepared.fresh_session == fresh
                         && (test.placement.run_always || !only_run_always))
             })
@@ -134,7 +133,7 @@ where
                 .unwrap_or_else(|| default_spare_sessions(max_concurrency, config.session_reuse)),
             upcoming,
             upcoming_always,
-            default_wait,
+            config.test_defaults.element_query_wait,
             requests_tx,
             config.cancellation.clone(),
         ),
@@ -210,8 +209,8 @@ impl<Context> Env<'_, Context>
 where
     Context: Sync + ?Sized,
 {
-    /// The test at `index`, which a session was assigned. Only ready tests are.
-    fn assigned_test(&self, index: usize) -> &QueuedTest<Context> {
+    /// The test at `index`.
+    fn test(&self, index: usize) -> &QueuedTest<Context> {
         &self.tests[index]
     }
 
@@ -289,6 +288,11 @@ where
     }
 }
 
+/// The session a test was given ended before the test could start in it.
+#[derive(Debug, thiserror::Error)]
+#[error("the browser session ended before the test started")]
+struct SessionEnded;
+
 /// Run `suite`, recording its wall time if it is named.
 fn run_suite<'r, Context>(
     env: &'r Env<'_, Context>,
@@ -327,7 +331,7 @@ where
 {
     match node {
         // Tests not started because of fail-fast or a cancellation are not recorded.
-        Node::Test(index) if env.pool.may_start(env.tests[*index].placement.run_always) => {
+        Node::Test(index) if env.pool.may_start(env.test(*index).placement.run_always) => {
             run_test(env, *index).await;
         }
         Node::Test(_) => {}
@@ -341,7 +345,7 @@ async fn run_test<Context>(env: &Env<'_, Context>, index: usize)
 where
     Context: Sync + ?Sized,
 {
-    let test = &env.tests[index];
+    let test = env.test(index);
     let prepared = match &test.prepared {
         Ok(prepared) => prepared,
         Err(panic_message) => {
@@ -356,7 +360,7 @@ where
 
     let run_always = test.placement.run_always;
     let requested = Instant::now();
-    let pooled = prepared.uses_pool(env.pool.default_wait);
+    let pooled = prepared.pooled;
     let ticket = if pooled {
         // Tests not started because of fail-fast or a cancellation are not recorded.
         let Some(ticket) = env.pool.take(prepared.fresh_session, run_always).await else {
@@ -382,7 +386,7 @@ where
         }
         return;
     }
-    let failure = match ticket {
+    let (report, preparation) = match ticket {
         Ok(ticket) => {
             let (body_done_tx, body_done_rx) = oneshot::channel();
             let job = Job {
@@ -412,20 +416,17 @@ where
             if pooled {
                 env.pool.test_finished();
             }
-            CreationFailure {
-                report: rootcause::report!("the browser session ended before the test started"),
+            (
+                Report::<SessionEnded>::new(SessionEnded).into_dynamic(),
                 preparation,
-            }
+            )
         }
-        Err(failure) => failure,
+        Err(failure) => (failure.report, failure.preparation),
     };
 
-    let session = SessionTiming {
-        preparation: failure.preparation,
-        wait,
-    };
+    let session = SessionTiming { preparation, wait };
     let record = test.record(TestOutcome::Failed, Some(session), None);
-    let report = failure.report.context(BrowserTestError::PrepareSession {
+    let report = report.context(BrowserTestError::PrepareSession {
         test_name: test.name.clone(),
     });
     env.finish(record, Err(report));

@@ -180,13 +180,13 @@ where
     let teardown = last_run.quit_start.map(|quit_start| quit_start.elapsed());
     env.board.clear(Activity::Test(last_run.index));
     if let Some(teardown) = teardown {
-        let test = env.assigned_test(last_run.index);
+        let test = env.test(last_run.index);
         env.warn_if_slow_session(
             &format!("Quitting the session of browser test '{}'", test.name),
             teardown,
         );
     }
-    env.finish_job(last_run, session_result, teardown);
+    last_run.finish(env, session_result, teardown);
 }
 
 /// Whether `error`, of a session, says that it did not quit in time.
@@ -302,7 +302,7 @@ where
             && env.pool.claim_reset();
         // Let the next test start while this session quits or is reset.
         let _ = job.body_done.send(());
-        let test = env.assigned_test(run.index);
+        let test = env.test(run.index);
         let subject = format!("browser test '{}'", test.name);
         let Some(baseline) = baseline.as_mut().filter(|_| reuse) else {
             env.board
@@ -315,7 +315,7 @@ where
         };
 
         let index = run.index;
-        env.finish_job(run, Ok(()), None);
+        run.finish(env, Ok(()), None);
         env.board
             .enter(Activity::Test(index), subject, Phase::ResettingSession);
         let reset_start = Instant::now();

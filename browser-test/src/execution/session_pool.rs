@@ -20,7 +20,7 @@ pub(super) struct Ticket {
     pub(super) preparation: SessionPreparation,
 }
 
-/// A session that could not be created, or ended before its test started.
+/// A session that could not be created.
 pub(super) struct CreationFailure {
     pub(super) report: Report,
     pub(super) preparation: SessionPreparation,
@@ -52,7 +52,7 @@ pub(super) struct SessionPool {
     max_concurrency: usize,
     /// Sessions to keep ready beyond those requested.
     spare: usize,
-    pub(super) default_wait: Option<ElementQueryWait>,
+    default_wait: Option<ElementQueryWait>,
     requests: mpsc::UnboundedSender<Option<WorkerRequest>>,
     /// Ends the wait of tests for sessions: a cancelled run drops the sessions on their way.
     cancellation: CancellationToken,

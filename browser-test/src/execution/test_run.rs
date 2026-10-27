@@ -71,43 +71,42 @@ enum Failure {
     },
 }
 
-impl<Context> Env<'_, Context>
-where
-    Context: Sync + ?Sized,
-{
-    /// Record the finished test of `run`, whose session ended with `session_result` after
-    /// `teardown` (`None`: the session runs further tests).
-    pub(super) fn finish_job(
-        &self,
-        run: JobRun,
+impl JobRun {
+    /// Record the finished test of this run in `env`. Its session ended with `session_result`
+    /// after `teardown` (`None`: the session runs further tests).
+    pub(super) fn finish<Context>(
+        self,
+        env: &Env<'_, Context>,
         session_result: Result<(), Report<ChromeForTestingError>>,
         teardown: Option<Duration>,
-    ) {
-        let test = self.assigned_test(run.index);
+    ) where
+        Context: Sync + ?Sized,
+    {
+        let test = env.test(self.index);
         // Only now: the output of quitting the session is included, and caught up with.
-        let failed = run.failure.is_some() || session_result.is_err();
-        let driver_output = run
+        let failed = self.failure.is_some() || session_result.is_err();
+        let driver_output = self
             .driver_output
             .filter(|_| failed)
-            .zip(self.config.driver_output)
+            .zip(env.config.driver_output)
             .and_then(|((start, session_id), capture)| capture.session_output(start, &session_id));
         let (outcome, result) = test_outcome(
             &test.name,
-            run.failure,
-            run.recent_steps,
+            self.failure,
+            self.recent_steps,
             driver_output,
             session_result,
         );
         let session = SessionTiming {
-            preparation: run.preparation,
-            wait: run.wait,
+            preparation: self.preparation,
+            wait: self.wait,
         };
         let record = TestRecord {
             teardown,
-            steps: run.steps,
-            ..test.record(outcome, Some(session), run.body)
+            steps: self.steps,
+            ..test.record(outcome, Some(session), self.body)
         };
-        self.finish(record, result);
+        env.finish(record, result);
     }
 }
 
@@ -121,7 +120,7 @@ pub(super) async fn run_job<Context>(
 where
     Context: Sync + ?Sized,
 {
-    let test = env.assigned_test(job.test);
+    let test = env.test(job.test);
     let mut run = JobRun {
         index: job.test,
         preparation,

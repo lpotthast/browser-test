@@ -76,23 +76,15 @@ where
     /// The test's timeouts, completed with the runner's.
     pub(super) timeouts: Timeouts,
     pub(super) element_query_wait: Option<ElementQueryWait>,
+    /// Whether the test takes its session from the pool, as it uses the runner's element query
+    /// wait, rather than getting one created with its own settings.
+    pub(super) pooled: bool,
     /// Whether the test needs a session no test ran in (see
     /// [`TestSettings::fresh_session`](crate::TestSettings::fresh_session)).
     pub(super) fresh_session: bool,
     /// How long its body may run: its own time limit, else the runner's.
     pub(super) time_limit: Duration,
     pub(super) test: Box<dyn BrowserTest<Context>>,
-}
-
-impl<Context> PreparedTest<Context>
-where
-    Context: Sync + ?Sized,
-{
-    /// Whether the test takes its session from the pool, rather than getting one created with
-    /// its own settings.
-    pub(super) fn uses_pool(&self, default_wait: Option<ElementQueryWait>) -> bool {
-        self.element_query_wait == default_wait
-    }
 }
 
 /// A suite of the test tree, with its tests referenced by index.
@@ -215,14 +207,18 @@ where
         test.settings()
     }));
     let prepared = match settings {
-        Ok(settings) => Ok(PreparedTest {
-            timeouts: settings.timeouts().or(defaults.timeouts),
-            element_query_wait: settings
+        Ok(settings) => Ok({
+            let element_query_wait = settings
                 .element_query_wait()
-                .or(defaults.element_query_wait),
-            fresh_session: settings.fresh_session(),
-            time_limit: settings.time_limit().unwrap_or(defaults.time_limit),
-            test,
+                .or(defaults.element_query_wait);
+            PreparedTest {
+                timeouts: settings.timeouts().or(defaults.timeouts),
+                element_query_wait,
+                pooled: element_query_wait == defaults.element_query_wait,
+                fresh_session: settings.fresh_session(),
+                time_limit: settings.time_limit().unwrap_or(defaults.time_limit),
+                test,
+            }
         }),
         Err(payload) => {
             let panic_message = panic_payload_message(payload.as_ref());
@@ -398,11 +394,11 @@ mod tests {
                 runner,
             );
             assert_that!(overriding.element_query_wait).is_equal_to(Some(test_wait));
-            assert_that!(overriding.uses_pool(Some(runner_wait))).is_false();
+            assert_that!(overriding.pooled).is_false();
 
             let inheriting = prepared(TestSettings::new(), runner);
             assert_that!(inheriting.element_query_wait).is_equal_to(Some(runner_wait));
-            assert_that!(inheriting.uses_pool(Some(runner_wait))).is_true();
+            assert_that!(inheriting.pooled).is_true();
 
             assert_that!(prepared(TestSettings::new(), TestDefaults::new()).element_query_wait)
                 .is_none();
