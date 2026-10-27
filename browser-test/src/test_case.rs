@@ -1,6 +1,5 @@
-use std::{borrow::Cow, fmt, panic::AssertUnwindSafe};
+use std::{borrow::Cow, fmt, future::Future, panic::AssertUnwindSafe, pin::Pin};
 
-use async_trait::async_trait;
 use rootcause::Report;
 use thirtyfour::WebDriver;
 
@@ -15,8 +14,9 @@ use crate::{Parallelism, TestFilter, TestSettings};
 /// - [`#[browser_test]`](macro@crate::browser_test) on an `async fn`, for most tests: it generates a
 ///   unit struct implementing this trait, named after the function and documented by its doc
 ///   comments.
-/// - Implement the trait, with [`async_trait`](crate::async_trait), for tests with settings of
-///   their own ([`Self::settings`]), tests with parameters, and wrappers around other tests.
+/// - Implement the trait for tests with settings of their own ([`Self::settings`]), tests with
+///   parameters, and wrappers around other tests. [`Self::run`] returns its body as a
+///   [`TestFuture`]: `Box::pin(async move { ... })`.
 ///
 /// Either way, a test's metadata (name, description, tags, settings) is declared with the test.
 ///
@@ -30,15 +30,13 @@ use crate::{Parallelism, TestFilter, TestSettings};
 /// ```
 /// use std::{borrow::Cow, time::Duration};
 ///
-/// use browser_test::{BrowserTest, TestSettings, Timeouts, async_trait, thirtyfour::WebDriver};
-/// use rootcause::Report;
+/// use browser_test::{BrowserTest, TestFuture, TestSettings, Timeouts, thirtyfour::WebDriver};
 ///
 /// /// Loads the first page with empty caches, so that its load time is that of a first visit.
 /// struct FirstVisit {
 ///     path: &'static str,
 /// }
 ///
-/// #[async_trait]
 /// impl BrowserTest<str> for FirstVisit {
 ///     fn name(&self) -> Cow<'_, str> {
 ///         format!("first visit of {}", self.path).into()
@@ -50,9 +48,11 @@ use crate::{Parallelism, TestFilter, TestSettings};
 ///             .with_fresh_session(true)
 ///     }
 ///
-///     async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
-///         driver.goto(format!("{base_url}{}", self.path)).await?;
-///         Ok(())
+///     fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+///         Box::pin(async move {
+///             driver.goto(format!("{base_url}{}", self.path)).await?;
+///             Ok(())
+///         })
 ///     }
 /// }
 /// ```
@@ -66,13 +66,11 @@ use crate::{Parallelism, TestFilter, TestSettings};
 /// ```
 /// use std::borrow::Cow;
 ///
-/// use browser_test::{BrowserTest, TestSettings, async_trait, thirtyfour::WebDriver};
-/// use rootcause::Report;
+/// use browser_test::{BrowserTest, TestFuture, TestSettings, thirtyfour::WebDriver};
 ///
 /// /// Runs a test, then checks that its page logged no error.
 /// struct CheckConsole<T>(T);
 ///
-/// #[async_trait]
 /// impl<T: BrowserTest<str>> BrowserTest<str> for CheckConsole<T> {
 ///     fn name(&self) -> Cow<'_, str> {
 ///         self.0.name()
@@ -90,16 +88,15 @@ use crate::{Parallelism, TestFilter, TestSettings};
 ///         self.0.settings()
 ///     }
 ///
-///     async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
-///         self.0.run(driver, base_url).await?;
-///         // ... check the console ...
-///         Ok(())
+///     fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+///         Box::pin(async move {
+///             self.0.run(driver, base_url).await?;
+///             // ... check the console ...
+///             Ok(())
+///         })
 ///     }
 /// }
 /// ```
-// `async_trait` marks the boxed futures `#[must_use]`, which they are already.
-#[allow(clippy::double_must_use)]
-#[async_trait]
 pub trait BrowserTest<Context = ()>: Send + Sync
 where
     Context: Sync + ?Sized,
@@ -151,8 +148,12 @@ where
     /// The runner polls the tests of a run on one task, as they borrow its context. Don't block
     /// the thread (`std::thread::sleep`, blocking I/O, heavy computation): that stalls every other
     /// test running at the same time. Await instead, or use `tokio::task::spawn_blocking`.
-    async fn run(&self, driver: &WebDriver, context: &Context) -> Result<(), Report>;
+    fn run<'a>(&'a self, driver: &'a WebDriver, context: &'a Context) -> TestFuture<'a>;
 }
+
+/// The future of a test's run, returned by [`BrowserTest::run`]: the test's body, boxed and
+/// `Send`, e.g. `Box::pin(async move { ... })`.
+pub type TestFuture<'a> = Pin<Box<dyn Future<Output = Result<(), Report>> + Send + 'a>>;
 
 /// A suite of browser tests and nested suites, and how they run.
 ///
@@ -174,15 +175,15 @@ where
 /// ```rust,no_run
 /// # use std::borrow::Cow;
 /// # use browser_test::thirtyfour::WebDriver;
-/// # use browser_test::{async_trait, BrowserTest, TestSuite, Parallelism};
-/// # use rootcause::Report;
+/// # use browser_test::{BrowserTest, Parallelism, TestFuture, TestSuite};
 /// # macro_rules! test {
 /// #     ($name:ident) => {
 /// #         struct $name;
-/// #         #[async_trait]
 /// #         impl BrowserTest for $name {
 /// #             fn name(&self) -> Cow<'_, str> { stringify!($name).into() }
-/// #             async fn run(&self, _driver: &WebDriver, _context: &()) -> Result<(), Report> { Ok(()) }
+/// #             fn run<'a>(&'a self, _: &'a WebDriver, _: &'a ()) -> TestFuture<'a> {
+/// #                 Box::pin(async { Ok(()) })
+/// #             }
 /// #         }
 /// #     };
 /// # }

@@ -52,12 +52,13 @@ const EXPECTED_PATTERN: &str = "a regular expression";
 /// ```no_run
 /// # use std::borrow::Cow;
 /// # use browser_test::thirtyfour::WebDriver;
-/// # use browser_test::{async_trait, BrowserTest};
+/// # use browser_test::{BrowserTest, TestFuture};
 /// # use rootcause::Report;
 /// # struct ServerDidNotPanic;
-/// # #[async_trait]
 /// # impl BrowserTest for ServerDidNotPanic {
-/// #     async fn run(&self, _driver: &WebDriver, _context: &()) -> Result<(), Report> { Ok(()) }
+/// #     fn run<'a>(&'a self, _: &'a WebDriver, _: &'a ()) -> TestFuture<'a> {
+/// #         Box::pin(async { Ok(()) })
+/// #     }
 /// # }
 /// # fn component_tests() -> browser_test::TestSuite { browser_test::TestSuite::sequential() }
 /// # async fn run() -> Result<(), Report> {

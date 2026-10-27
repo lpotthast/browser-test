@@ -144,7 +144,6 @@ name = "browser-test"
 version = "0.8.0"
 dependencies = [
  "assertr",
- "async-trait",
  "backtrace",
  "browser-test-macros",
  "chrome-for-testing-manager",

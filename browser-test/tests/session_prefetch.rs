@@ -14,7 +14,7 @@ use assertr::prelude::*;
 use browser_test::{
     BrowserTest, BrowserTestError, BrowserTestRunner, CachedData, Cancellation, ElementQueryWait,
     FailurePolicy, Parallelism, RunReport, SessionPreparation, SessionReset, SessionReuse, StepExt,
-    TestOutcome, TestSettings, TestSuite, TracingSummary, async_trait,
+    TestFuture, TestOutcome, TestSettings, TestSuite, TracingSummary,
     thirtyfour::{ChromiumLikeCapabilities, WebDriver},
 };
 use rootcause::{Report, report};
@@ -131,7 +131,6 @@ impl Visit {
     }
 }
 
-#[async_trait]
 impl BrowserTest<str> for Visit {
     fn name(&self) -> Cow<'_, str> {
         format!("visit {}", self.index).into()
@@ -153,27 +152,29 @@ impl BrowserTest<str> for Visit {
         }
     }
 
-    async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
-        let tracker = &self.tracker;
-        tracker.started.lock().unwrap().push(self.index);
-        let running = tracker.running.fetch_add(1, Ordering::SeqCst) + 1;
-        tracker
-            .max_running
-            .send_modify(|max| *max = (*max).max(running));
+    fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
+            let tracker = &self.tracker;
+            tracker.started.lock().unwrap().push(self.index);
+            let running = tracker.running.fetch_add(1, Ordering::SeqCst) + 1;
+            tracker
+                .max_running
+                .send_modify(|max| *max = (*max).max(running));
 
-        let result = async {
-            driver.goto(base_url).step("goto").detail(base_url).await?;
-            tracker.await_overlap().await;
-            tokio::time::sleep(self.body).await;
-            if self.fail {
-                return Err(report!("intentional failure"));
+            let result = async {
+                driver.goto(base_url).step("goto").detail(base_url).await?;
+                tracker.await_overlap().await;
+                tokio::time::sleep(self.body).await;
+                if self.fail {
+                    return Err(report!("intentional failure"));
+                }
+                Ok(())
             }
-            Ok(())
-        }
-        .await;
+            .await;
 
-        tracker.running.fetch_sub(1, Ordering::SeqCst);
-        result
+            tracker.running.fetch_sub(1, Ordering::SeqCst);
+            result
+        })
     }
 }
 
@@ -386,7 +387,6 @@ struct Storage {
     write: bool,
 }
 
-#[async_trait]
 impl BrowserTest<str> for Storage {
     fn name(&self) -> Cow<'_, str> {
         if self.write {
@@ -397,27 +397,29 @@ impl BrowserTest<str> for Storage {
         .into()
     }
 
-    async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
-        driver.goto(base_url).await?;
-        if self.write {
-            driver
+    fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver.goto(base_url).await?;
+            if self.write {
+                driver
+                    .execute(
+                        "localStorage.setItem('leak', '1'); document.cookie = 'leak=1';",
+                        Vec::new(),
+                    )
+                    .await?;
+                return Ok(());
+            }
+            let leaked = driver
                 .execute(
-                    "localStorage.setItem('leak', '1'); document.cookie = 'leak=1';",
+                    "return localStorage.getItem('leak') !== null || document.cookie.includes('leak');",
                     Vec::new(),
                 )
                 .await?;
-            return Ok(());
-        }
-        let leaked = driver
-            .execute(
-                "return localStorage.getItem('leak') !== null || document.cookie.includes('leak');",
-                Vec::new(),
-            )
-            .await?;
-        if leaked.convert::<bool>()? {
-            return Err(report!("state of the previous test leaked into this one"));
-        }
-        Ok(())
+            if leaked.convert::<bool>()? {
+                return Err(report!("state of the previous test leaked into this one"));
+            }
+            Ok(())
+        })
     }
 }
 
@@ -577,63 +579,64 @@ struct Dirty {
     second_window: bool,
 }
 
-#[async_trait]
 impl BrowserTest<str> for Dirty {
     fn name(&self) -> Cow<'_, str> {
         "dirty".into()
     }
 
-    async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
-        driver.goto(base_url).await?;
-        *self.initial_rect.lock().unwrap() = Some(driver.get_window_rect().await?);
-        driver
-            .execute(
-                "localStorage.setItem('leak', '1'); sessionStorage.setItem('leak', '1');
-                 document.cookie = 'leak=1';",
-                Vec::new(),
-            )
-            .await?;
-        // A file in the Origin Private File System.
-        driver
-            .execute_async(
-                "const done = arguments[0];
-                 navigator.storage.getDirectory()
-                     .then(dir => dir.getFileHandle('leak', { create: true }))
-                     .then(file => file.createWritable())
-                     .then(writer => writer.write('1').then(() => writer.close()))
-                     .then(done);",
-                Vec::new(),
-            )
-            .await?;
-        driver
-            .cdp()
-            .send_raw(
-                "Browser.grantPermissions",
-                serde_json::json!({
-                    "origin": base_url,
-                    "permissions": ["clipboardReadWrite"],
-                }),
-            )
-            .await?;
-        driver
-            .cdp()
-            .send_raw(
-                "Emulation.setUserAgentOverride",
-                serde_json::json!({"userAgent": "Dirty"}),
-            )
-            .await?;
-        driver
-            .action_chain()
-            .key_down(browser_test::thirtyfour::Key::Shift)
-            .perform()
-            .await?;
-        driver.set_window_rect(0, 0, 640, 480).await?;
-        if self.second_window {
-            let second = driver.new_window().await?;
-            driver.switch_to_window(second).await?;
+    fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
             driver.goto(base_url).await?;
-        }
-        Ok(())
+            *self.initial_rect.lock().unwrap() = Some(driver.get_window_rect().await?);
+            driver
+                .execute(
+                    "localStorage.setItem('leak', '1'); sessionStorage.setItem('leak', '1');
+                     document.cookie = 'leak=1';",
+                    Vec::new(),
+                )
+                .await?;
+            // A file in the Origin Private File System.
+            driver
+                .execute_async(
+                    "const done = arguments[0];
+                     navigator.storage.getDirectory()
+                         .then(dir => dir.getFileHandle('leak', { create: true }))
+                         .then(file => file.createWritable())
+                         .then(writer => writer.write('1').then(() => writer.close()))
+                         .then(done);",
+                    Vec::new(),
+                )
+                .await?;
+            driver
+                .cdp()
+                .send_raw(
+                    "Browser.grantPermissions",
+                    serde_json::json!({
+                        "origin": base_url,
+                        "permissions": ["clipboardReadWrite"],
+                    }),
+                )
+                .await?;
+            driver
+                .cdp()
+                .send_raw(
+                    "Emulation.setUserAgentOverride",
+                    serde_json::json!({"userAgent": "Dirty"}),
+                )
+                .await?;
+            driver
+                .action_chain()
+                .key_down(browser_test::thirtyfour::Key::Shift)
+                .perform()
+                .await?;
+            driver.set_window_rect(0, 0, 640, 480).await?;
+            if self.second_window {
+                let second = driver.new_window().await?;
+                driver.switch_to_window(second).await?;
+                driver.goto(base_url).await?;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -645,74 +648,75 @@ struct Clean {
     windows: usize,
 }
 
-#[async_trait]
 impl BrowserTest<str> for Clean {
     fn name(&self) -> Cow<'_, str> {
         "clean".into()
     }
 
-    async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
-        assert_that!(driver.windows().await?).has_length(self.windows);
-        // An empty page: `about:blank` in a new user context, a `data:` URL after a manual reset.
-        let url = driver.current_url().await?.to_string();
-        assert_that!(url.as_str()).is_one_of(["about:blank", "data:text/html,"]);
-        assert_that!(Some(driver.get_window_rect().await?))
-            .is_equal_to(self.initial_rect.lock().unwrap().clone());
+    fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
+            assert_that!(driver.windows().await?).has_length(self.windows);
+            // An empty page: `about:blank` in a new user context, a `data:` URL after a manual reset.
+            let url = driver.current_url().await?.to_string();
+            assert_that!(url.as_str()).is_one_of(["about:blank", "data:text/html,"]);
+            assert_that!(Some(driver.get_window_rect().await?))
+                .is_equal_to(self.initial_rect.lock().unwrap().clone());
 
-        driver.goto(base_url).await?;
-        let state = driver
-            .execute(
-                "return [
-                     localStorage.getItem('leak'),
-                     sessionStorage.getItem('leak'),
-                     document.cookie,
-                     document.hasFocus(),
-                     navigator.userAgent.includes('Dirty'),
-                     history.length,
-                 ];",
-                Vec::new(),
-            )
-            .await?
-            .convert::<(Option<String>, Option<String>, String, bool, bool, u32)>()?;
-        // The history: the blank page the reset left, and this one.
-        assert_that!(state).is_equal_to((None, None, String::new(), true, false, 2));
-        let permission = driver
-            .execute_async(
-                "navigator.permissions.query({ name: 'clipboard-read' })
-                     .then(status => arguments[0](status.state));",
-                Vec::new(),
-            )
-            .await?
-            .convert::<String>()?;
-        assert_that!(permission).is_equal_to("prompt".to_owned());
-        let files = driver
-            .execute_async(
-                "const done = arguments[0];
-                 navigator.storage.getDirectory()
-                     .then(async dir => { const names = []; for await (const name of dir.keys()) names.push(name); return names; })
-                     .then(done);",
-                Vec::new(),
-            )
-            .await?
-            .convert::<Vec<String>>()?;
-        assert_that!(files).is_empty();
+            driver.goto(base_url).await?;
+            let state = driver
+                .execute(
+                    "return [
+                         localStorage.getItem('leak'),
+                         sessionStorage.getItem('leak'),
+                         document.cookie,
+                         document.hasFocus(),
+                         navigator.userAgent.includes('Dirty'),
+                         history.length,
+                     ];",
+                    Vec::new(),
+                )
+                .await?
+                .convert::<(Option<String>, Option<String>, String, bool, bool, u32)>()?;
+            // The history: the blank page the reset left, and this one.
+            assert_that!(state).is_equal_to((None, None, String::new(), true, false, 2));
+            let permission = driver
+                .execute_async(
+                    "navigator.permissions.query({ name: 'clipboard-read' })
+                         .then(status => arguments[0](status.state));",
+                    Vec::new(),
+                )
+                .await?
+                .convert::<String>()?;
+            assert_that!(permission).is_equal_to("prompt".to_owned());
+            let files = driver
+                .execute_async(
+                    "const done = arguments[0];
+                     navigator.storage.getDirectory()
+                         .then(async dir => { const names = []; for await (const name of dir.keys()) names.push(name); return names; })
+                         .then(done);",
+                    Vec::new(),
+                )
+                .await?
+                .convert::<Vec<String>>()?;
+            assert_that!(files).is_empty();
 
-        // Shift is no longer held: typing gives lowercase text.
-        driver
-            .execute(
-                "const input = document.createElement('input');
-                 document.body.append(input);
-                 input.focus();",
-                Vec::new(),
-            )
-            .await?;
-        driver.action_chain().send_keys("a").perform().await?;
-        let typed = driver
-            .execute("return document.querySelector('input').value;", Vec::new())
-            .await?
-            .convert::<String>()?;
-        assert_that!(typed).is_equal_to("a".to_owned());
-        Ok(())
+            // Shift is no longer held: typing gives lowercase text.
+            driver
+                .execute(
+                    "const input = document.createElement('input');
+                     document.body.append(input);
+                     input.focus();",
+                    Vec::new(),
+                )
+                .await?;
+            driver.action_chain().send_keys("a").perform().await?;
+            let typed = driver
+                .execute("return document.querySelector('input').value;", Vec::new())
+                .await?
+                .convert::<String>()?;
+            assert_that!(typed).is_equal_to("a".to_owned());
+            Ok(())
+        })
     }
 }
 
@@ -766,54 +770,56 @@ async fn manual_resets_keep_no_state_of_earlier_tests() {
 /// (the same server under another host name), so that no history lists the first.
 struct LeavesByReplacing;
 
-#[async_trait]
 impl BrowserTest<str> for LeavesByReplacing {
     fn name(&self) -> Cow<'_, str> {
         "leaves by replacing".into()
     }
 
-    async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
-        driver.goto(base_url).await?;
-        let other_origin = base_url.replace("127.0.0.1", "localhost");
-        driver
-            .execute(
-                "localStorage.setItem('leak', '1'); location.replace(arguments[0]);",
-                vec![serde_json::json!(other_origin)],
-            )
-            .await?;
-        // Wait for the replacement.
-        for _ in 0..50 {
-            if driver
-                .current_url()
-                .await?
-                .as_str()
-                .starts_with(&other_origin)
-            {
-                break;
+    fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver.goto(base_url).await?;
+            let other_origin = base_url.replace("127.0.0.1", "localhost");
+            driver
+                .execute(
+                    "localStorage.setItem('leak', '1'); location.replace(arguments[0]);",
+                    vec![serde_json::json!(other_origin)],
+                )
+                .await?;
+            // Wait for the replacement.
+            for _ in 0..50 {
+                if driver
+                    .current_url()
+                    .await?
+                    .as_str()
+                    .starts_with(&other_origin)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        Ok(())
+            Ok(())
+        })
     }
 }
 
 /// Checks that `localStorage` of the fixture's page is empty.
 struct FindsNoStorage;
 
-#[async_trait]
 impl BrowserTest<str> for FindsNoStorage {
     fn name(&self) -> Cow<'_, str> {
         "finds no storage".into()
     }
 
-    async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
-        driver.goto(base_url).await?;
-        let stored = driver
-            .execute("return localStorage.getItem('leak');", Vec::new())
-            .await?
-            .convert::<Option<String>>()?;
-        assert_that!(stored).is_none();
-        Ok(())
+    fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver.goto(base_url).await?;
+            let stored = driver
+                .execute("return localStorage.getItem('leak');", Vec::new())
+                .await?
+                .convert::<Option<String>>()?;
+            assert_that!(stored).is_none();
+            Ok(())
+        })
     }
 }
 
@@ -844,27 +850,28 @@ struct FileStorage {
     write: bool,
 }
 
-#[async_trait]
 impl BrowserTest<str> for FileStorage {
     fn name(&self) -> Cow<'_, str> {
         format!("file storage (write: {})", self.write).into()
     }
 
-    async fn run(&self, driver: &WebDriver, _base_url: &str) -> Result<(), Report> {
-        driver.goto(&self.url).await?;
-        let stored = driver
-            .execute(
-                "const stored = localStorage.getItem('leak');
-                 localStorage.setItem('leak', '1');
-                 return stored;",
-                Vec::new(),
-            )
-            .await?
-            .convert::<Option<String>>()?;
-        if !self.write {
-            assert_that!(stored).is_none();
-        }
-        Ok(())
+    fn run<'a>(&'a self, driver: &'a WebDriver, _base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver.goto(&self.url).await?;
+            let stored = driver
+                .execute(
+                    "const stored = localStorage.getItem('leak');
+                     localStorage.setItem('leak', '1');
+                     return stored;",
+                    Vec::new(),
+                )
+                .await?
+                .convert::<Option<String>>()?;
+            if !self.write {
+                assert_that!(stored).is_none();
+            }
+            Ok(())
+        })
     }
 }
 
@@ -926,22 +933,23 @@ async fn quits_of_released_sessions_are_measured() {
 /// Leaves a page load timeout behind that no navigation can meet.
 struct ImpatientPageLoads;
 
-#[async_trait]
 impl BrowserTest<str> for ImpatientPageLoads {
     fn name(&self) -> Cow<'_, str> {
         "impatient page loads".into()
     }
 
-    async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
-        driver.goto(base_url).await?;
-        driver
-            .update_timeouts(browser_test::thirtyfour::TimeoutConfiguration::new(
-                None,
-                Some(Duration::ZERO),
-                None,
-            ))
-            .await?;
-        Ok(())
+    fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver.goto(base_url).await?;
+            driver
+                .update_timeouts(browser_test::thirtyfour::TimeoutConfiguration::new(
+                    None,
+                    Some(Duration::ZERO),
+                    None,
+                ))
+                .await?;
+            Ok(())
+        })
     }
 }
 
@@ -974,29 +982,30 @@ struct UsesDefaultContext {
     new_window: bool,
 }
 
-#[async_trait]
 impl BrowserTest<str> for UsesDefaultContext {
     fn name(&self) -> Cow<'_, str> {
         format!("uses the default context (new window: {})", self.new_window).into()
     }
 
-    async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
-        let window = if self.new_window {
-            driver.new_window().await?
-        } else {
-            let current = driver.window().await?;
-            let windows = driver.windows().await?;
-            windows
-                .into_iter()
-                .find(|window| *window != current)
-                .expect("the session's first tab is open")
-        };
-        driver.switch_to_window(window).await?;
-        driver.goto(base_url).await?;
-        driver
-            .execute("localStorage.setItem('leak', '1');", Vec::new())
-            .await?;
-        Ok(())
+    fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
+            let window = if self.new_window {
+                driver.new_window().await?
+            } else {
+                let current = driver.window().await?;
+                let windows = driver.windows().await?;
+                windows
+                    .into_iter()
+                    .find(|window| *window != current)
+                    .expect("the session's first tab is open")
+            };
+            driver.switch_to_window(window).await?;
+            driver.goto(base_url).await?;
+            driver
+                .execute("localStorage.setItem('leak', '1');", Vec::new())
+                .await?;
+            Ok(())
+        })
     }
 }
 
@@ -1070,20 +1079,21 @@ async fn serve_cache_fixture() -> (String, Arc<AtomicUsize>) {
 /// Loads the cache fixture's page and waits for its script.
 struct LoadsCachedScript(usize);
 
-#[async_trait]
 impl BrowserTest<str> for LoadsCachedScript {
     fn name(&self) -> Cow<'_, str> {
         format!("loads the cached script {}", self.0).into()
     }
 
-    async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
-        driver.goto(base_url).await?;
-        let loaded = driver
-            .execute("return window.__cached === true;", Vec::new())
-            .await?
-            .convert::<bool>()?;
-        assert_that!(loaded).is_true();
-        Ok(())
+    fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver.goto(base_url).await?;
+            let loaded = driver
+                .execute("return window.__cached === true;", Vec::new())
+                .await?
+                .convert::<bool>()?;
+            assert_that!(loaded).is_true();
+            Ok(())
+        })
     }
 }
 
@@ -1121,7 +1131,6 @@ struct GoesBack {
     dedicated: bool,
 }
 
-#[async_trait]
 impl BrowserTest<str> for GoesBack {
     fn name(&self) -> Cow<'_, str> {
         "goes back".into()
@@ -1138,19 +1147,21 @@ impl BrowserTest<str> for GoesBack {
         }
     }
 
-    async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
-        driver.goto(base_url).await?;
-        driver
-            .execute("window.__marker = true;", Vec::new())
-            .await?;
-        driver.goto(&format!("{base_url}/other")).await?;
-        driver.back().await?;
-        let restored = driver
-            .execute("return window.__marker === true;", Vec::new())
-            .await?
-            .convert::<bool>()?;
-        *self.restored.lock().unwrap() = Some(restored);
-        Ok(())
+    fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver.goto(base_url).await?;
+            driver
+                .execute("window.__marker = true;", Vec::new())
+                .await?;
+            driver.goto(&format!("{base_url}/other")).await?;
+            driver.back().await?;
+            let restored = driver
+                .execute("return window.__marker === true;", Vec::new())
+                .await?
+                .convert::<bool>()?;
+            *self.restored.lock().unwrap() = Some(restored);
+            Ok(())
+        })
     }
 }
 

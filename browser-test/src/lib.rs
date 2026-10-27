@@ -2,7 +2,6 @@
 
 extern crate self as browser_test;
 
-pub use async_trait::async_trait;
 pub use browser_test_macros::browser_test;
 pub use chrome_for_testing_manager::{
     CancellationToken, Channel, ChromeBinary, Version, VersionRequest,
@@ -49,7 +48,7 @@ pub use runner::{BrowserTestRunner, Visibility};
 pub use scheduler::{FailurePolicy, Parallelism};
 pub use session_reuse::{CachedData, KeptCaches, SessionReset, SessionReuse};
 pub use step::{Step, StepExt};
-pub use test_case::{BrowserTest, TestSuite};
+pub use test_case::{BrowserTest, TestFuture, TestSuite};
 pub use test_settings::TestSettings;
 pub use timeout::Timeouts;
 pub use wait::ElementQueryWait;

@@ -115,10 +115,7 @@ pub(crate) fn expand(args: Arguments, mut function: ItemFn) -> manyhow::Result<T
     // the struct gets its visibility.
     let visibility = std::mem::replace(&mut function.vis, Visibility::Inherited);
     let body = &function.sig.ident;
-    let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
-    // `async_trait` names every lifetime elided in `run`'s arguments, including the higher-ranked
-    // ones in `fn(&str)` or `Fn(&str)`. The alias hides them.
-    let context_alias = format_ident!("__{name}Context");
+    let (impl_generics, _, where_clause) = generics.split_for_impl();
     let call_args = match inputs {
         Inputs::None => quote!(),
         Inputs::Context => quote!(__browser_test_context),
@@ -145,14 +142,9 @@ pub(crate) fn expand(args: Arguments, mut function: ItemFn) -> manyhow::Result<T
 
         #function
 
-        #(#cfgs)*
-        #[doc(hidden)]
-        type #context_alias #type_generics = #context;
-
-        // `run` returns the function's future without an `async` block of its own (as
-        // `async_trait` would add one), only wrapped in browser-test's `run_body`, so that no frame
-        // of generated code is on the stack while the test runs, and failure reports show the
-        // function as the test's outermost frame.
+        // `run` returns the function's future without an `async` block of its own, only wrapped in
+        // browser-test's `run_body`, so that no frame of generated code is on the stack while the
+        // test runs, and failure reports show the function as the test's outermost frame.
         #(#cfgs)*
         impl #impl_generics #crate_path::BrowserTest<#context> for #name #where_clause {
             fn name(&self) -> ::std::borrow::Cow<'_, str> {
@@ -167,21 +159,11 @@ pub(crate) fn expand(args: Arguments, mut function: ItemFn) -> manyhow::Result<T
 
             #settings
 
-            fn run<'__self, '__driver, '__context, '__future>(
-                &'__self self,
-                __browser_test_driver: &'__driver #crate_path::thirtyfour::WebDriver,
-                __browser_test_context: &'__context #context_alias #type_generics,
-            ) -> ::std::pin::Pin<::std::boxed::Box<
-                dyn ::std::future::Future<Output = #crate_path::__private::DynamicResult>
-                    + ::std::marker::Send
-                    + '__future
-            >>
-            where
-                '__self: '__future,
-                '__driver: '__future,
-                '__context: '__future,
-                Self: '__future,
-            {
+            fn run<'__browser_test>(
+                &'__browser_test self,
+                __browser_test_driver: &'__browser_test #crate_path::thirtyfour::WebDriver,
+                __browser_test_context: &'__browser_test #context,
+            ) -> #crate_path::TestFuture<'__browser_test> {
                 #boxed_body
             }
         }

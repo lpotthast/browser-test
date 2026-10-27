@@ -12,4 +12,4 @@ note: future is not `Send` as this value is used across an await
   |         ------ has type `Rc<()>` which is not `Send`
 9 |     std::future::ready(()).await;
   |                            ^^^^^ await occurs here, with `shared` maybe used later
-  = note: required for the cast from `Pin<Box<impl Future<Output = Result<(), rootcause::Report>>>>` to `Pin<Box<(dyn Future<Output = Result<(), rootcause::Report>> + Send + '__future)>>`
+  = note: required for the cast from `Pin<Box<impl Future<Output = Result<(), rootcause::Report>>>>` to `Pin<Box<(dyn Future<Output = Result<(), rootcause::Report>> + Send + '__browser_test)>>`

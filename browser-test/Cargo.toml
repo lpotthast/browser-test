@@ -26,7 +26,6 @@ component = ["thirtyfour/component"]
 serde = ["dep:serde"]
 
 [dependencies]
-async-trait = { version = "0.1.83", default-features = false }
 backtrace = { version = "0.3.76", default-features = false, features = ["std"] }
 browser-test-macros.workspace = true
 chrome-for-testing-manager = { version = "0.15.0", default-features = false, features = ["thirtyfour"] }

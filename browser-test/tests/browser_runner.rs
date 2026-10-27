@@ -14,8 +14,8 @@ use std::{
 use assertr::prelude::*;
 use browser_test::{
     BrowserTest, BrowserTestError, BrowserTestRunner, Cancellation, CancellationToken,
-    FailurePolicy, Parallelism, RunReport, StepExt, TestFilter, TestOutcome, TestSettings,
-    TestSuite, async_trait, browser_test,
+    FailurePolicy, Parallelism, RunReport, StepExt, TestFilter, TestFuture, TestOutcome,
+    TestSettings, TestSuite, browser_test,
     thirtyfour::{By, ChromiumLikeCapabilities, WebDriver, prelude::ElementQueryable},
 };
 use rootcause::{Report, prelude::ResultExt};
@@ -86,34 +86,35 @@ struct PageTitleTest {
     started: Option<Arc<AtomicUsize>>,
 }
 
-#[async_trait]
 impl BrowserTest<IntegrationContext> for PageTitleTest {
     fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed(self.name.as_str())
     }
 
-    async fn run(&self, driver: &WebDriver, context: &IntegrationContext) -> Result<(), Report> {
-        if let Some(started) = &self.started {
-            started.fetch_add(1, Ordering::SeqCst);
-        }
+    fn run<'a>(&'a self, driver: &'a WebDriver, context: &'a IntegrationContext) -> TestFuture<'a> {
+        Box::pin(async move {
+            if let Some(started) = &self.started {
+                started.fetch_add(1, Ordering::SeqCst);
+            }
 
-        driver
-            .goto(context.page_url)
-            .await
-            .context(IntegrationTestError::OpenTestPage)?;
-        let title = driver
-            .title()
-            .await
-            .context(IntegrationTestError::ReadTitle)?;
+            driver
+                .goto(context.page_url)
+                .await
+                .context(IntegrationTestError::OpenTestPage)?;
+            let title = driver
+                .title()
+                .await
+                .context(IntegrationTestError::ReadTitle)?;
 
-        if title != context.expected_title {
-            rootcause::bail!(IntegrationTestError::UnexpectedTitle {
-                expected: context.expected_title,
-                actual: title,
-            });
-        }
+            if title != context.expected_title {
+                rootcause::bail!(IntegrationTestError::UnexpectedTitle {
+                    expected: context.expected_title,
+                    actual: title,
+                });
+            }
 
-        Ok(())
+            Ok(())
+        })
     }
 }
 
@@ -121,35 +122,36 @@ impl BrowserTest<IntegrationContext> for PageTitleTest {
 /// page has focus.
 struct FocusEventTest;
 
-#[async_trait]
 impl BrowserTest<IntegrationContext> for FocusEventTest {
     fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed("focus event")
     }
 
-    async fn run(&self, driver: &WebDriver, context: &IntegrationContext) -> Result<(), Report> {
-        driver
-            .goto(context.page_url)
-            .await
-            .context(IntegrationTestError::OpenTestPage)?;
-        let fired: bool = driver
-            .execute(
-                "const input = document.createElement('input');
-                 document.body.append(input);
-                 let fired = false;
-                 input.addEventListener('focus', () => fired = true);
-                 input.focus();
-                 return fired;",
-                vec![],
-            )
-            .await
-            .context(IntegrationTestError::FocusElement)?
-            .convert()
-            .context(IntegrationTestError::FocusElement)?;
-        if !fired {
-            rootcause::bail!(IntegrationTestError::NoFocusEvent);
-        }
-        Ok(())
+    fn run<'a>(&'a self, driver: &'a WebDriver, context: &'a IntegrationContext) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver
+                .goto(context.page_url)
+                .await
+                .context(IntegrationTestError::OpenTestPage)?;
+            let fired: bool = driver
+                .execute(
+                    "const input = document.createElement('input');
+                     document.body.append(input);
+                     let fired = false;
+                     input.addEventListener('focus', () => fired = true);
+                     input.focus();
+                     return fired;",
+                    vec![],
+                )
+                .await
+                .context(IntegrationTestError::FocusElement)?
+                .convert()
+                .context(IntegrationTestError::FocusElement)?;
+            if !fired {
+                rootcause::bail!(IntegrationTestError::NoFocusEvent);
+            }
+            Ok(())
+        })
     }
 }
 
@@ -169,34 +171,40 @@ async fn find_missing(driver: &WebDriver) -> Result<(), Report<IntegrationTestEr
     Ok(())
 }
 
-#[async_trait]
 impl BrowserTest<IntegrationContext> for MissingElementTest {
     fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed("missing element")
     }
 
-    async fn run(&self, driver: &WebDriver, context: &IntegrationContext) -> Result<(), Report> {
-        driver
-            .goto(context.page_url)
-            .step("goto")
-            .await
-            .context(IntegrationTestError::OpenTestPage)?;
-        Ok(find_missing(driver).await?)
+    fn run<'a>(&'a self, driver: &'a WebDriver, context: &'a IntegrationContext) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver
+                .goto(context.page_url)
+                .step("goto")
+                .await
+                .context(IntegrationTestError::OpenTestPage)?;
+            Ok(find_missing(driver).await?)
+        })
     }
 }
 
 /// Panics, as a failed assertion does.
 struct PanickingTest;
 
-#[async_trait]
 impl BrowserTest<IntegrationContext> for PanickingTest {
     fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed("panicking")
     }
 
-    async fn run(&self, _driver: &WebDriver, _context: &IntegrationContext) -> Result<(), Report> {
-        assert_that!(1).is_equal_to(2);
-        Ok(())
+    fn run<'a>(
+        &'a self,
+        _driver: &'a WebDriver,
+        _context: &'a IntegrationContext,
+    ) -> TestFuture<'a> {
+        Box::pin(async move {
+            assert_that!(1).is_equal_to(2);
+            Ok(())
+        })
     }
 }
 
@@ -204,15 +212,21 @@ impl BrowserTest<IntegrationContext> for PanickingTest {
 /// assertion from its own code does.
 struct PanickingInADependencyTest;
 
-#[async_trait]
 impl BrowserTest<IntegrationContext> for PanickingInADependencyTest {
     fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed("panicking in a dependency")
     }
 
-    async fn run(&self, _driver: &WebDriver, _context: &IntegrationContext) -> Result<(), Report> {
-        let _ = std::hint::black_box(std::time::Duration::MAX) + std::time::Duration::from_secs(1);
-        Ok(())
+    fn run<'a>(
+        &'a self,
+        _driver: &'a WebDriver,
+        _context: &'a IntegrationContext,
+    ) -> TestFuture<'a> {
+        Box::pin(async move {
+            let _ =
+                std::hint::black_box(std::time::Duration::MAX) + std::time::Duration::from_secs(1);
+            Ok(())
+        })
     }
 }
 
@@ -230,19 +244,20 @@ impl RunForeverTest {
     }
 }
 
-#[async_trait]
 impl BrowserTest<IntegrationContext> for RunForeverTest {
     fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed("run forever")
     }
 
-    async fn run(&self, driver: &WebDriver, context: &IntegrationContext) -> Result<(), Report> {
-        driver
-            .goto(context.page_url)
-            .await
-            .context(IntegrationTestError::OpenTestPage)?;
-        (self.on_running)();
-        std::future::pending().await
+    fn run<'a>(&'a self, driver: &'a WebDriver, context: &'a IntegrationContext) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver
+                .goto(context.page_url)
+                .await
+                .context(IntegrationTestError::OpenTestPage)?;
+            (self.on_running)();
+            std::future::pending().await
+        })
     }
 }
 
@@ -252,21 +267,26 @@ struct IntentionalFailureTest {
     started: Option<Arc<AtomicUsize>>,
 }
 
-#[async_trait]
 impl BrowserTest<IntegrationContext> for IntentionalFailureTest {
     fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed("intentional failure")
     }
 
-    async fn run(&self, _driver: &WebDriver, _context: &IntegrationContext) -> Result<(), Report> {
-        if let Some(started) = &self.started {
-            started.fetch_add(1, Ordering::SeqCst);
-            while started.load(Ordering::SeqCst) < 2 {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    fn run<'a>(
+        &'a self,
+        _driver: &'a WebDriver,
+        _context: &'a IntegrationContext,
+    ) -> TestFuture<'a> {
+        Box::pin(async move {
+            if let Some(started) = &self.started {
+                started.fetch_add(1, Ordering::SeqCst);
+                while started.load(Ordering::SeqCst) < 2 {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
             }
-        }
 
-        Err(rootcause::report!(IntegrationTestError::IntentionalFailure).into())
+            Err(rootcause::report!(IntegrationTestError::IntentionalFailure).into())
+        })
     }
 }
 
@@ -274,18 +294,23 @@ struct PanicTest {
     started: Option<Arc<AtomicUsize>>,
 }
 
-#[async_trait]
 impl BrowserTest<IntegrationContext> for PanicTest {
     fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed("intentional panic")
     }
 
-    async fn run(&self, _driver: &WebDriver, _context: &IntegrationContext) -> Result<(), Report> {
-        if let Some(started) = &self.started {
-            started.fetch_add(1, Ordering::SeqCst);
-        }
+    fn run<'a>(
+        &'a self,
+        _driver: &'a WebDriver,
+        _context: &'a IntegrationContext,
+    ) -> TestFuture<'a> {
+        Box::pin(async move {
+            if let Some(started) = &self.started {
+                started.fetch_add(1, Ordering::SeqCst);
+            }
 
-        panic!("intentional browser test panic");
+            panic!("intentional browser test panic");
+        })
     }
 }
 
@@ -300,7 +325,6 @@ struct MetadataPanicTest {
     panic_in: MetadataPanicHook,
 }
 
-#[async_trait]
 impl BrowserTest<IntegrationContext> for MetadataPanicTest {
     fn name(&self) -> Cow<'_, str> {
         if matches!(self.panic_in, MetadataPanicHook::Name) {
@@ -326,8 +350,12 @@ impl BrowserTest<IntegrationContext> for MetadataPanicTest {
         TestSettings::new()
     }
 
-    async fn run(&self, _driver: &WebDriver, _context: &IntegrationContext) -> Result<(), Report> {
-        Ok(())
+    fn run<'a>(
+        &'a self,
+        _driver: &'a WebDriver,
+        _context: &'a IntegrationContext,
+    ) -> TestFuture<'a> {
+        Box::pin(async move { Ok(()) })
     }
 }
 
@@ -571,17 +599,11 @@ impl BrowserTest<IntegrationContext> for PanicsBeforeItsFuture {
         Cow::Borrowed("panics before its future")
     }
 
-    fn run<'test, 'driver, 'context, 'future>(
-        &'test self,
-        _driver: &'driver WebDriver,
-        _context: &'context IntegrationContext,
-    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), Report>> + Send + 'future>>
-    where
-        'test: 'future,
-        'driver: 'future,
-        'context: 'future,
-        Self: 'future,
-    {
+    fn run<'a>(
+        &'a self,
+        _driver: &'a WebDriver,
+        _context: &'a IntegrationContext,
+    ) -> TestFuture<'a> {
         panic!("no future")
     }
 }
@@ -830,7 +852,6 @@ async fn cancellation_stops_the_run_and_its_browsers() {
 /// Every later `WebDriver` command of the session waits for it.
 struct FreezingTest;
 
-#[async_trait]
 impl BrowserTest<IntegrationContext> for FreezingTest {
     fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed("freezing")
@@ -840,27 +861,29 @@ impl BrowserTest<IntegrationContext> for FreezingTest {
         TestSettings::new().with_time_limit(Duration::from_secs(3))
     }
 
-    async fn run(&self, driver: &WebDriver, context: &IntegrationContext) -> Result<(), Report> {
-        driver
-            .goto(context.page_url)
-            .await
-            .context(IntegrationTestError::OpenTestPage)?;
-        driver
-            .execute(
-                "setTimeout(() => {
-                     const spin = () => queueMicrotask(spin);
-                     spin();
-                 });",
-                vec![],
-            )
-            .await
-            .context(IntegrationTestError::FreezePage)?;
-        // Waits for the frozen page.
-        driver
-            .title()
-            .await
-            .context(IntegrationTestError::ReadTitle)?;
-        Ok(())
+    fn run<'a>(&'a self, driver: &'a WebDriver, context: &'a IntegrationContext) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver
+                .goto(context.page_url)
+                .await
+                .context(IntegrationTestError::OpenTestPage)?;
+            driver
+                .execute(
+                    "setTimeout(() => {
+                         const spin = () => queueMicrotask(spin);
+                         spin();
+                     });",
+                    vec![],
+                )
+                .await
+                .context(IntegrationTestError::FreezePage)?;
+            // Waits for the frozen page.
+            driver
+                .title()
+                .await
+                .context(IntegrationTestError::ReadTitle)?;
+            Ok(())
+        })
     }
 }
 
@@ -1042,7 +1065,6 @@ struct FreezingFrameTest {
     url: String,
 }
 
-#[async_trait]
 impl BrowserTest<IntegrationContext> for FreezingFrameTest {
     fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed("freezing frame")
@@ -1052,31 +1074,37 @@ impl BrowserTest<IntegrationContext> for FreezingFrameTest {
         TestSettings::new().with_time_limit(Duration::from_secs(3))
     }
 
-    async fn run(&self, driver: &WebDriver, _context: &IntegrationContext) -> Result<(), Report> {
-        driver
-            .goto(&self.url)
-            .await
-            .context(IntegrationTestError::OpenTestPage)?;
-        driver
-            .enter_frame(0)
-            .await
-            .context(IntegrationTestError::FreezePage)?;
-        driver
-            .execute(
-                "setTimeout(() => {
-                     const spin = () => queueMicrotask(spin);
-                     spin();
-                 });",
-                vec![],
-            )
-            .await
-            .context(IntegrationTestError::FreezePage)?;
-        // Waits for the frozen frame.
-        driver
-            .execute("return document.title;", vec![])
-            .await
-            .context(IntegrationTestError::ReadTitle)?;
-        Ok(())
+    fn run<'a>(
+        &'a self,
+        driver: &'a WebDriver,
+        _context: &'a IntegrationContext,
+    ) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver
+                .goto(&self.url)
+                .await
+                .context(IntegrationTestError::OpenTestPage)?;
+            driver
+                .enter_frame(0)
+                .await
+                .context(IntegrationTestError::FreezePage)?;
+            driver
+                .execute(
+                    "setTimeout(() => {
+                         const spin = () => queueMicrotask(spin);
+                         spin();
+                     });",
+                    vec![],
+                )
+                .await
+                .context(IntegrationTestError::FreezePage)?;
+            // Waits for the frozen frame.
+            driver
+                .execute("return document.title;", vec![])
+                .await
+                .context(IntegrationTestError::ReadTitle)?;
+            Ok(())
+        })
     }
 }
 
@@ -1114,7 +1142,6 @@ async fn a_frozen_frame_of_another_site_is_closed() {
 /// Opens the fixture page, opens an `alert`, and waits for it to be closed, which never happens.
 struct DialogTest;
 
-#[async_trait]
 impl BrowserTest<IntegrationContext> for DialogTest {
     fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed("dialog")
@@ -1124,16 +1151,18 @@ impl BrowserTest<IntegrationContext> for DialogTest {
         TestSettings::new().with_time_limit(Duration::from_secs(3))
     }
 
-    async fn run(&self, driver: &WebDriver, context: &IntegrationContext) -> Result<(), Report> {
-        driver
-            .goto(context.page_url)
-            .await
-            .context(IntegrationTestError::OpenTestPage)?;
-        driver
-            .execute("setTimeout(() => alert('waiting for you'));", vec![])
-            .await
-            .context(IntegrationTestError::OpenDialog)?;
-        std::future::pending().await
+    fn run<'a>(&'a self, driver: &'a WebDriver, context: &'a IntegrationContext) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver
+                .goto(context.page_url)
+                .await
+                .context(IntegrationTestError::OpenTestPage)?;
+            driver
+                .execute("setTimeout(() => alert('waiting for you'));", vec![])
+                .await
+                .context(IntegrationTestError::OpenDialog)?;
+            std::future::pending().await
+        })
     }
 }
 

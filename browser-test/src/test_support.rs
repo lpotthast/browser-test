@@ -6,10 +6,9 @@ use std::{
     sync::{Mutex, MutexGuard, PoisonError},
 };
 
-use rootcause::Report;
 use thirtyfour::WebDriver;
 
-use crate::{BrowserTest, TestSettings};
+use crate::{BrowserTest, TestFuture, TestSettings};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -126,7 +125,6 @@ impl StubTest {
     }
 }
 
-#[async_trait::async_trait]
 impl BrowserTest for StubTest {
     fn name(&self) -> Cow<'_, str> {
         self.panic_if(Metadata::Name);
@@ -143,7 +141,7 @@ impl BrowserTest for StubTest {
         self.settings
     }
 
-    async fn run(&self, _driver: &WebDriver, (): &()) -> Result<(), Report> {
-        Ok(())
+    fn run<'a>(&'a self, _driver: &'a WebDriver, (): &'a ()) -> TestFuture<'a> {
+        Box::pin(async move { Ok(()) })
     }
 }
