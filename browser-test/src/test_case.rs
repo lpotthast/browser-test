@@ -346,6 +346,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use assertr::prelude::*;
+
     use super::*;
     use crate::test_support::{Metadata, StubTest};
 
@@ -360,14 +362,14 @@ mod tests {
         let entries = |tests: TestSuite| format!("{:?}", tests.entries);
 
         // Kept, so that the run reports them as failed. A filter by name doesn't read tags.
-        assert_eq!(
-            entries(suite().filter(&TestFilter::new().with_name_containing("checkout"))),
-            "[<name() panicked>]"
-        );
-        assert_eq!(
-            entries(suite().filter(&TestFilter::new().with_tag("checkout"))),
-            r#"["untagged"]"#
-        );
+        assert_that!(entries(
+            suite().filter(&TestFilter::new().with_name_containing("checkout"))
+        ))
+        .is_equal_to("[<name() panicked>]");
+        assert_that!(entries(
+            suite().filter(&TestFilter::new().with_tag("checkout"))
+        ))
+        .is_equal_to(r#"["untagged"]"#);
     }
 
     #[test]
@@ -380,22 +382,19 @@ mod tests {
                     .with(StubTest::new("search works")),
             );
 
-        assert_eq!(
-            format!("{tests:?}"),
-            concat!(
-                r#"TestSuite { parallelism: Parallelism { max_parallel_tests: 1 }, name: None, "#,
-                r#"run_always: false, entries: ["opens home page", TestSuite { parallelism: "#,
-                r#"Parallelism { max_parallel_tests: 1 }, name: Some("nested"), run_always: false, "#,
-                r#"entries: ["search works"] }] }"#,
-            )
-        );
+        assert_that!(format!("{tests:?}")).is_equal_to(concat!(
+            r#"TestSuite { parallelism: Parallelism { max_parallel_tests: 1 }, name: None, "#,
+            r#"run_always: false, entries: ["opens home page", TestSuite { parallelism: "#,
+            r#"Parallelism { max_parallel_tests: 1 }, name: Some("nested"), run_always: false, "#,
+            r#"entries: ["search works"] }] }"#,
+        ));
     }
 
     #[test]
     fn suites_without_tests_are_empty() {
         let empty = TestSuite::<()>::sequential().with_nested(TestSuite::sequential());
-        assert!(empty.is_empty());
-        assert!(!empty.with(StubTest::new("test")).is_empty());
+        assert_that!(empty.is_empty()).is_true();
+        assert_that!(empty.with(StubTest::new("test")).is_empty()).is_false();
     }
 
     fn test_names(tests: &TestSuite) -> Vec<String> {
@@ -425,46 +424,42 @@ mod tests {
 
     #[test]
     fn selection_combines_exact_tags_with_name_substrings_in_registration_order() {
-        assert_eq!(
-            test_names(&suite().filter(&TestFilter::new())),
-            [
-                "untagged hover",
-                "atom::hover",
-                "hook::press",
-                "other::hover",
-                "keyboard::focus"
-            ]
-        );
-        assert_eq!(
-            test_names(&suite().filter(&TestFilter::new().with_name_containing("hover"))),
-            ["untagged hover", "atom::hover", "other::hover"]
-        );
-        assert_eq!(
-            test_names(&suite().filter(&TestFilter::new().with_tag("buttons"))),
-            ["atom::hover", "hook::press"]
-        );
-        assert_eq!(
-            test_names(&suite().filter(&TestFilter::new().with_tag("keyboard"))),
-            ["keyboard::focus"]
-        );
-        assert_eq!(
-            test_names(
-                &suite().filter(
-                    &TestFilter::new()
-                        .with_tag("buttons")
-                        .with_tag("focus")
-                        .with_name_containing("press")
-                        .with_name_containing("focus")
-                )
-            ),
-            ["hook::press", "keyboard::focus"]
-        );
-        assert!(
+        assert_that!(test_names(&suite().filter(&TestFilter::new()))).contains_exactly([
+            "untagged hover",
+            "atom::hover",
+            "hook::press",
+            "other::hover",
+            "keyboard::focus",
+        ]);
+        assert_that!(test_names(
+            &suite().filter(&TestFilter::new().with_name_containing("hover"))
+        ))
+        .contains_exactly(["untagged hover", "atom::hover", "other::hover"]);
+        assert_that!(test_names(
+            &suite().filter(&TestFilter::new().with_tag("buttons"))
+        ))
+        .contains_exactly(["atom::hover", "hook::press"]);
+        assert_that!(test_names(
+            &suite().filter(&TestFilter::new().with_tag("keyboard"))
+        ))
+        .contains_exactly(["keyboard::focus"]);
+        assert_that!(test_names(
+            &suite().filter(
+                &TestFilter::new()
+                    .with_tag("buttons")
+                    .with_tag("focus")
+                    .with_name_containing("press")
+                    .with_name_containing("focus")
+            )
+        ))
+        .contains_exactly(["hook::press", "keyboard::focus"]);
+        assert_that!(
             suite()
                 .filter(&TestFilter::new().with_tag("missing"))
                 .is_empty()
-        );
-        assert!(
+        )
+        .is_true();
+        assert_that!(
             suite()
                 .filter(
                     &TestFilter::new()
@@ -472,24 +467,25 @@ mod tests {
                         .with_name_containing("absent")
                 )
                 .is_empty()
-        );
+        )
+        .is_true();
     }
 
     #[test]
     fn selection_preserves_execution_policy_and_allows_unconditional_checks() {
         let tests = suite().filter(&TestFilter::new().with_tag("focus"));
-        assert_eq!(tests.parallelism, Parallelism::parallel(2));
+        assert_that!(tests.parallelism).is_equal_to(Parallelism::parallel(2));
         let SuiteEntry::Suite(stage) = &tests.entries[0] else {
             panic!("expected stage")
         };
-        assert_eq!(stage.name.as_deref(), Some("stage"));
-        assert_eq!(stage.parallelism, Parallelism::sequential());
-        assert!(stage.run_always);
+        assert_that!(stage.name.as_deref()).is_equal_to(Some("stage"));
+        assert_that!(stage.parallelism).is_equal_to(Parallelism::sequential());
+        assert_that!(stage.run_always).is_true();
         let tests = tests.with_nested(
             TestSuite::sequential()
                 .run_always()
                 .with(StubTest::new("after all")),
         );
-        assert_eq!(test_names(&tests), ["keyboard::focus", "after all"]);
+        assert_that!(test_names(&tests)).contains_exactly(["keyboard::focus", "after all"]);
     }
 }

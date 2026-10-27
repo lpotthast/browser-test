@@ -58,13 +58,13 @@ fn normalize(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use assertr::prelude::*;
+
     use super::normalize;
 
     #[test]
     fn normalize_strips_the_comment_space_and_surrounding_empty_lines() {
-        assert_eq!(
-            normalize("\n Summary.\n\n     Indented.\n\n"),
-            "Summary.\n\n    Indented."
-        );
+        assert_that!(normalize("\n Summary.\n\n     Indented.\n\n"))
+            .is_equal_to("Summary.\n\n    Indented.");
     }
 }

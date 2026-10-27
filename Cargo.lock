@@ -166,6 +166,7 @@ dependencies = [
 name = "browser-test-macros"
 version = "0.8.0"
 dependencies = [
+ "assertr",
  "browser-test",
  "heck",
  "manyhow",

@@ -1,5 +1,6 @@
 //! The attribute's public API, including contexts borrowed for only one test run.
 
+use assertr::prelude::*;
 use browser_test::{BrowserTest, TestFilter, TestSuite, browser_test};
 use rootcause::Report;
 
@@ -15,7 +16,7 @@ struct Page<'a> {
 #[browser_test]
 pub(crate) async fn borrowed_page(page: &Page<'_>) -> Result<(), Report> {
     tokio::task::yield_now().await;
-    assert_eq!(page.title, "title");
+    assert_that!(page.title).is_equal_to("title");
     Ok(())
 }
 
@@ -23,14 +24,14 @@ pub(crate) async fn borrowed_page(page: &Page<'_>) -> Result<(), Report> {
 #[allow(clippy::elidable_lifetime_names)] // Exercise explicit lifetime syntax.
 async fn explicit_lifetime<'page>(page: &Page<'page>) -> Result<(), Report> {
     tokio::task::yield_now().await;
-    assert_eq!(page.title, "title");
+    assert_that!(page.title).is_equal_to("title");
     Ok(())
 }
 
 #[browser_test]
 async fn nested_reference(context: &&str) -> Result<(), Report> {
     tokio::task::yield_now().await;
-    assert_eq!(*context, "title");
+    assert_that!(*context).is_equal_to("title");
     Ok(())
 }
 
@@ -107,8 +108,8 @@ struct Callbacks<'a> {
 #[browser_test]
 async fn higher_ranked(callbacks: &Callbacks<'_>) -> Result<(), Report> {
     tokio::task::yield_now().await;
-    assert_eq!((callbacks.on_title)("title"), 5);
-    assert_eq!((callbacks.on_click)("button"), 6);
+    assert_that!((callbacks.on_title)("title")).is_equal_to(5);
+    assert_that!((callbacks.on_click)("button")).is_equal_to(6);
     Ok(())
 }
 
@@ -156,13 +157,11 @@ fn generated_tests_implement_the_trait_with_distinct_module_qualified_names() {
     accepts_borrowed(ExplicitLifetime);
     accepts_nested(NestedReference);
     accepts_higher_ranked(HigherRanked);
-    assert_eq!(BorrowedPage.name(), "macros::borrowed_page");
-    assert_eq!(Type.name(), "macros::type");
-    assert_eq!(other::BorrowedPage.name(), "macros::other::borrowed_page");
-    assert_eq!(
-        shadowed_macros::NamedByItsPath.name(),
-        "macros::shadowed_macros::named_by_its_path"
-    );
+    assert_that!(BorrowedPage.name()).is_equal_to("macros::borrowed_page");
+    assert_that!(Type.name()).is_equal_to("macros::type");
+    assert_that!(other::BorrowedPage.name()).is_equal_to("macros::other::borrowed_page");
+    assert_that!(shadowed_macros::NamedByItsPath.name())
+        .is_equal_to("macros::shadowed_macros::named_by_its_path");
     let _: TestSuite<str> = TestSuite::sequential().with(RawDriver);
     // Tests of different error types share a suite.
     let _: TestSuite = TestSuite::sequential()
@@ -172,9 +171,9 @@ fn generated_tests_implement_the_trait_with_distinct_module_qualified_names() {
 
 #[test]
 fn tags_select_generated_tests() {
-    assert_eq!(HandlesKeyboardEvents.tags(), ["smoke", "keyboard"]);
-    assert_eq!(NoContext.tags(), ["smoke"]);
-    assert_eq!(FunctionAttributes.tags(), [""; 0]);
+    assert_that!(HandlesKeyboardEvents.tags()).contains_exactly(["smoke", "keyboard"]);
+    assert_that!(NoContext.tags()).contains_exactly(["smoke"]);
+    assert_that!(FunctionAttributes.tags()).is_empty();
     let tests = TestSuite::sequential()
         .with(HandlesKeyboardEvents)
         .with(NoContext)
@@ -186,57 +185,50 @@ fn tags_select_generated_tests() {
                 .with_name_containing("other::borrowed_page")
                 .with_name_containing("no_context"),
         );
-    assert!(
-        format!("{tests:?}")
-            .contains(r#"entries: ["macros::no_context", "macros::other::borrowed_page"]"#)
-    );
+    assert_that!(format!("{tests:?}"))
+        .contains(r#"entries: ["macros::no_context", "macros::other::borrowed_page"]"#);
 }
 
 #[test]
 fn names_and_descriptions_are_independent() {
     let test = HandlesKeyboardEvents;
-    assert_eq!(test.name(), "keyboard::events");
-    assert_eq!(
-        test.description().as_deref(),
-        Some("Keyboard events reach their handler.")
-    );
-    assert!(
-        !TestSuite::sequential()
+    assert_that!(test.name()).is_equal_to("keyboard::events");
+    assert_that!(test.description().as_deref())
+        .is_equal_to(Some("Keyboard events reach their handler."));
+    assert_that!(
+        TestSuite::sequential()
             .with(test)
             .filter(&TestFilter::new().with_name_containing("keyboard::events"))
             .is_empty()
-    );
-    assert!(
+    )
+    .is_false();
+    assert_that!(
         TestSuite::sequential()
             .with(HandlesKeyboardEvents)
             .filter(&TestFilter::new().with_name_containing("Keyboard events reach"))
             .is_empty()
-    );
-    assert_eq!(
-        BorrowedPage.description().as_deref(),
-        Some(concat!(
-            "Documentation and visibility belong to the generated test type.\n\n",
-            "The page title matches the expected title.\n\n",
-            "    Indented Markdown stays indented.",
-        ))
-    );
-    assert_eq!(
-        ComputedDocumentation.description().as_deref(),
-        Some("Computed documentation.")
-    );
-    assert_eq!(NoContext.description(), None);
+    )
+    .is_true();
+    assert_that!(BorrowedPage.description().as_deref()).is_equal_to(Some(concat!(
+        "Documentation and visibility belong to the generated test type.\n\n",
+        "The page title matches the expected title.\n\n",
+        "    Indented Markdown stays indented.",
+    )));
+    assert_that!(ComputedDocumentation.description().as_deref())
+        .is_equal_to(Some("Computed documentation."));
+    assert_that!(NoContext.description()).is_none();
 }
 
 #[tokio::test]
 async fn functions_keep_their_name_async_results_and_borrowed_arguments() {
     let title = String::from("title");
     let page = Page { title: &title };
-    borrowed_page(&page).await.unwrap();
-    explicit_lifetime(&page).await.unwrap();
-    assert!(typed_error(&()).await.is_err());
+    assert_that!(borrowed_page(&page).await).is_ok();
+    assert_that!(explicit_lifetime(&page).await).is_ok();
+    assert_that!(typed_error(&()).await).is_err();
     let callbacks = Callbacks {
         on_title: str::len,
         on_click: &str::len,
     };
-    higher_ranked(&callbacks).await.unwrap();
+    assert_that!(higher_ranked(&callbacks).await).is_ok();
 }

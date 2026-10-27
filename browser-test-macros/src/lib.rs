@@ -14,6 +14,7 @@ use syn::ItemFn;
 /// ```
 /// use std::time::Duration;
 ///
+/// use assertr::prelude::*;
 /// use browser_test::{BrowserTest, TestSuite, browser_test, thirtyfour::WebDriver};
 /// use rootcause::Report;
 ///
@@ -31,12 +32,13 @@ use syn::ItemFn;
 ///     Ok(())
 /// }
 ///
-/// assert!(ShowsGreeting.name().ends_with("::shows_greeting"));
-/// assert_eq!(ShowsGreeting.description().as_deref(), Some("The home page greets the visitor."));
-/// assert_eq!(OpensHomePage.name(), "navigation::home");
-/// assert_eq!(OpensHomePage.tags(), ["smoke"]);
-/// assert_eq!(OpensHomePage.settings().time_limit(), Some(Duration::from_secs(10)));
-/// assert_eq!(ShowsGreeting.settings().time_limit(), None);
+/// assert_that!(ShowsGreeting.name()).ends_with("::shows_greeting");
+/// assert_that!(ShowsGreeting.description().as_deref())
+///     .is_equal_to(Some("The home page greets the visitor."));
+/// assert_that!(OpensHomePage.name()).is_equal_to("navigation::home");
+/// assert_that!(OpensHomePage.tags()).contains_exactly(["smoke"]);
+/// assert_that!(OpensHomePage.settings().time_limit()).is_equal_to(Some(Duration::from_secs(10)));
+/// assert_that!(ShowsGreeting.settings().time_limit()).is_none();
 ///
 /// let tests: TestSuite<str> = TestSuite::sequential()
 ///     .with(ShowsGreeting)

@@ -14,10 +14,11 @@ use thirtyfour::extensions::query::{ElementPollerWithTimeout, IntoElementPoller}
 /// ```
 /// use std::time::Duration;
 ///
+/// use assertr::prelude::*;
 /// use browser_test::ElementQueryWait;
 ///
 /// let wait = ElementQueryWait::new(Duration::from_secs(10), Duration::from_millis(500));
-/// assert_eq!(wait.timeout(), Duration::from_secs(10));
+/// assert_that!(wait.timeout()).is_equal_to(Duration::from_secs(10));
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ElementQueryWait {

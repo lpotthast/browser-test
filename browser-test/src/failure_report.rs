@@ -647,12 +647,13 @@ mod tests {
                 },
             ],
         };
-        assert!(frames.starts_at("tests/ui/checkbox.rs:84:9"));
-        assert!(frames.starts_at("my_crate/tests/ui/checkbox.rs:84:9"));
-        assert!(!frames.starts_at("tests/ui/checkbox.rs:85:9"));
-        assert!(!frames.starts_at("tests/main.rs:12:5"));
-        assert!(!frames.starts_at("/home/me/.cargo/registry/src/assertr/src/lib.rs:84:9"));
-        assert!(!frames.starts_at("no location"));
+        assert_that!(frames.starts_at("tests/ui/checkbox.rs:84:9")).is_true();
+        assert_that!(frames.starts_at("my_crate/tests/ui/checkbox.rs:84:9")).is_true();
+        assert_that!(frames.starts_at("tests/ui/checkbox.rs:85:9")).is_false();
+        assert_that!(frames.starts_at("tests/main.rs:12:5")).is_false();
+        assert_that!(frames.starts_at("/home/me/.cargo/registry/src/assertr/src/lib.rs:84:9"))
+            .is_false();
+        assert_that!(frames.starts_at("no location")).is_false();
     }
 
     /// A directory tree for one test, removed when dropped.

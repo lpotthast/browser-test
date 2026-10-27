@@ -223,6 +223,7 @@ fn struct_name(function: &Ident, function_name: &str) -> manyhow::Result<Ident> 
 
 #[cfg(test)]
 mod tests {
+    use assertr::prelude::*;
     use manyhow::ToTokensError;
 
     use super::{Arguments, expand};
@@ -291,12 +292,12 @@ mod tests {
             let error = expand(Arguments::default(), function)
                 .unwrap_err()
                 .into_token_stream();
-            assert!(error.to_string().contains(message), "{error}");
+            assert_that!(error.to_string()).contains(message);
         }
     }
 
     #[test]
     fn reserved_names_are_sorted() {
-        assert!(super::RESERVED_NAMES.is_sorted());
+        assert_that!(super::RESERVED_NAMES.is_sorted()).is_true();
     }
 }

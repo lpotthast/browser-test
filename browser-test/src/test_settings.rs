@@ -16,6 +16,7 @@ use crate::{ElementQueryWait, Timeouts};
 /// ```
 /// use std::time::Duration;
 ///
+/// use assertr::prelude::*;
 /// use browser_test::{ElementQueryWait, TestSettings, Timeouts};
 ///
 /// let settings = TestSettings::new()
@@ -26,8 +27,8 @@ use crate::{ElementQueryWait, Timeouts};
 ///     ))
 ///     .with_fresh_session(true)
 ///     .with_time_limit(Duration::from_secs(10));
-/// assert!(settings.fresh_session());
-/// assert_eq!(settings.time_limit(), Some(Duration::from_secs(10)));
+/// assert_that!(settings.fresh_session()).is_true();
+/// assert_that!(settings.time_limit()).is_equal_to(Some(Duration::from_secs(10)));
 /// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct TestSettings {

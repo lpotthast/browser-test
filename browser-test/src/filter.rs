@@ -179,6 +179,8 @@ fn env_list(name: &str) -> Result<Vec<String>, InvalidEnvVar> {
 
 #[cfg(test)]
 mod tests {
+    use assertr::prelude::*;
+
     use super::*;
     use crate::test_support::EnvVarGuard;
 
@@ -188,20 +190,23 @@ mod tests {
         let tags = EnvVarGuard::new_unlocked(DEFAULT_TAG_FILTER_ENV);
         names.remove();
         tags.remove();
-        assert_eq!(TestFilter::from_env().unwrap(), TestFilter::new());
-        assert!(TestFilter::from_env().unwrap().selects_all());
+        assert_that!(TestFilter::from_env())
+            .ok()
+            .is_equal_to(TestFilter::new());
+        assert_that!(TestFilter::from_env().unwrap().selects_all()).is_true();
         names.set(" , \t,");
         tags.set("");
-        assert_eq!(TestFilter::from_env().unwrap(), TestFilter::new());
+        assert_that!(TestFilter::from_env())
+            .ok()
+            .is_equal_to(TestFilter::new());
         names.set(" hover, ,press ");
         tags.set(" button, focus, ");
-        assert_eq!(
-            TestFilter::from_env().unwrap(),
+        assert_that!(TestFilter::from_env()).ok().is_equal_to(
             TestFilter::new()
                 .with_name_containing("hover")
                 .with_name_containing("press")
                 .with_tag("button")
-                .with_tag("focus")
+                .with_tag("focus"),
         );
     }
 
@@ -209,25 +214,28 @@ mod tests {
     fn environment_lists_add_to_the_filter() {
         let names = EnvVarGuard::new("BROWSER_TEST_NAME_CUSTOM");
         names.set("press");
-        assert_eq!(
+        assert_that!(
             TestFilter::new()
                 .with_name_containing("hover")
                 .with_name_substrings_from_env_var("BROWSER_TEST_NAME_CUSTOM")
-                .unwrap(),
+        )
+        .ok()
+        .is_equal_to(
             TestFilter::new()
                 .with_name_containing("hover")
-                .with_name_containing("press")
+                .with_name_containing("press"),
         );
     }
 
     #[test]
     fn empty_alternatives_are_ignored() {
-        assert!(
+        assert_that!(
             TestFilter::new()
                 .with_name_containing("")
                 .with_tag("")
                 .selects_all()
-        );
+        )
+        .is_true();
     }
 
     #[cfg(unix)]
@@ -236,9 +244,11 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
         let names = EnvVarGuard::new("BROWSER_TEST_NAME_INVALID");
         names.set(std::ffi::OsStr::from_bytes(&[0xff]));
-        let error = TestFilter::new()
-            .with_name_substrings_from_env_var("BROWSER_TEST_NAME_INVALID")
-            .unwrap_err();
-        assert_eq!(error.name, "BROWSER_TEST_NAME_INVALID");
+        assert_that!(
+            TestFilter::new().with_name_substrings_from_env_var("BROWSER_TEST_NAME_INVALID")
+        )
+        .err()
+        .derive(|error| &error.name)
+        .is_equal_to("BROWSER_TEST_NAME_INVALID");
     }
 }

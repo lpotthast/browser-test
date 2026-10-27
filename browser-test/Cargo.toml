@@ -42,7 +42,7 @@ url = { version = "2.5.8", default-features = false, features = ["std"] }
 nix = { version = "0.31.3", default-features = false, features = ["user"] }
 
 [dev-dependencies]
-assertr = { version = "0.9.1", default-features = false, features = ["rootcause", "std"] }
+assertr = { workspace = true, features = ["rootcause"] }
 serial_test = { version = "4.0.1", default-features = false, features = ["async"] }
 tokio = { version = "1.52.3", default-features = false, features = ["macros", "net", "rt-multi-thread", "signal"] }
 

@@ -20,6 +20,7 @@ quote = "1.0.35"
 syn = { version = "3", features = ["full", "visit-mut"] }
 
 [dev-dependencies]
+assertr.workspace = true
 # The documentation's examples use the attribute through `browser-test`. Without a version, the
 # dependency is left out when publishing.
 browser-test = { path = "../browser-test" }

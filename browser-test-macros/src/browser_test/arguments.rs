@@ -79,6 +79,7 @@ impl Parse for Arguments {
 
 #[cfg(test)]
 mod tests {
+    use assertr::prelude::*;
     use quote::ToTokens;
 
     use syn::LitStr;
@@ -91,34 +92,27 @@ mod tests {
             "time_limit = std::time::Duration::from_secs(5), name = \"slow\"",
         )
         .unwrap();
-        assert_eq!(
-            args.time_limit.unwrap().to_token_stream().to_string(),
-            "std :: time :: Duration :: from_secs (5)"
-        );
-        assert_eq!(args.name.unwrap().value(), "slow");
-        assert!(
-            syn::parse_str::<Arguments>("")
-                .unwrap()
-                .time_limit
-                .is_none()
-        );
+        assert_that!(args.time_limit.unwrap().to_token_stream().to_string())
+            .is_equal_to("std :: time :: Duration :: from_secs (5)");
+        assert_that!(args.name.unwrap().value()).is_equal_to("slow");
+        assert_that!(syn::parse_str::<Arguments>("").unwrap().time_limit).is_none();
     }
 
     #[test]
     fn tags_arguments_accept_lists_of_strings() {
-        assert!(syn::parse_str::<Arguments>("").unwrap().tags.is_none());
+        assert_that!(syn::parse_str::<Arguments>("").unwrap().tags).is_none();
         let args = syn::parse_str::<Arguments>("tags = [\"button\", \"keyboard\",]").unwrap();
         let tags: Vec<_> = args.tags.unwrap().iter().map(LitStr::value).collect();
-        assert_eq!(tags, ["button", "keyboard"]);
+        assert_that!(tags).contains_exactly(["button", "keyboard"]);
         let args = syn::parse_str::<Arguments>("tags = []").unwrap();
-        assert_eq!(args.tags.unwrap(), Vec::<LitStr>::new());
+        assert_that!(args.tags).some().is_empty();
     }
 
     #[test]
     fn name_arguments_accept_strings_and_reject_invalid_options() {
-        assert!(syn::parse_str::<Arguments>("").unwrap().name.is_none());
+        assert_that!(syn::parse_str::<Arguments>("").unwrap().name).is_none();
         let args = syn::parse_str::<Arguments>("name = \"keyboard::events\",").unwrap();
-        assert_eq!(args.name.unwrap().value(), "keyboard::events");
+        assert_that!(args.name.unwrap().value()).is_equal_to("keyboard::events");
         for (source, message) in [
             (
                 "path = \"/keyboard\"",
@@ -148,13 +142,9 @@ mod tests {
                 "duplicate `time_limit` argument",
             ),
         ] {
-            assert_eq!(
-                syn::parse_str::<Arguments>(source)
-                    .err()
-                    .unwrap()
-                    .to_string(),
-                message
-            );
+            assert_that!(syn::parse_str::<Arguments>(source).err())
+                .some()
+                .has_display_value(message);
         }
     }
 }

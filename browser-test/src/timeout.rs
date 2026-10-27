@@ -12,14 +12,15 @@ use std::time::Duration;
 /// ```
 /// use std::time::Duration;
 ///
+/// use assertr::prelude::*;
 /// use browser_test::Timeouts;
 ///
 /// let timeouts = Timeouts::new()
 ///     .with_page_load(Duration::from_secs(10))
 ///     .with_implicit_wait(Duration::ZERO);
 ///
-/// assert_eq!(timeouts.page_load(), Some(Duration::from_secs(10)));
-/// assert_eq!(timeouts.script(), None);
+/// assert_that!(timeouts.page_load()).is_equal_to(Some(Duration::from_secs(10)));
+/// assert_that!(timeouts.script()).is_none();
 /// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Timeouts {

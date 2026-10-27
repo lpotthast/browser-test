@@ -15,12 +15,13 @@ use crate::BrowserTestRunReport;
 /// # Examples
 ///
 /// ```rust
+/// use assertr::prelude::*;
 /// use browser_test::{BrowserTestRunReport, BrowserTestRunner, Cancellation, StderrSummary};
 ///
 /// let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals())
 ///     .with_report_consumer(StderrSummary)
 ///     .with_report_consumer(|report: &BrowserTestRunReport| {
-///         assert!(report.body_time() < std::time::Duration::from_secs(600));
+///         assert_that!(report.body_time()).is_less_than(std::time::Duration::from_secs(600));
 ///     });
 /// ```
 pub trait RunReportConsumer: Send + Sync {

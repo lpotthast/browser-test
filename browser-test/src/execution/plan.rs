@@ -266,20 +266,17 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(
-            metadata,
-            [
-                (0, "a", Some("ui"), vec!["one".to_owned()], true),
-                (
-                    1,
-                    "b",
-                    Some("ui"),
-                    vec!["one".to_owned(), "two".to_owned()],
-                    true
-                ),
-                (2, "c", Some("ui"), Vec::new(), true),
-            ]
-        );
+        assert_that!(metadata).contains_exactly([
+            (0, "a", Some("ui"), vec!["one".to_owned()], true),
+            (
+                1,
+                "b",
+                Some("ui"),
+                vec!["one".to_owned(), "two".to_owned()],
+                true,
+            ),
+            (2, "c", Some("ui"), Vec::new(), true),
+        ]);
     }
 
     #[test]
@@ -307,27 +304,25 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(
-            metadata,
-            [
-                (
-                    "unnamed test at index 0",
-                    Vec::new(),
-                    Some("named panics".to_owned())
-                ),
-                ("tagged", Vec::new(), Some("tagged panics".to_owned())),
-                (
-                    "settings",
-                    vec!["one".to_owned()],
-                    Some("settings panics".to_owned())
-                ),
-            ]
-        );
+        assert_that!(metadata).contains_exactly([
+            (
+                "unnamed test at index 0",
+                Vec::new(),
+                Some("named panics".to_owned()),
+            ),
+            ("tagged", Vec::new(), Some("tagged panics".to_owned())),
+            (
+                "settings",
+                vec!["one".to_owned()],
+                Some("settings panics".to_owned()),
+            ),
+        ]);
         let record = tests[2].record(TestOutcome::Panicked, None, None);
-        assert_eq!(
-            (record.index, record.name.as_str(), record.tags),
-            (2, "settings", vec!["one".to_owned()])
-        );
+        assert_that!((record.index, record.name.as_str(), record.tags)).is_equal_to((
+            2,
+            "settings",
+            vec!["one".to_owned()],
+        ));
     }
 
     #[test]
@@ -346,13 +341,10 @@ mod tests {
             .iter()
             .map(|test| (test.placement.path.as_deref(), test.placement.run_always))
             .collect();
-        assert_eq!(
-            placements,
-            [
-                (Some("checkout"), false),
-                (Some("checkout / final checks"), true),
-            ]
-        );
+        assert_that!(placements).contains_exactly([
+            (Some("checkout"), false),
+            (Some("checkout / final checks"), true),
+        ]);
     }
 
     mod plan_test {

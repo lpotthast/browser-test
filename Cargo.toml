@@ -12,6 +12,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/lpotthast/browser-test"
 
 [workspace.dependencies]
+assertr = { version = "0.9.1", default-features = false, features = ["std"] }
 browser-test-macros = { version = "0.8.0", path = "browser-test-macros" }
 rootcause = { version = "0.13.0", default-features = false }
 
