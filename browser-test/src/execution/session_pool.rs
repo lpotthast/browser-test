@@ -96,6 +96,8 @@ struct Waiter {
     id: u64,
     /// Whether the test needs a fresh session.
     fresh: bool,
+    /// Whether the test starts even after a failure stopped the run.
+    run_always: bool,
     ticket: oneshot::Sender<TicketResult>,
 }
 
@@ -402,6 +404,7 @@ impl SessionPool {
             state.waiters.push_back(Waiter {
                 id,
                 fresh,
+                run_always,
                 ticket: ticket_tx,
             });
             self.replenish_locked(&mut state);
@@ -411,28 +414,54 @@ impl SessionPool {
                 ticket: ticket_rx,
             }
         };
-        let given_up = if run_always {
+        tokio::select! {
+            // A stop drops the senders of the tests it ends the wait of.
+            ticket = &mut waiting.ticket => ticket.ok(),
+            () = self.given_up(run_always).cancelled() => None,
+        }
+    }
+
+    /// Cancelled once a test (that runs always, or not) doesn't start anymore.
+    fn given_up(&self, run_always: bool) -> &CancellationToken {
+        if run_always {
             &self.cancellation
         } else {
             &self.stop
-        };
-        tokio::select! {
-            ticket = &mut waiting.ticket => ticket.ok(),
-            () = given_up.cancelled() => None,
         }
     }
 
     /// Start no further tests, except those that run always (after a failure): tests waiting for a
-    /// session that don't run always give up.
+    /// session that don't run always give up, and idle sessions that the tests still to start
+    /// don't need quit.
     pub(super) fn stop(&self) {
         self.stop.cancel();
+        let mut state = self.lock();
+        state.waiters.retain(|waiter| waiter.run_always);
+        let wanted = self.wanted(&state);
+        while state.running + state.supply() > wanted && state.idle.pop_back().is_some() {}
     }
 
-    /// Create a session with non-default settings for one test.
+    /// How many sessions (running a test, ready or on their way) the pool keeps: one per test that
+    /// can run at the same time, plus spares.
+    fn wanted(&self, state: &PoolState) -> usize {
+        let starting = self.starting(state).total();
+        let spares = self.spare.min(starting);
+        let running_at_once = self
+            .max_concurrency
+            .min(state.running + state.waiting().total() + starting);
+        running_at_once + spares
+    }
+
+    /// Create a session with non-default settings for one test, and wait until it is ready. `None`
+    /// if the test doesn't start anymore, like with [`Self::take`]. Its session then quits.
     pub(super) async fn dedicated(
         &self,
         element_query_wait: Option<ElementQueryWait>,
-    ) -> TicketResult {
+        run_always: bool,
+    ) -> Option<TicketResult> {
+        if !self.may_start(run_always) {
+            return None;
+        }
         let creation_start = Instant::now();
         let (ticket_tx, ticket_rx) = oneshot::channel();
         let session = {
@@ -447,12 +476,15 @@ impl SessionPool {
             element_query_wait,
             delivery: Delivery::Dedicated(ticket_tx),
         }));
-        ticket_rx.await.unwrap_or_else(|_| {
-            Err(CreationFailure {
-                report: rootcause::report!("the browser session could not be created"),
-                preparation: SessionPreparation::Created(creation_start.elapsed()),
-            })
-        })
+        tokio::select! {
+            ticket = ticket_rx => Some(ticket.unwrap_or_else(|_| {
+                Err(CreationFailure {
+                    report: rootcause::report!("the browser session could not be created"),
+                    preparation: SessionPreparation::Created(creation_start.elapsed()),
+                })
+            })),
+            () = self.given_up(run_always).cancelled() => None,
+        }
     }
 
     pub(super) fn deliver(&self, delivery: Delivery, ticket: TicketResult) {
@@ -501,17 +533,11 @@ impl SessionPool {
     }
 
     /// Offer a session reset after its test. The pool keeps it only while it has fewer sessions
-    /// (running a test, ready or on their way) than tests that can run at the same time and
-    /// spares need: otherwise it drops the ticket, and the session quits.
+    /// than it wants ([`Self::wanted`]): otherwise it drops the ticket, and the session quits.
     pub(super) fn deliver_reset(&self, ticket: Ticket) {
         let mut state = self.lock();
         state.resetting -= 1;
-        let starting = self.starting(&state).total();
-        let spares = self.spare.min(starting);
-        let running_at_once = self
-            .max_concurrency
-            .min(state.running + state.waiting().total() + starting);
-        if state.running + state.supply() < running_at_once + spares {
+        if state.running + state.supply() < self.wanted(&state) {
             state.offer(ticket);
         }
     }
@@ -688,6 +714,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_stop_ends_the_wait_for_a_dedicated_session() {
+        let (pool, mut requests) = pool_with_spare(Upcoming::default());
+        let mut dedicated = pin!(pool.dedicated(None, false));
+        assert_that!(futures_util::poll!(dedicated.as_mut()).is_pending()).is_true();
+        let request = requests.try_recv().ok().flatten();
+
+        pool.stop();
+
+        assert_that!(dedicated.await.is_none()).is_true();
+        // The session finds no test to deliver it to, so it quits.
+        let delivery = request.map(|request| request.delivery);
+        assert_that!(matches!(delivery, Some(Delivery::Dedicated(ticket)) if ticket.is_closed()))
+            .is_true();
+    }
+
+    #[tokio::test]
+    async fn a_stop_quits_idle_sessions_no_test_still_to_start_needs() {
+        let created = SessionPreparation::Created(std::time::Duration::ZERO);
+        let (pool, _requests) = pool_with_spare_and_always(
+            Upcoming { any: 3, fresh: 0 },
+            Upcoming { any: 1, fresh: 0 },
+        );
+        let (kept, kept_jobs) = ticket(created);
+        let (spare, spare_jobs) = ticket(created);
+        let (quit, quit_jobs) = ticket(created);
+        pool.lock().idle.extend([kept, spare, quit]);
+
+        // The test that runs always needs one session, and one spare is kept for it.
+        pool.stop();
+
+        assert_that!(pool.lock().idle.len()).is_equal_to(2);
+        assert_that!(quit_jobs.await.is_err()).is_true();
+        drop((kept_jobs, spare_jobs));
+    }
+
+    #[tokio::test]
     async fn waiting_tests_get_sessions_in_the_order_they_asked() {
         let created = SessionPreparation::Created(std::time::Duration::ZERO);
         let (pool, _requests) = pool_with_spare(Upcoming { any: 3, fresh: 0 });
@@ -724,7 +786,7 @@ mod tests {
     async fn dedicated_sessions_count_towards_the_open_browsers() {
         let created = SessionPreparation::Created(std::time::Duration::ZERO);
         let (pool, mut requests) = pool_with_spare(Upcoming { any: 2, fresh: 0 });
-        let mut dedicated = pin!(pool.dedicated(None));
+        let mut dedicated = pin!(pool.dedicated(None, false));
         assert_that!(futures_util::poll!(dedicated.as_mut()).is_pending()).is_true();
         pool.replenish();
         assert_that!(requested(&mut requests)).is_equal_to(2);

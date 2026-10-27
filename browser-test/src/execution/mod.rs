@@ -369,7 +369,14 @@ where
         };
         ticket
     } else {
-        env.pool.dedicated(prepared.element_query_wait).await
+        let Some(ticket) = env
+            .pool
+            .dedicated(prepared.element_query_wait, run_always)
+            .await
+        else {
+            return;
+        };
+        ticket
     };
     let wait = requested.elapsed();
     if !env.pool.may_start(run_always) {
