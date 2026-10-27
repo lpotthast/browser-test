@@ -76,8 +76,8 @@ struct PoolState {
     resetting: usize,
     /// Pool sessions running a test.
     running: usize,
-    /// Pool sessions whose browser is open, or opening: from the request to create them until
-    /// their worker ended, which includes sessions that are quitting.
+    /// Sessions whose browser is open, or opening, dedicated ones included: from the request to
+    /// create them until their worker ended, which includes sessions that are quitting.
     alive: usize,
     /// Tests waiting for a pool session, in the order they asked for one.
     waiters: VecDeque<Waiter>,
@@ -330,8 +330,9 @@ impl SessionPool {
     /// upcoming ones that will still start.
     ///
     /// Waiting tests get their sessions right away. Spares are only created while fewer sessions
-    /// are alive than tests can run at the same time plus spares, counting those still quitting:
-    /// a spare that can't be created yet is once a session ended ([`Self::session_ended`]).
+    /// are alive than tests can run at the same time plus spares, counting dedicated sessions and
+    /// those still quitting: a spare that can't be created yet is once a session ended
+    /// ([`Self::session_ended`]).
     pub(super) fn replenish(&self) {
         self.replenish_locked(&mut self.lock());
     }
@@ -436,6 +437,7 @@ impl SessionPool {
         let (ticket_tx, ticket_rx) = oneshot::channel();
         let session = {
             let mut state = self.lock();
+            state.alive += 1;
             let session = state.next_session;
             state.next_session += 1;
             session
@@ -477,8 +479,8 @@ impl SessionPool {
         self.lock().running -= 1;
     }
 
-    /// The worker of a pool session ended: its browser quit, or never started. Create the spares
-    /// that had to wait for it.
+    /// The worker of a session ended: its browser quit, or never started. Create the spares that
+    /// had to wait for it.
     pub(super) fn session_ended(&self) {
         let mut state = self.lock();
         state.alive -= 1;
@@ -716,6 +718,22 @@ mod tests {
         drop(first);
         assert_that!(second.await).is_some();
         assert_that!(pool.lock().running).is_equal_to(1);
+    }
+
+    #[tokio::test]
+    async fn dedicated_sessions_count_towards_the_open_browsers() {
+        let created = SessionPreparation::Created(std::time::Duration::ZERO);
+        let (pool, mut requests) = pool_with_spare(Upcoming { any: 2, fresh: 0 });
+        let mut dedicated = pin!(pool.dedicated(None));
+        assert_that!(futures_util::poll!(dedicated.as_mut()).is_pending()).is_true();
+        pool.replenish();
+        assert_that!(requested(&mut requests)).is_equal_to(2);
+
+        // A test takes the spare. The dedicated session and the test's make one test at a time
+        // plus one spare, so no further spare is created.
+        pool.deliver(Delivery::Pool, Ok(ticket(created).0));
+        assert_that!(pool.take(false, false).await).is_some();
+        assert_that!(requested(&mut requests)).is_equal_to(0);
     }
 
     fn creation_failure() -> CreationFailure {

@@ -146,6 +146,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   doesn't create sessions without end.
 - With `SessionReuse`, preparing a new session for reuse may take 30 seconds, like resetting one. A session taking
   longer runs one test only, instead of keeping its test from starting indefinitely.
+- The sessions of tests with an element query wait of their own count towards the documented limit of open browsers
+  (parallel tests plus spare sessions), so that spares no longer exceed it.
 
 ## [0.7.0] - 2026-10-13
 

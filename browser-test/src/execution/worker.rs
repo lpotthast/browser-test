@@ -73,11 +73,8 @@ async fn session_worker<Context>(env: &Env<'_, Context>, request: WorkerRequest)
 where
     Context: Sync + ?Sized,
 {
-    let pooled = matches!(request.delivery, Delivery::Pool);
     run_session(env, request).await;
-    if pooled {
-        env.pool.session_ended();
-    }
+    env.pool.session_ended();
 }
 
 /// The work of [`session_worker`].
