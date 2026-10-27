@@ -10,6 +10,9 @@
 //! - **What**: the error and its context chain. thirtyfour errors show their `WebDriver` message,
 //!   without chromedriver's native stack trace.
 //!
+//! Tools that present failures themselves, e.g. as annotations in CI, read the frames and steps
+//! from a report's attachments, downcast to [`TestCodeFrames`] and [`RecentSteps`].
+//!
 //! The runner installs the [`rootcause`] hooks behind this with the first run
 //! ([`BrowserTestRunner::with_failure_report_hooks`](crate::BrowserTestRunner::with_failure_report_hooks)).
 //! An application that installs hooks of its own adds them with [`hooks`], and the runner then
@@ -45,7 +48,8 @@ use rootcause::{
 };
 use thirtyfour::error::WebDriverError;
 
-use crate::{BrowserTestError, report::FormatDuration, step::StepEvent};
+pub use crate::step::RecentStep;
+use crate::{BrowserTestError, report::FormatDuration};
 
 /// browser-test's own sources, whose frames are never test code.
 const OWN_SOURCES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/");
@@ -283,20 +287,45 @@ pub struct TestCodeFrames {
 /// A captured stack, until it is symbolized to the test code's frames.
 struct CapturedFrames {
     backtrace: Mutex<Option<backtrace::Backtrace>>,
-    frames: OnceLock<Vec<Frame>>,
+    frames: OnceLock<Vec<TestCodeFrame>>,
 }
 
+/// A frame of the test code, as [`TestCodeFrames`] lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Frame {
-    /// The absolute path of the source file.
+pub struct TestCodeFrame {
     path: PathBuf,
-    /// The source file as shown, relative to the test root.
     file: String,
     line: u32,
     function: String,
 }
 
-impl Frame {
+impl TestCodeFrame {
+    /// The absolute path of the frame's source file.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The frame's source file as the report shows it, relative to the workspace whose tests run:
+    /// `tests/ui/checkbox.rs`.
+    #[must_use]
+    pub fn file(&self) -> &str {
+        &self.file
+    }
+
+    /// The frame's line in its source file.
+    #[must_use]
+    pub const fn line(&self) -> u32 {
+        self.line
+    }
+
+    /// The frame's function, shortened to its last two path segments: `checkbox::selected_state`,
+    /// or `Page::css` for a method. Empty if the symbol is unknown.
+    #[must_use]
+    pub fn function(&self) -> &str {
+        &self.function
+    }
+
     /// Whether the frame is at `line` of `file`, a path as rustc reports locations (in panics and
     /// [`Location`]s): relative to the workspace root for the workspace's sources, absolute for
     /// others, e.g. registry crates.
@@ -317,7 +346,7 @@ impl TestCodeFrames {
     }
 
     #[cfg(test)]
-    fn from_frames(frames: Vec<Frame>) -> Self {
+    fn from_frames(frames: Vec<TestCodeFrame>) -> Self {
         Self {
             captured: Arc::new(CapturedFrames {
                 backtrace: Mutex::new(None),
@@ -326,8 +355,9 @@ impl TestCodeFrames {
         }
     }
 
-    /// The test code's frames, symbolized on first use.
-    fn frames(&self) -> &[Frame] {
+    /// The frames, innermost first. The first call symbolizes the stack, which takes a while.
+    #[must_use]
+    pub fn frames(&self) -> &[TestCodeFrame] {
         self.captured.frames.get_or_init(|| {
             let backtrace = self
                 .captured
@@ -371,12 +401,12 @@ impl TestCodeFrames {
 ///
 /// browser-test's own frames are told apart by their source files and, where those don't match
 /// (e.g. with remapped paths), by their symbols.
-fn test_code_frames(backtrace: &backtrace::Backtrace) -> Vec<Frame> {
+fn test_code_frames(backtrace: &backtrace::Backtrace) -> Vec<TestCodeFrame> {
     let root = test_root();
     let dependencies = Dependencies::of_test_root();
     let own_sources = normalized(Path::new(OWN_SOURCES));
     let runner_source = normalized(Path::new(RUNNER_SOURCE));
-    let mut frames: Vec<Frame> = Vec::new();
+    let mut frames: Vec<TestCodeFrame> = Vec::new();
     // For the debug log when no frame is test code: usually the frame the runner called.
     let mut outermost_source = None;
     'frames: for frame in backtrace.frames() {
@@ -406,7 +436,7 @@ fn test_code_frames(backtrace: &backtrace::Backtrace) -> Vec<Frame> {
             if dependencies.contains(&path, root) {
                 continue;
             }
-            let entry = Frame {
+            let entry = TestCodeFrame {
                 file: file.display().to_string(),
                 path,
                 line,
@@ -769,20 +799,32 @@ where
 /// how long.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RecentSteps {
-    steps: Vec<StepEvent>,
+    steps: Vec<RecentStep>,
     omitted: usize,
 }
 
 impl RecentSteps {
     /// The last `steps` of `total`, recorded as they ended, listed as they started: a step
     /// enclosing others ends after them, but is listed before them.
-    pub(crate) fn new(steps: &VecDeque<StepEvent>, total: usize) -> Option<Self> {
+    pub(crate) fn new(steps: &VecDeque<RecentStep>, total: usize) -> Option<Self> {
         let mut listed: Vec<_> = steps.iter().cloned().collect();
         listed.sort_by_key(|step| step.started);
         (!listed.is_empty()).then(|| Self {
             steps: listed,
             omitted: total.saturating_sub(steps.len()),
         })
+    }
+
+    /// The steps, as they started.
+    #[must_use]
+    pub fn steps(&self) -> &[RecentStep] {
+        &self.steps
+    }
+
+    /// How many earlier steps the test took, which aren't listed.
+    #[must_use]
+    pub const fn omitted(&self) -> usize {
+        self.omitted
     }
 }
 
@@ -897,8 +939,8 @@ mod tests {
     use super::*;
 
     /// A frame of `file`, relative to the test root.
-    fn frame(file: &str, line: u32, function: &str) -> Frame {
-        Frame {
+    fn frame(file: &str, line: u32, function: &str) -> TestCodeFrame {
+        TestCodeFrame {
             path: test_root().join(file),
             file: file.to_owned(),
             line,
@@ -1093,7 +1135,7 @@ mod tests {
 
     #[test]
     fn recent_steps_are_listed_as_they_started() {
-        let step = |kind, started| StepEvent {
+        let step = |kind, started| RecentStep {
             kind,
             detail: None,
             started: Duration::from_millis(started),

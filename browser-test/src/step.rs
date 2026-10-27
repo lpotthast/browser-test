@@ -31,7 +31,7 @@ tokio::task_local! {
 pub(crate) struct StepRecorder {
     slow_step: Option<Duration>,
     steps: Mutex<BTreeMap<String, StepStats>>,
-    /// When the test started, for [`StepEvent::started`].
+    /// When the test started, for [`RecentStep::started`].
     started: Instant,
     /// The last steps, for failure reports.
     log: StepLog,
@@ -84,7 +84,7 @@ impl StepRecorder {
 
 /// A step of a test, as [`RecentSteps`] lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StepEvent {
+pub struct RecentStep {
     pub(crate) kind: &'static str,
     pub(crate) detail: Option<String>,
     /// Since the test started.
@@ -94,14 +94,47 @@ pub(crate) struct StepEvent {
     pub(crate) finished: bool,
 }
 
+impl RecentStep {
+    /// The step's kind, as given to [`StepExt::step`].
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        self.kind
+    }
+
+    /// The step's specifics, as given to [`Step::detail`].
+    #[must_use]
+    pub fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
+    }
+
+    /// When the step started, since the test started.
+    #[must_use]
+    pub const fn started(&self) -> Duration {
+        self.started
+    }
+
+    /// How long the step took, or ran until it was dropped.
+    #[must_use]
+    pub const fn duration(&self) -> Duration {
+        self.duration
+    }
+
+    /// Whether the step's future finished, rather than being dropped before (e.g. by a timeout or
+    /// a panic).
+    #[must_use]
+    pub const fn finished(&self) -> bool {
+        self.finished
+    }
+}
+
 /// A bounded log of the steps of the running test.
 #[derive(Debug, Default)]
 struct StepLog {
-    events: Mutex<(VecDeque<StepEvent>, usize)>,
+    events: Mutex<(VecDeque<RecentStep>, usize)>,
 }
 
 impl StepLog {
-    fn push(&self, event: StepEvent) {
+    fn push(&self, event: RecentStep) {
         let mut guard = self.events.lock().unwrap_or_else(PoisonError::into_inner);
         let (events, total) = &mut *guard;
         if events.len() == RECENT_STEP_COUNT {
@@ -244,7 +277,7 @@ fn record_step(kind: &'static str, detail: Option<&str>, start: Instant, finishe
     };
     if let Some(recorder) = &recorder {
         recorder.record(kind, duration);
-        recorder.log.push(StepEvent {
+        recorder.log.push(RecentStep {
             kind,
             detail: detail.map(str::to_owned),
             started: start.saturating_duration_since(recorder.started),
