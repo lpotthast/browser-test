@@ -531,7 +531,8 @@ impl fmt::Display for TestCodeFrames {
         let width = self
             .frames()
             .iter()
-            .map(|frame| frame.file.len() + 1 + frame.line.to_string().len())
+            // In chars, as `width$` pads.
+            .map(|frame| frame.file.chars().count() + 1 + frame.line.to_string().len())
             .max()
             .unwrap_or_default();
         write!(f, "Test code:")?;
@@ -556,6 +557,14 @@ fn function_name(symbol: &str) -> String {
         if depth == 1 && skipping_trait_at.is_none() && rest.starts_with(" as ") {
             skipping_trait_at = Some(depth);
             rest = &rest[4..];
+            continue;
+        }
+        // The `->` of a function pointer type closes no `<`.
+        if let Some(after) = rest.strip_prefix("->") {
+            if skipping_trait_at.is_none() && depth <= usize::from(symbol.starts_with('<')) {
+                path.push_str("->");
+            }
+            rest = after;
             continue;
         }
         match c {
@@ -1145,6 +1154,30 @@ mod tests {
             "my_tests::pages::Actions::eval::<()>::{{closure}}"
         ))
         .is_equal_to("Actions::eval");
+    }
+
+    #[test]
+    fn function_names_skip_function_pointer_types_in_generic_arguments() {
+        assert_that!(function_name(
+            "my_tests::retry::<fn() -> core::result::Result<(), my_tests::Error>>::{{closure}}"
+        ))
+        .is_equal_to("my_tests::retry");
+        assert_that!(function_name(
+            "<my_tests::Retry<fn(u32) -> u32> as my_tests::Policy>::next::h0123456789abcdef"
+        ))
+        .is_equal_to("Retry::next");
+    }
+
+    #[test]
+    fn frame_locations_are_aligned_by_chars() {
+        let frames = TestCodeFrames::from_frames(vec![
+            frame("tests/größe.rs", 7, "größe::check"),
+            frame("tests/sizes.rs", 12, "sizes::check"),
+        ]);
+        assert_that!(frames.to_string()).is_equal_to(
+            "Test code:\n  tests/größe.rs:7   größe::check\n  tests/sizes.rs:12  sizes::check"
+                .to_owned(),
+        );
     }
 
     #[test]
