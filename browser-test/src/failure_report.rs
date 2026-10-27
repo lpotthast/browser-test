@@ -25,7 +25,6 @@ use std::{
         Arc, Mutex, OnceLock, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
 };
 
 use rootcause::{
@@ -42,10 +41,11 @@ use rootcause::{
     },
     markers::{Dynamic, Local, ObjectMarkerFor, SendSync, Uncloneable},
     report_attachment::ReportAttachment,
+    report_attachments::ReportAttachments,
 };
 use thirtyfour::error::WebDriverError;
 
-use crate::{BrowserTestError, report::FormatDuration};
+use crate::{BrowserTestError, report::FormatDuration, step::StepEvent};
 
 /// browser-test's own sources, whose frames are never test code.
 const OWN_SOURCES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/");
@@ -60,9 +60,6 @@ const OWN_CRATE: &str = "browser_test";
 /// The runner's module, by the symbols of its frames: where their source files don't match
 /// [`RUNNER_SOURCE`].
 const RUNNER_MODULE: &str = "browser_test::execution";
-
-/// How many steps [`RecentSteps`] keeps.
-pub(crate) const RECENT_STEP_COUNT: usize = 8;
 
 /// `hooks` with the hooks behind failure reports added: a report creation hook attaching
 /// [`TestCodeFrames`] to the errors of running tests, a formatter printing [`WebDriverError`]s as
@@ -596,18 +593,21 @@ fn function_name(symbol: &str) -> String {
     segments[start..].join("::")
 }
 
-// Reports are printed with `Debug` too (a `main` or test returning `Err`): attachments read the same.
-impl fmt::Debug for TestCodeFrames {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, f)
-    }
+/// Implements `Debug` as `Display` for the given types, attachments of failure reports: reports
+/// are printed with `Debug` too (a `main` or test returning `Err`), and attachments read the same.
+macro_rules! debug_as_display {
+    ($($attachment:ty),+ $(,)?) => {$(
+        impl ::std::fmt::Debug for $attachment {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                ::std::fmt::Display::fmt(self, f)
+            }
+        }
+    )+};
 }
 
-impl fmt::Debug for RecentSteps {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, f)
-    }
-}
+pub(crate) use debug_as_display;
+
+debug_as_display!(TestCodeFrames, RecentSteps, PanicLocation);
 
 /// Where a test panicked, as its failure report shows it. A panic outside the test code (in a
 /// dependency, e.g. an assertion library that raises from its own code) says so, as the test
@@ -629,12 +629,6 @@ impl fmt::Display for PanicLocation {
         } else {
             write!(f, "Panicked at {}", self.location)
         }
-    }
-}
-
-impl fmt::Debug for PanicLocation {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, f)
     }
 }
 
@@ -715,16 +709,17 @@ impl AttachmentHandler<TestCodeLocation> for TestCodeLocationHandler {
 pub(crate) fn without_own_location<C: ?Sized>(
     mut report: rootcause::Report<C>,
 ) -> rootcause::Report<C> {
-    let attachments = report.attachments();
-    let is_location = attachments.len().checked_sub(1).is_some_and(|last| {
-        attachments
-            .get(last)
-            .is_some_and(|attachment| attachment.downcast_inner::<Location>().is_some())
-    });
-    if is_location {
+    if last_location(report.attachments()).is_some() {
         report.attachments_mut().pop();
     }
     report
+}
+
+/// The source location rootcause's default hooks attached to a report, if it is the report's last
+/// attachment.
+fn last_location<T>(attachments: &ReportAttachments<T>) -> Option<Location> {
+    let last = attachments.len().checked_sub(1)?;
+    attachments.get(last)?.downcast_inner::<Location>().copied()
 }
 
 /// Attaches [`TestCodeFrames`] to every report created in a running test that has no children:
@@ -755,12 +750,7 @@ where
     }
     let frames = TestCodeFrames::capture();
     let attachments = report.attachments_mut();
-    let location = attachments
-        .len()
-        .checked_sub(1)
-        .and_then(|last| attachments.get(last))
-        .and_then(|attachment| attachment.downcast_inner::<Location>().copied());
-    if let Some(location) = location {
+    if let Some(location) = last_location(attachments) {
         // Frames that start where the location points replace it.
         attachments.pop();
         attachments.push(
@@ -773,18 +763,6 @@ where
     }
     attachments
         .push(ReportAttachment::<_, T>::new_custom::<TestCodeFramesHandler>(frames).into_dynamic());
-}
-
-/// A step of a test, as [`RecentSteps`] lists it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StepEvent {
-    pub(crate) kind: &'static str,
-    pub(crate) detail: Option<String>,
-    /// Since the test started.
-    pub(crate) started: Duration,
-    pub(crate) duration: Duration,
-    /// Whether the step's future finished, rather than being dropped before.
-    pub(crate) finished: bool,
 }
 
 /// The last steps of a failed test, oldest first: what it did right before it failed, when and for
@@ -830,29 +808,6 @@ impl fmt::Display for RecentSteps {
             )?;
         }
         Ok(())
-    }
-}
-
-/// A bounded log of the steps of the running test.
-#[derive(Debug, Default)]
-pub(crate) struct StepLog {
-    events: Mutex<(VecDeque<StepEvent>, usize)>,
-}
-
-impl StepLog {
-    pub(crate) fn push(&self, event: StepEvent) {
-        let mut guard = self.events.lock().unwrap_or_else(PoisonError::into_inner);
-        let (events, total) = &mut *guard;
-        if events.len() == RECENT_STEP_COUNT {
-            events.pop_front();
-        }
-        events.push_back(event);
-        *total += 1;
-    }
-
-    pub(crate) fn recent(&self) -> Option<RecentSteps> {
-        let guard = self.events.lock().unwrap_or_else(PoisonError::into_inner);
-        RecentSteps::new(&guard.0, guard.1)
     }
 }
 
@@ -934,6 +889,8 @@ impl<C: fmt::Display + 'static> ContextFormatterHook<C> for DisplayFormatter {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use assertr::prelude::*;
     use serde_json::json;
 

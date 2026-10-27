@@ -1,7 +1,7 @@
 //! Timed steps inside browser tests.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fmt::{self, Display},
     future::Future,
     pin::Pin,
@@ -11,13 +11,16 @@ use std::{
 };
 
 use crate::{
-    failure_report::{PanicDetails, RecentSteps, StepEvent, StepLog},
+    failure_report::{PanicDetails, RecentSteps},
     report::{FormatDuration, StepStats},
 };
 
 /// Default for [`crate::ProgressWarnings`]'s slow step threshold, also used for steps outside of
 /// a runner.
 pub(crate) const DEFAULT_SLOW_STEP: Duration = Duration::from_secs(2);
+
+/// How many steps [`RecentSteps`] keeps.
+const RECENT_STEP_COUNT: usize = 8;
 
 tokio::task_local! {
     static CURRENT_TEST: Arc<StepRecorder>;
@@ -76,6 +79,41 @@ impl StepRecorder {
             .entry(kind.to_owned())
             .or_default()
             .record(duration);
+    }
+}
+
+/// A step of a test, as [`RecentSteps`] lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StepEvent {
+    pub(crate) kind: &'static str,
+    pub(crate) detail: Option<String>,
+    /// Since the test started.
+    pub(crate) started: Duration,
+    pub(crate) duration: Duration,
+    /// Whether the step's future finished, rather than being dropped before.
+    pub(crate) finished: bool,
+}
+
+/// A bounded log of the steps of the running test.
+#[derive(Debug, Default)]
+struct StepLog {
+    events: Mutex<(VecDeque<StepEvent>, usize)>,
+}
+
+impl StepLog {
+    fn push(&self, event: StepEvent) {
+        let mut guard = self.events.lock().unwrap_or_else(PoisonError::into_inner);
+        let (events, total) = &mut *guard;
+        if events.len() == RECENT_STEP_COUNT {
+            events.pop_front();
+        }
+        events.push_back(event);
+        *total += 1;
+    }
+
+    fn recent(&self) -> Option<RecentSteps> {
+        let guard = self.events.lock().unwrap_or_else(PoisonError::into_inner);
+        RecentSteps::new(&guard.0, guard.1)
     }
 }
 

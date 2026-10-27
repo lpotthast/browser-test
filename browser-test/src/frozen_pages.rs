@@ -124,12 +124,7 @@ fn write_unchecked(f: &mut fmt::Formatter<'_>, unchecked: &[String]) -> fmt::Res
     Ok(())
 }
 
-// Reports are printed with `Debug` too (a `main` or test returning `Err`): attachments read the same.
-impl fmt::Debug for PageCheck {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, f)
-    }
-}
+crate::failure_report::debug_as_display!(PageCheck);
 
 /// Check every page of `session` and close the frozen ones, unless a dialog is open.
 pub(crate) async fn close_frozen_pages(session: &WebDriver) -> PageCheck {
