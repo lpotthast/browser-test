@@ -127,6 +127,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   executable's location.
 - `TestCodeFrames` name functions whose generic arguments hold a function pointer type (`fn() -> T`) correctly, and
   align frames whose paths aren't ASCII.
+- A dialog open in a tab other than the session's current one, when a test exceeds its time limit, is named in the
+  report like one in the current tab, instead of its page being taken for frozen and closed. A frozen page that the
+  browser still lists after closing it has its renderer crashed. A check of the pages that runs out of time still
+  names the frozen pages it found, and the report no longer claims to know why a page didn't respond.
 - `WebDriver` errors that thirtyfour raises without an HTTP status, e.g. for a window it can't find by name, no longer
   print `State:` within their message.
 

@@ -71,6 +71,9 @@ enum IntegrationTestError {
     #[error("failed to open a dialog")]
     OpenDialog,
 
+    #[error("failed to switch to another window")]
+    SwitchWindow,
+
     #[error("failed to focus an element from script")]
     FocusElement,
 
@@ -1191,6 +1194,67 @@ async fn a_dialog_is_named_rather_than_a_frozen_page() {
         ("dialog".to_owned(), TestOutcome::TimedOut),
         ("after a dialog".to_owned(), TestOutcome::Passed),
     ]);
+}
+
+/// Opens an `alert` in a second tab, switches back to the first one, and waits forever.
+struct DialogInAnotherTabTest;
+
+impl BrowserTest<IntegrationContext> for DialogInAnotherTabTest {
+    fn name(&self) -> Cow<'_, str> {
+        Cow::Borrowed("dialog in another tab")
+    }
+
+    fn settings(&self) -> TestSettings {
+        TestSettings::new().with_time_limit(Duration::from_secs(3))
+    }
+
+    fn run<'a>(&'a self, driver: &'a WebDriver, context: &'a IntegrationContext) -> TestFuture<'a> {
+        Box::pin(async move {
+            let first = driver
+                .window()
+                .await
+                .context(IntegrationTestError::SwitchWindow)?;
+            let second = driver
+                .new_tab()
+                .await
+                .context(IntegrationTestError::SwitchWindow)?;
+            driver
+                .switch_to_window(second)
+                .await
+                .context(IntegrationTestError::SwitchWindow)?;
+            driver
+                .goto(context.page_url)
+                .await
+                .context(IntegrationTestError::OpenTestPage)?;
+            driver
+                .execute("setTimeout(() => alert('waiting in another tab'));", vec![])
+                .await
+                .context(IntegrationTestError::OpenDialog)?;
+            driver
+                .switch_to_window(first)
+                .await
+                .context(IntegrationTestError::SwitchWindow)?;
+            std::future::pending().await
+        })
+    }
+}
+
+/// A dialog in a tab other than the session's current one is named as well, rather than its page
+/// called frozen and closed.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_dialog_in_another_tab_is_named_rather_than_a_frozen_page() {
+    let err = runner()
+        .run(
+            &IntegrationContext::default(),
+            TestSuite::sequential().with(DialogInAnotherTabTest),
+        )
+        .await
+        .expect_err("the test times out");
+
+    assert_that!(format!("{err:?}"))
+        .contains("A dialog is open, which its page waits for: waiting in another tab")
+        .does_not_contain("Frozen");
 }
 
 /// Run by `sigint_cancels_the_run` and `sigterm_cancels_the_run` in a child process. Does nothing
