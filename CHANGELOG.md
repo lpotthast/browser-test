@@ -116,6 +116,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   executable's location.
 - `TestCodeFrames` name functions whose generic arguments hold a function pointer type (`fn() -> T`) correctly, and
   align frames whose paths aren't ASCII.
+- `WebDriver` errors that thirtyfour raises without an HTTP status, e.g. for a window it can't find by name, no longer
+  print `State:` within their message.
 
 ## [0.7.0] - 2026-10-13
 

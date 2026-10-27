@@ -867,26 +867,8 @@ impl ContextFormatterHook<WebDriverError> for WebDriverErrorFormatter {
         report: ReportRef<'_, WebDriverError, Uncloneable, Local>,
         formatter: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
-        let full = report.current_context().to_string();
-        let mut parts: Vec<&str> = Vec::new();
-        for line in full
-            .lines()
-            .take_while(|line| !line.trim_start().starts_with("Stacktrace:"))
-            .map(str::trim)
-        {
-            let line = line.strip_prefix("Error: ").unwrap_or(line);
-            let line = line.strip_prefix("State: ").unwrap_or(line);
-            if line.is_empty()
-                || line.starts_with("(Session info:")
-                || line.starts_with("Status:")
-                || line.starts_with("Additional info:")
-                || parts.iter().any(|part| part.contains(line))
-            {
-                continue;
-            }
-            parts.push(line);
-        }
-        write!(formatter, "WebDriver: {}", parts.join(" "))
+        let error = report.current_context().to_string();
+        write!(formatter, "WebDriver: {}", webdriver_message(&error))
     }
 
     fn preferred_context_formatting_style(
@@ -899,6 +881,37 @@ impl ContextFormatterHook<WebDriverError> for WebDriverErrorFormatter {
             ..Default::default()
         }
     }
+}
+
+/// The message of a thirtyfour `error` (as `Display` prints it) on one line: without
+/// chromedriver's native stack trace, its session info, the HTTP status, and lines repeating
+/// earlier ones.
+fn webdriver_message(error: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for line in error
+        .lines()
+        .take_while(|line| !line.trim_start().starts_with("Stacktrace:"))
+        // Without an HTTP status, the indented state follows the error's kind on its line.
+        .flat_map(|line| match line.split_once("    State: ") {
+            Some((kind, state)) => [kind, state].map(Some),
+            None => [Some(line), None],
+        })
+        .flatten()
+        .map(str::trim)
+    {
+        let line = line.strip_prefix("Error: ").unwrap_or(line);
+        let line = line.strip_prefix("State: ").unwrap_or(line);
+        if line.is_empty()
+            || line.starts_with("(Session info:")
+            || line.starts_with("Status:")
+            || line.starts_with("Additional info:")
+            || parts.iter().any(|part| part.contains(line))
+        {
+            continue;
+        }
+        parts.push(line);
+    }
+    parts.join(" ")
 }
 
 /// Prints a context with `Display` also where a report is printed with `Debug` (as a `main` or
@@ -922,6 +935,7 @@ impl<C: fmt::Display + 'static> ContextFormatterHook<C> for DisplayFormatter {
 #[cfg(test)]
 mod tests {
     use assertr::prelude::*;
+    use serde_json::json;
 
     use super::*;
 
@@ -1178,6 +1192,60 @@ mod tests {
             "Test code:\n  tests/größe.rs:7   größe::check\n  tests/sizes.rs:12  sizes::check"
                 .to_owned(),
         );
+    }
+
+    /// A chromedriver error response, with its native stack trace.
+    fn chromedriver_error(status: u16, error: &str, message: &str) -> WebDriverError {
+        let body = json!({
+            "value": {
+                "error": error,
+                "message": format!("{message}\n  (Session info: chrome=131.0.6778.85)"),
+                "stacktrace": "0   chromedriver                        0x0000000100d6e5b8 \
+                               cxxbridge1$str$ptr + 3651580\n1   chromedriver                        \
+                               0x0000000100d66e1c cxxbridge1$str$ptr + 3620960\n2   \
+                               libsystem_pthread.dylib             0x000000018b6a72e4 _pthread_start + 136",
+            }
+        });
+        WebDriverError::parse(status, body.to_string())
+    }
+
+    #[test]
+    fn webdriver_errors_print_their_message_on_one_line() {
+        let missing = chromedriver_error(
+            404,
+            "no such element",
+            r##"no such element: Unable to locate element: {"method":"css selector","selector":"#missing"}"##,
+        );
+        assert_that!(webdriver_message(&missing.to_string())).is_equal_to(
+            r##"Element not found: no such element: Unable to locate element: {"method":"css selector","selector":"#missing"}"##
+                .to_owned(),
+        );
+
+        let script = chromedriver_error(
+            500,
+            "javascript error",
+            "javascript error: boom is not defined",
+        );
+        assert_that!(webdriver_message(&script.to_string())).is_equal_to(
+            "The Javascript code returned an error: javascript error: boom is not defined"
+                .to_owned(),
+        );
+
+        // Raised by thirtyfour itself, with the message as its state as well.
+        let query = thirtyfour::error::no_such_element(
+            "no such element: element(s) not found using selectors: [CSS(#missing)]".to_owned(),
+        );
+        assert_that!(webdriver_message(&query.to_string())).is_equal_to(
+            "Element not found: no such element: element(s) not found using selectors: \
+             [CSS(#missing)]"
+                .to_owned(),
+        );
+        // Without a status, the state follows on the first line.
+        let window = WebDriverError::NoSuchWindow(thirtyfour::error::WebDriverErrorInfo::new(
+            "unable to find named window: popup".to_owned(),
+        ));
+        assert_that!(webdriver_message(&window.to_string()))
+            .is_equal_to("Window not found: unable to find named window: popup".to_owned());
     }
 
     #[test]
