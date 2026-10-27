@@ -64,7 +64,12 @@ pub(super) struct SessionPool {
 struct PoolState {
     /// Sessions ready for a test, not yet taken. Only those that no waiting test can take: one
     /// needing a fresh session can't take a reset one.
-    idle: VecDeque<TicketResult>,
+    idle: VecDeque<Ticket>,
+    /// A spare session that could not be created once the retries were spent, which fails the next
+    /// test taking a session (see [`PoolState::offer_failure`]).
+    failure: Option<CreationFailure>,
+    /// How many more spares that could not be created are created again.
+    creation_retries: usize,
     /// Sessions being created for the pool.
     creating: usize,
     /// Sessions of finished tests being reset for the pool.
@@ -108,11 +113,13 @@ impl Drop for Waiting<'_> {
         if let Some(position) = state.waiters.iter().position(|waiter| waiter.id == self.id) {
             state.waiters.remove(position);
         }
-        if let Ok(ticket) = self.ticket.try_recv() {
-            if ticket.is_ok() {
+        match self.ticket.try_recv() {
+            Ok(Ok(ticket)) => {
                 state.running -= 1;
+                state.offer(ticket);
             }
-            state.offer(ticket);
+            Ok(Err(failure)) => state.offer_failure(failure),
+            Err(_) => {}
         }
     }
 }
@@ -154,70 +161,102 @@ impl PoolState {
         }
     }
 
-    /// Sessions ready or on their way to the pool.
+    /// Sessions ready or on their way to the pool. A kept creation failure counts as well, so that
+    /// no further spare is created while it waits for a test.
     fn supply(&self) -> usize {
-        self.idle.len() + self.creating + self.resetting
+        self.idle.len() + self.creating + self.resetting + usize::from(self.failure.is_some())
     }
 
     /// Fresh sessions ready or on their way to the pool.
     fn fresh_supply(&self) -> usize {
-        self.idle.iter().filter(|ticket| is_fresh(ticket)).count() + self.creating
+        self.idle.iter().filter(|ticket| ticket.is_fresh()).count()
+            + self.creating
+            + usize::from(self.failure.is_some())
     }
 
     /// The idle session a test takes: a fresh one if it needs one, otherwise preferably a reset
-    /// one, which keeps the fresh ones for tests that need them.
+    /// one, which keeps the fresh ones for tests that need them. Without one, a kept creation
+    /// failure.
     fn take_idle(&mut self, fresh: bool) -> Option<TicketResult> {
         let position = if fresh {
-            self.idle.iter().position(is_fresh)
+            self.idle.iter().position(Ticket::is_fresh)
         } else {
             self.idle
                 .iter()
-                .position(|ticket| !is_fresh(ticket))
+                .position(|ticket| !ticket.is_fresh())
                 .or_else(|| (!self.idle.is_empty()).then_some(0))
-        }?;
-        self.idle.remove(position)
+        };
+        match position {
+            Some(position) => self.idle.remove(position).map(Ok),
+            None => self.failure.take().map(Err),
+        }
     }
 
     /// Hand `ticket` to the first waiting test that can take it, or else keep it idle. Dropped if
     /// the pool closed, so that its session quits.
-    fn offer(&mut self, mut ticket: TicketResult) {
+    fn offer(&mut self, ticket: Ticket) {
         if self.closed {
             return;
         }
-        while let Some(position) = self
-            .waiters
-            .iter()
-            .position(|waiter| !waiter.fresh || is_fresh(&ticket))
-        {
+        let fresh = ticket.is_fresh();
+        match self.hand_to_waiter(Ok(ticket), |waiter| fresh || !waiter.fresh) {
+            None => self.running += 1,
+            Some(ticket) => self.idle.extend(ticket.ok()),
+        }
+    }
+
+    /// Hand the failure to create a pool session to the first waiting test. If no test waits,
+    /// the session was a spare: the failure is logged, and the spare is created again while
+    /// retries are left. Once they are spent, the failure is kept for the next test taking a
+    /// session, which stops the pool from creating spares without end when every creation fails.
+    fn offer_failure(&mut self, failure: CreationFailure) {
+        if self.closed {
+            return;
+        }
+        let Some(Err(failure)) = self.hand_to_waiter(Err(failure), |_| true) else {
+            return;
+        };
+        if self.creation_retries > 0 {
+            self.creation_retries -= 1;
+            tracing::warn!(
+                "A spare browser session could not be created, so another one is: {}",
+                failure.report
+            );
+        } else if self.failure.is_none() {
+            self.failure = Some(failure);
+        } else {
+            tracing::warn!(
+                "A spare browser session could not be created: {}",
+                failure.report
+            );
+        }
+    }
+
+    /// Send `ticket` to the first waiting test that `fits`. Returns it if none takes it.
+    fn hand_to_waiter(
+        &mut self,
+        mut ticket: TicketResult,
+        fits: impl Fn(&Waiter) -> bool,
+    ) -> Option<TicketResult> {
+        while let Some(position) = self.waiters.iter().position(&fits) {
             let waiter = self
                 .waiters
                 .remove(position)
                 .expect("the position is in bounds");
-            let ok = ticket.is_ok();
-            if ok {
-                self.running += 1;
-            }
             match waiter.ticket.send(ticket) {
-                Ok(()) => return,
+                Ok(()) => return None,
                 // The test left the queue: try the next one.
-                Err(returned) => {
-                    if ok {
-                        self.running -= 1;
-                    }
-                    ticket = returned;
-                }
+                Err(returned) => ticket = returned,
             }
         }
-        self.idle.push_back(ticket);
+        Some(ticket)
     }
 }
 
-/// Whether no test ran in the session of `ticket` yet. A session that could not be created counts
-/// as fresh: its failure goes to whichever test takes it.
-fn is_fresh(ticket: &TicketResult) -> bool {
-    match ticket {
-        Ok(ticket) => matches!(ticket.preparation, SessionPreparation::Created(_)),
-        Err(_) => true,
+impl Ticket {
+    /// Whether no test ran in the session yet.
+    fn is_fresh(&self) -> bool {
+        matches!(self.preparation, SessionPreparation::Created(_))
     }
 }
 
@@ -234,6 +273,8 @@ impl SessionPool {
         Self {
             state: Mutex::new(PoolState {
                 idle: VecDeque::new(),
+                failure: None,
+                creation_retries: creation_retries(spare),
                 creating: 0,
                 resetting: 0,
                 running: 0,
@@ -309,9 +350,13 @@ impl SessionPool {
             if needs_fresh && state.alive >= bound {
                 // A reset session no waiting test takes makes way for the fresh one: dropping
                 // its ticket quits it.
-                let reset = state.idle.iter().filter(|ticket| !is_fresh(ticket)).count();
+                let reset = state
+                    .idle
+                    .iter()
+                    .filter(|ticket| !ticket.is_fresh())
+                    .count();
                 if reset > waiting.any
-                    && let Some(position) = state.idle.iter().position(|ticket| !is_fresh(ticket))
+                    && let Some(position) = state.idle.iter().position(|ticket| !ticket.is_fresh())
                 {
                     state.idle.remove(position);
                 }
@@ -343,6 +388,7 @@ impl SessionPool {
                 return None;
             }
             if let Some(ticket) = state.take_idle(fresh) {
+                // A kept creation failure doesn't count, as no session runs the test.
                 if ticket.is_ok() {
                     state.running += 1;
                 }
@@ -412,7 +458,13 @@ impl SessionPool {
             Delivery::Pool => {
                 let mut state = self.lock();
                 state.creating -= 1;
-                state.offer(ticket);
+                match ticket {
+                    Ok(ticket) => {
+                        state.creation_retries = creation_retries(self.spare);
+                        state.offer(ticket);
+                    }
+                    Err(failure) => state.offer_failure(failure),
+                }
             }
             Delivery::Dedicated(ticket_tx) => {
                 let _ = ticket_tx.send(ticket);
@@ -458,7 +510,7 @@ impl SessionPool {
             .max_concurrency
             .min(state.running + state.waiting().total() + starting);
         if state.running + state.supply() < running_at_once + spares {
-            state.offer(Ok(ticket));
+            state.offer(ticket);
         }
     }
 
@@ -475,9 +527,16 @@ impl SessionPool {
             let mut state = self.lock();
             state.closed = true;
             state.idle.clear();
+            state.failure = None;
         }
         let _ = self.requests.send(None);
     }
+}
+
+/// How many spares that could not be created in a row the pool with `spare` spares creates again:
+/// one per spare.
+fn creation_retries(spare: usize) -> usize {
+    spare.max(1)
 }
 
 #[cfg(test)]
@@ -565,7 +624,7 @@ mod tests {
         {
             let mut state = pool.lock();
             state.alive = 2;
-            state.idle.push_back(Ok(reset));
+            state.idle.push_back(reset);
         }
 
         let take = pin!(pool.take(true, false));
@@ -656,6 +715,53 @@ mod tests {
         pool.deliver(Delivery::Pool, Ok(ticket(created).0));
         drop(first);
         assert_that!(second.await).is_some();
+        assert_that!(pool.lock().running).is_equal_to(1);
+    }
+
+    fn creation_failure() -> CreationFailure {
+        CreationFailure {
+            report: rootcause::report!("no browser"),
+            preparation: SessionPreparation::Created(std::time::Duration::ZERO),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_waiting_test_gets_the_failure_to_create_its_session() {
+        let (pool, _requests) = pool_with_spare(Upcoming { any: 1, fresh: 0 });
+        let mut take = pin!(pool.take(false, false));
+        assert_that!(futures_util::poll!(take.as_mut()).is_pending()).is_true();
+
+        pool.deliver(Delivery::Pool, Err(creation_failure()));
+
+        assert_that!(matches!(take.await, Some(Err(_)))).is_true();
+    }
+
+    #[tokio::test]
+    async fn a_spare_that_could_not_be_created_is_created_again_then_fails_the_next_test() {
+        let created = SessionPreparation::Created(std::time::Duration::ZERO);
+        let (pool, mut requests) = pool_with_spare(Upcoming { any: 3, fresh: 0 });
+        pool.replenish();
+        assert_that!(requested(&mut requests)).is_equal_to(1);
+
+        // No test waits for the spare: it is created again, once.
+        pool.deliver(Delivery::Pool, Err(creation_failure()));
+        pool.session_ended();
+        assert_that!(requested(&mut requests)).is_equal_to(1);
+
+        // A creation succeeding restores the retry.
+        pool.deliver(Delivery::Pool, Ok(ticket(created).0));
+        assert_that!(pool.take(false, false).await).is_some();
+        assert_that!(requested(&mut requests)).is_equal_to(1);
+        pool.deliver(Delivery::Pool, Err(creation_failure()));
+        pool.session_ended();
+        assert_that!(requested(&mut requests)).is_equal_to(1);
+
+        // Once the retry is spent, the failure is kept for the next test, instead of creating
+        // spares without end.
+        pool.deliver(Delivery::Pool, Err(creation_failure()));
+        pool.session_ended();
+        assert_that!(requested(&mut requests)).is_equal_to(0);
+        assert_that!(matches!(pool.take(false, false).await, Some(Err(_)))).is_true();
         assert_that!(pool.lock().running).is_equal_to(1);
     }
 }

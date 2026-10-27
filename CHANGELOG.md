@@ -140,6 +140,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whole run. The test times out, and its report holds the panic as a child.
 - Tests waiting for a browser session get one in the order they asked for it, rather than whichever happened to be
   polled first.
+- A spare browser session that could not be created no longer fails an unrelated test that starts later. Its failure
+  goes to a test waiting for a session, if any. Otherwise it is logged, and the spare created again, once per spare
+  since the last session that could be created. After that, it fails the next test, so that a setup that never works
+  doesn't create sessions without end.
 
 ## [0.7.0] - 2026-10-13
 
