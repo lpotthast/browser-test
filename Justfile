@@ -75,7 +75,7 @@ clippy:
 
 # Run all tests, including the browser-tests launching Chrome for Testing. `--no-capture` shows tracing output.
 test:
-    cargo test --workspace -- --no-capture
+    cargo test --workspace --features browser-test/serde -- --no-capture
 
 # Run the trybuild UI tests on `ui_toolchain`, the toolchain their expected compiler output was generated with.
 test-ui:

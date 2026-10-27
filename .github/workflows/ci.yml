@@ -107,7 +107,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --lib --locked
+      - run: cargo test --workspace --lib --features browser-test/serde --locked
       - run: cargo test --workspace --doc --locked
       - run: cargo test --workspace --test macros --locked
 
