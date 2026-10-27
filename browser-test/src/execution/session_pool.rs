@@ -126,6 +126,40 @@ impl Drop for Waiting<'_> {
     }
 }
 
+/// The claimed reset of a finished test's session (see [`SessionPool::claim_reset`]). Until it is
+/// delivered, the session counts as on its way to the pool. Dropping the claim means that the reset
+/// failed, so the session quits: the pool creates another one if tests need it.
+#[must_use]
+pub(super) struct ResetClaim<'p> {
+    /// `None` once delivered.
+    pool: Option<&'p SessionPool>,
+}
+
+impl ResetClaim<'_> {
+    /// Offer the reset session. The pool keeps it only while it has fewer sessions than it wants
+    /// ([`SessionPool::wanted`]): otherwise it drops the ticket, and the session quits.
+    pub(super) fn deliver(mut self, ticket: Ticket) {
+        let Some(pool) = self.pool.take() else {
+            return;
+        };
+        let mut state = pool.lock();
+        state.resetting -= 1;
+        if state.running + state.supply() < pool.wanted(&state) {
+            state.offer(ticket);
+        }
+    }
+}
+
+impl Drop for ResetClaim<'_> {
+    fn drop(&mut self) {
+        if let Some(pool) = self.pool.take() {
+            let mut state = pool.lock();
+            state.resetting -= 1;
+            pool.replenish_locked(&mut state);
+        }
+    }
+}
+
 /// A number of tests: those taking any session, and those needing a fresh one.
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct Upcoming {
@@ -519,34 +553,16 @@ impl SessionPool {
         self.replenish_locked(&mut state);
     }
 
-    /// Whether the session of a finished test should be reset: while tests (not needing a fresh
-    /// session) are still to run, otherwise it quits. If so, it counts as a session on its way to
-    /// the pool until [`Self::deliver_reset`] or [`Self::reset_failed`]. Claimed before the next
-    /// test starts, so that the pool doesn't create a session for that test in the meantime.
-    pub(super) fn claim_reset(&self) -> bool {
+    /// Claim the reset of a finished test's session, if it should be reset: while tests (not
+    /// needing a fresh session) are still to run, otherwise it quits. Claimed before the next test
+    /// starts, so that the pool doesn't create a session for that test in the meantime.
+    pub(super) fn claim_reset(&self) -> Option<ResetClaim<'_>> {
         let mut state = self.lock();
         let wanted = !state.closed && state.waiting().any + self.starting(&state).any > 0;
-        if wanted {
+        wanted.then(|| {
             state.resetting += 1;
-        }
-        wanted
-    }
-
-    /// Offer a session reset after its test. The pool keeps it only while it has fewer sessions
-    /// than it wants ([`Self::wanted`]): otherwise it drops the ticket, and the session quits.
-    pub(super) fn deliver_reset(&self, ticket: Ticket) {
-        let mut state = self.lock();
-        state.resetting -= 1;
-        if state.running + state.supply() < self.wanted(&state) {
-            state.offer(ticket);
-        }
-    }
-
-    /// A claimed reset failed, so the session quits: create another one if tests need it.
-    pub(super) fn reset_failed(&self) {
-        let mut state = self.lock();
-        state.resetting -= 1;
-        self.replenish_locked(&mut state);
+            ResetClaim { pool: Some(self) }
+        })
     }
 
     /// Create no further sessions and let idle ones quit.
@@ -669,7 +685,8 @@ mod tests {
         let pool = pool(Upcoming { any: 2, fresh: 0 }, &cancellation);
         // The session of a finished test is reset for the next one, which then waits for it
         // instead of a new session. A cancelled run drops the reset.
-        assert_that!(pool.claim_reset()).is_true();
+        let claim = pool.claim_reset();
+        assert_that!(claim.is_some()).is_true();
         let take = pool.take(false, false);
         cancellation.cancel();
 
@@ -686,8 +703,10 @@ mod tests {
         // A failure stopped the run, but two tests that run always are still to start: a
         // finished test's session is reset rather than quit, and a spare is kept ready for them.
         pool.stop();
-        assert_that!(pool.claim_reset()).is_true();
-        pool.reset_failed();
+        let claim = pool.claim_reset();
+        assert_that!(claim.is_some()).is_true();
+        // The reset fails.
+        drop(claim);
         assert_that!(requested(&mut requests)).is_equal_to(1);
     }
 
@@ -695,7 +714,7 @@ mod tests {
     async fn without_tests_that_run_always_a_stop_ends_spares_and_resets() {
         let (pool, mut requests) = pool_with_spare(Upcoming { any: 3, fresh: 0 });
         pool.stop();
-        assert_that!(pool.claim_reset()).is_false();
+        assert_that!(pool.claim_reset().is_none()).is_true();
         pool.replenish();
         assert_that!(requested(&mut requests)).is_equal_to(0);
     }

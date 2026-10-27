@@ -18,7 +18,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{
     ChromeCapabilitiesSetup, Env,
-    session_pool::{Delivery, Ticket, WorkerRequest},
+    session_pool::{Delivery, ResetClaim, Ticket, WorkerRequest},
     test_run::{JobRun, run_job},
 };
 use crate::{
@@ -272,17 +272,20 @@ where
 
     let mut preparation = SessionPreparation::Created(creation);
     let mut tests_run = 0;
+    // The claimed reset of the session after its last test.
+    let mut reset: Option<ResetClaim<'_>> = None;
     loop {
         let (job_tx, job_rx) = oneshot::channel();
         let ticket = Ticket {
             job: job_tx,
             preparation,
         };
-        match end.delivery.take() {
-            Some(delivery) => env.pool.deliver(delivery, Ok(ticket)),
+        if let Some(delivery) = end.delivery.take() {
+            env.pool.deliver(delivery, Ok(ticket));
+        } else if let Some(reset) = reset.take() {
             // Dropped if the pool has enough sessions: the job channel closes, and the session
             // quits below.
-            None => env.pool.deliver_reset(ticket),
+            reset.deliver(ticket);
         }
         // An error means no test needs this session anymore.
         let Ok(job) = job_rx.await else {
@@ -295,16 +298,21 @@ where
             env.pool.test_finished();
         }
         // A timed out test may have left commands running in its session.
-        let reuse = reusable
+        let claim = if reusable
             && !run.timed_out()
-            && baseline.is_some()
             && config.session_reuse.allows_another_test(tests_run)
-            && env.pool.claim_reset();
+        {
+            baseline
+                .as_mut()
+                .and_then(|baseline| Some((baseline, env.pool.claim_reset()?)))
+        } else {
+            None
+        };
         // Let the next test start while this session quits or is reset.
         let _ = job.body_done.send(());
         let test = env.test(run.index);
         let subject = format!("browser test '{}'", test.name);
-        let Some(baseline) = baseline.as_mut().filter(|_| reuse) else {
+        let Some((baseline, claim)) = claim else {
             env.board
                 .enter(Activity::Test(run.index), subject, Phase::QuittingSession);
             run.quit_start = Some(Instant::now());
@@ -327,10 +335,12 @@ where
             reset_duration,
         );
         if !was_reset {
-            env.pool.reset_failed();
+            // Dropping the claim lets the pool create another session if tests need it.
+            drop(claim);
             end.released = Some(Instant::now());
             return Ok(());
         }
+        reset = Some(claim);
         preparation = SessionPreparation::Reset(reset_duration);
     }
 }
