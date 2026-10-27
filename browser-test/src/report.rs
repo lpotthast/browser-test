@@ -12,7 +12,7 @@ use std::{
 /// implementation renders a human-readable summary, as printed by [`crate::StderrSummary`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct BrowserTestRunReport {
+pub struct RunReport {
     /// Wall time of the whole run, from the start of [`crate::BrowserTestRunner::run`] until it
     /// returned. Includes the manual pause, if one was enabled.
     pub total: Duration,
@@ -26,7 +26,7 @@ pub struct BrowserTestRunReport {
     /// Every test that was started (or failed before it could start), in the order the tests were
     /// given to the runner. Tests not started because of [`crate::FailurePolicy::FailFast`] or a
     /// cancellation are missing, and counted in [`Self::not_started`].
-    pub tests: Vec<BrowserTestRecord>,
+    pub tests: Vec<TestRecord>,
 
     /// How many of the tests given to the runner did not start, because an earlier one failed
     /// ([`crate::FailurePolicy::FailFast`]) or the run was cancelled.
@@ -38,7 +38,7 @@ pub struct BrowserTestRunReport {
 
     /// Time spent quitting sessions without a test: spares no test took, and, with
     /// [`crate::SessionReuse`], sessions the pool released after resetting them, or whose reset
-    /// failed. The other quits are the [`BrowserTestRecord::teardown`] of a session's last test.
+    /// failed. The other quits are the [`TestRecord::teardown`] of a session's last test.
     pub released_session_teardown: Duration,
 }
 
@@ -56,7 +56,7 @@ pub struct SuiteRecord {
 /// Timing and outcome of one browser test.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct BrowserTestRecord {
+pub struct TestRecord {
     /// Position of the test in the collection given to the runner.
     pub index: usize,
 
@@ -94,7 +94,7 @@ pub struct BrowserTestRecord {
     pub steps: BTreeMap<String, StepStats>,
 }
 
-impl BrowserTestRecord {
+impl TestRecord {
     /// Time this test ran for: waiting for its session, then running its body.
     ///
     /// Session creation (ahead of the test) and teardown (after it) run in the background and
@@ -188,7 +188,7 @@ impl SessionPreparation {
 #[non_exhaustive]
 pub struct StepStats {
     /// How many steps of this kind ran.
-    pub count: u32,
+    pub count: usize,
 
     /// Their summed duration. Nested steps count towards every enclosing kind as well.
     pub total: Duration,
@@ -214,7 +214,7 @@ impl StepStats {
 /// How many entries the summary's lists show.
 const SUMMARY_LIST_LEN: usize = 10;
 
-impl BrowserTestRunReport {
+impl RunReport {
     /// Number of tests that passed.
     #[must_use]
     pub fn passed(&self) -> usize {
@@ -312,9 +312,9 @@ impl BrowserTestRunReport {
         self.tests.iter().filter_map(|test| test.body).sum()
     }
 
-    /// The tests sorted by [`BrowserTestRecord::total`], slowest first.
+    /// The tests sorted by [`TestRecord::total`], slowest first.
     #[must_use]
-    pub fn slowest_tests(&self) -> Vec<&BrowserTestRecord> {
+    pub fn slowest_tests(&self) -> Vec<&TestRecord> {
         let mut tests: Vec<_> = self.tests.iter().collect();
         tests.sort_by_key(|test| std::cmp::Reverse(test.total()));
         tests
@@ -335,7 +335,7 @@ impl BrowserTestRunReport {
     }
 }
 
-impl Display for BrowserTestRunReport {
+impl Display for RunReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -415,7 +415,7 @@ impl Display for BrowserTestRunReport {
                     "    {:>9}  {kind}: {}x{}, max {}",
                     FormatDuration(stats.total),
                     stats.count,
-                    Average(stats.total, stats.count as usize),
+                    Average(stats.total, stats.count),
                     FormatDuration(stats.max),
                 )?;
             }
@@ -425,7 +425,7 @@ impl Display for BrowserTestRunReport {
 }
 
 /// One test of the summary: name, outcome, and how its time splits up.
-struct Describe<'a>(&'a BrowserTestRecord);
+struct Describe<'a>(&'a TestRecord);
 
 impl Display for Describe<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -446,7 +446,7 @@ impl Display for Describe<'_> {
 
 /// How a test's time splits up, e.g. `session 812ms, waited 120ms, body 3.20s, quit 40ms`, or
 /// `reset 60ms, body 1.10s` in a reused session.
-pub(crate) fn timing_breakdown(test: &BrowserTestRecord) -> String {
+pub(crate) fn timing_breakdown(test: &TestRecord) -> String {
     let mut out = String::new();
     match test.session {
         Some(session) => {
@@ -514,8 +514,8 @@ mod tests {
 
     use super::*;
 
-    fn record(index: usize, name: &str, session: SessionTiming, body_ms: u64) -> BrowserTestRecord {
-        BrowserTestRecord {
+    fn record(index: usize, name: &str, session: SessionTiming, body_ms: u64) -> TestRecord {
+        TestRecord {
             index,
             name: name.to_owned(),
             outcome: TestOutcome::Passed,
@@ -567,14 +567,14 @@ mod tests {
         let mut broken = record(3, "broken", session(0, 0), 0);
         broken.session = None;
         broken.body = None;
-        let report = BrowserTestRunReport {
+        let report = RunReport {
             tests: vec![
                 record(0, "fast", session(800, 700), 100),
                 slow,
                 record(2, "waiting", session(700, 600), 300),
                 broken,
             ],
-            ..BrowserTestRunReport::default()
+            ..RunReport::default()
         };
 
         assert_that!(report.sessions_created()).is_equal_to(3);
@@ -594,14 +594,14 @@ mod tests {
     fn report_tells_created_from_reset_sessions() {
         let mut quit = record(2, "quit", reset(40, 0), 200);
         quit.teardown = Some(Duration::from_millis(30));
-        let report = BrowserTestRunReport {
+        let report = RunReport {
             total: Duration::from_secs(1),
             tests: vec![
                 record(0, "first", session(800, 0), 100),
                 record(1, "second", reset(60, 10), 300),
                 quit,
             ],
-            ..BrowserTestRunReport::default()
+            ..RunReport::default()
         };
 
         assert_that!(report.sessions_created()).is_equal_to(1);
@@ -643,9 +643,9 @@ mod tests {
                 max: Duration::from_millis(100),
             },
         );
-        let report = BrowserTestRunReport {
+        let report = RunReport {
             tests: vec![first, second],
-            ..BrowserTestRunReport::default()
+            ..RunReport::default()
         };
 
         let steps = report.slowest_steps();
@@ -664,16 +664,16 @@ mod tests {
     fn cancelled_tests_count_apart_from_failed_ones() {
         let mut cancelled = record(1, "running", session(400, 15), 2500);
         cancelled.outcome = TestOutcome::Cancelled;
-        let report = BrowserTestRunReport {
+        let report = RunReport {
             tests: vec![record(0, "works", session(800, 0), 1000), cancelled],
-            ..BrowserTestRunReport::default()
+            ..RunReport::default()
         };
 
         assert_that!((report.passed(), report.failed(), report.cancelled())).is_equal_to((1, 0, 1));
         let summary = report.to_string();
         assert_that!(summary.as_str()).contains("2 test(s), 1 passed, 0 failed, 1 cancelled, in");
 
-        let report = BrowserTestRunReport {
+        let report = RunReport {
             not_started: 3,
             ..report
         };
@@ -687,7 +687,7 @@ mod tests {
         let mut failed = record(1, "broken", session(400, 15), 2500);
         failed.outcome = TestOutcome::Failed;
         failed.teardown = Some(Duration::from_millis(40));
-        let report = BrowserTestRunReport {
+        let report = RunReport {
             total: Duration::from_secs(5),
             webdriver_startup: Duration::from_millis(300),
             webdriver_shutdown: Duration::from_millis(50),

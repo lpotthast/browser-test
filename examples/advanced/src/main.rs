@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use browser_test::thirtyfour::ChromiumLikeCapabilities;
 use browser_test::{
-    BrowserTestRunReport, BrowserTestRunner, CachedData, Cancellation, Channel, ChromeBinary,
-    DriverOutput, ElementQueryWait, FailurePolicy, Parallelism, Pause, ProgressWarnings,
-    SessionReset, SessionReuse, StderrSummary, TestFilter, TestSuite, Timeouts, Visibility,
+    BrowserTestRunner, CachedData, Cancellation, Channel, ChromeBinary, DriverOutput,
+    ElementQueryWait, FailurePolicy, Parallelism, Pause, ProgressWarnings, RunReport, SessionReset,
+    SessionReuse, StderrSummary, TestFilter, TestSuite, Timeouts, Visibility,
 };
 use rootcause::Report;
 use rootcause::hooks::Hooks;
@@ -132,7 +132,7 @@ async fn main() -> Result<(), Report> {
                 .with_slow_step(Some(Duration::from_secs(3))),
         )
         .with_report_consumer(StderrSummary)
-        .with_report_consumer(|report: &BrowserTestRunReport| {
+        .with_report_consumer(|report: &RunReport| {
             tracing::info!(
                 sessions_created = report.sessions_created(),
                 session_resets = report.session_resets(),

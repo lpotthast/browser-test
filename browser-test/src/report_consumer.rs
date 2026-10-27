@@ -1,39 +1,39 @@
 //! Consumers of the report of a browser test run.
 
-use crate::BrowserTestRunReport;
+use crate::RunReport;
 
-/// Receives the [`BrowserTestRunReport`] at the end of a run.
+/// Receives the [`RunReport`] at the end of a run.
 ///
 /// Register consumers with [`crate::BrowserTestRunner::with_report_consumer`]. The runner calls
 /// every registered consumer, in registration order, after each run that started tests. Consumers
 /// are the only way to get the report: without one, the runner neither prints nor keeps it.
 ///
 /// Ready-made consumers print the run summary (the report's `Display` output): [`StderrSummary`],
-/// [`StdoutSummary`], and [`TracingSummary`]. Closures taking a `&BrowserTestRunReport` are
+/// [`StdoutSummary`], and [`TracingSummary`]. Closures taking a `&RunReport` are
 /// consumers as well.
 ///
 /// # Examples
 ///
 /// ```rust
 /// use assertr::prelude::*;
-/// use browser_test::{BrowserTestRunReport, BrowserTestRunner, Cancellation, StderrSummary};
+/// use browser_test::{RunReport, BrowserTestRunner, Cancellation, StderrSummary};
 ///
 /// let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals())
 ///     .with_report_consumer(StderrSummary)
-///     .with_report_consumer(|report: &BrowserTestRunReport| {
+///     .with_report_consumer(|report: &RunReport| {
 ///         assert_that!(report.body_time()).is_less_than(std::time::Duration::from_secs(600));
 ///     });
 /// ```
 pub trait RunReportConsumer: Send + Sync {
     /// Consume the report of a finished run.
-    fn consume(&self, report: &BrowserTestRunReport);
+    fn consume(&self, report: &RunReport);
 }
 
 impl<F> RunReportConsumer for F
 where
-    F: Fn(&BrowserTestRunReport) + Send + Sync,
+    F: Fn(&RunReport) + Send + Sync,
 {
-    fn consume(&self, report: &BrowserTestRunReport) {
+    fn consume(&self, report: &RunReport) {
         self(report);
     }
 }
@@ -46,7 +46,7 @@ where
 pub struct StderrSummary;
 
 impl RunReportConsumer for StderrSummary {
-    fn consume(&self, report: &BrowserTestRunReport) {
+    fn consume(&self, report: &RunReport) {
         eprintln!("{report}");
     }
 }
@@ -59,7 +59,7 @@ impl RunReportConsumer for StderrSummary {
 pub struct StdoutSummary;
 
 impl RunReportConsumer for StdoutSummary {
-    fn consume(&self, report: &BrowserTestRunReport) {
+    fn consume(&self, report: &RunReport) {
         println!("{report}");
     }
 }
@@ -69,7 +69,7 @@ impl RunReportConsumer for StdoutSummary {
 pub struct TracingSummary;
 
 impl RunReportConsumer for TracingSummary {
-    fn consume(&self, report: &BrowserTestRunReport) {
+    fn consume(&self, report: &RunReport) {
         tracing::info!("{report}");
     }
 }

@@ -13,8 +13,8 @@ use std::{
 
 use assertr::prelude::*;
 use browser_test::{
-    BrowserTest, BrowserTestError, BrowserTestRunReport, BrowserTestRunner, Cancellation,
-    CancellationToken, FailurePolicy, Parallelism, StepExt, TestFilter, TestOutcome, TestSettings,
+    BrowserTest, BrowserTestError, BrowserTestRunner, Cancellation, CancellationToken,
+    FailurePolicy, Parallelism, RunReport, StepExt, TestFilter, TestOutcome, TestSettings,
     TestSuite, async_trait, browser_test,
     thirtyfour::{By, ChromiumLikeCapabilities, WebDriver, prelude::ElementQueryable},
 };
@@ -852,7 +852,7 @@ type Outcomes = Arc<std::sync::Mutex<Vec<(String, TestOutcome)>>>;
 fn record_outcomes(runner: BrowserTestRunner) -> (BrowserTestRunner, Outcomes) {
     let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
     let reported = Arc::clone(&outcomes);
-    let runner = runner.with_report_consumer(move |report: &BrowserTestRunReport| {
+    let runner = runner.with_report_consumer(move |report: &RunReport| {
         *reported.lock().unwrap() = report
             .tests
             .iter()

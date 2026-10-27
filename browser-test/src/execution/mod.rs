@@ -46,8 +46,8 @@ use crate::{
     profile::RunProfiles,
     progress::{Activity, ProgressBoard},
     report::{
-        BrowserTestRecord, FormatDuration, SessionPreparation, SessionTiming, SuiteRecord,
-        TestOutcome, timing_breakdown,
+        FormatDuration, SessionPreparation, SessionTiming, SuiteRecord, TestOutcome, TestRecord,
+        timing_breakdown,
     },
     scheduler::BrowserTestFailures,
     test_settings::TestDefaults,
@@ -77,7 +77,7 @@ pub(crate) struct ExecutionConfig<'a> {
 /// What executing a test tree produced.
 pub(crate) struct Execution {
     /// A record per started test, in test order.
-    pub(crate) records: Vec<BrowserTestRecord>,
+    pub(crate) records: Vec<TestRecord>,
     /// The timing of every named suite, in definition order.
     pub(crate) suites: Vec<SuiteRecord>,
     /// Time spent quitting sessions without a test.
@@ -202,7 +202,7 @@ where
     tests: Vec<QueuedTest<Context>>,
     keep_starting: AtomicBool,
     failures: Mutex<BrowserTestFailures>,
-    records: Mutex<Vec<BrowserTestRecord>>,
+    records: Mutex<Vec<TestRecord>>,
     suites: Mutex<Vec<(usize, SuiteRecord)>>,
     /// Time spent quitting sessions without a test.
     released_session_teardown: Mutex<Duration>,
@@ -243,7 +243,7 @@ where
     }
 
     /// Record a finished test.
-    fn finish(&self, record: BrowserTestRecord, result: Result<(), Report<BrowserTestError>>) {
+    fn finish(&self, record: TestRecord, result: Result<(), Report<BrowserTestError>>) {
         let total = FormatDuration(record.total());
         let breakdown = timing_breakdown(&record);
         match record.outcome {

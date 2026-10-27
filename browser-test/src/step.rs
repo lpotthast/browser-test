@@ -89,7 +89,7 @@ pub trait StepExt: Future + Sized {
     /// logged at `debug` level with its duration. A step taking longer than the runner's slow
     /// step threshold (see [`crate::ProgressWarnings`], 2 seconds by default) is logged at `warn`
     /// level. Inside a test run by [`crate::BrowserTestRunner`], the step's duration is also added
-    /// to the test's [`crate::BrowserTestRecord::steps`] under `kind`, and the run summary lists
+    /// to the test's [`crate::TestRecord::steps`] under `kind`, and the run summary lists
     /// the step kinds that took the most time.
     ///
     /// A step that doesn't finish, because it is dropped (e.g. by a timeout around it) or a panic

@@ -23,7 +23,7 @@ use crate::{
     execution::{ChromeCapabilitiesSetup, Execution, ExecutionConfig, execute_tests},
     pause::{self, PauseDecision},
     profile::{ChromeProfilesDir, RunProfiles},
-    report::BrowserTestRunReport,
+    report::RunReport,
     report_consumer::RunReportConsumer,
     test_settings::TestDefaults,
 };
@@ -445,7 +445,7 @@ impl BrowserTestRunner {
         crate::failure_report::install(self.failure_report_hooks);
         let cancellation = self.cancellation.run_token()?;
         let start = Instant::now();
-        let mut report = BrowserTestRunReport::default();
+        let mut report = RunReport::default();
         let result = self
             .run_reporting(context, tests, &cancellation, &mut report)
             .await;
@@ -468,7 +468,7 @@ impl BrowserTestRunner {
         context: &Context,
         tests: TestSuite<Context>,
         cancellation: &CancellationToken,
-        report: &mut BrowserTestRunReport,
+        report: &mut RunReport,
     ) -> Result<(), Report<BrowserTestError>>
     where
         Context: Sync + ?Sized,
@@ -727,7 +727,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&calls);
         let runner = BrowserTestRunner::new(Cancellation::disabled()).with_report_consumer(
-            move |_report: &BrowserTestRunReport| {
+            move |_report: &RunReport| {
                 counter.fetch_add(1, Ordering::SeqCst);
             },
         );

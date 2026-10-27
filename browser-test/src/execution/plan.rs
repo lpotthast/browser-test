@@ -4,8 +4,8 @@
 use std::{borrow::Cow, collections::BTreeMap, panic::AssertUnwindSafe, time::Duration};
 
 use crate::{
-    BrowserTest, BrowserTestRecord, ElementQueryWait, Parallelism, SessionTiming, TestOutcome,
-    TestSuite, Timeouts, failure_report::panic_payload_message, test_case::SuiteEntry,
+    BrowserTest, ElementQueryWait, Parallelism, SessionTiming, TestOutcome, TestRecord, TestSuite,
+    Timeouts, failure_report::panic_payload_message, test_case::SuiteEntry,
     test_settings::TestDefaults,
 };
 
@@ -52,8 +52,8 @@ where
         outcome: TestOutcome,
         session: Option<SessionTiming>,
         body: Option<Duration>,
-    ) -> BrowserTestRecord {
-        BrowserTestRecord {
+    ) -> TestRecord {
+        TestRecord {
             index: self.index,
             name: self.name.clone(),
             outcome,

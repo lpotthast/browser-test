@@ -39,8 +39,7 @@ pub use filter::{InvalidPattern, TestFilter};
 pub use pause::Pause;
 pub use progress::ProgressWarnings;
 pub use report::{
-    BrowserTestRecord, BrowserTestRunReport, SessionPreparation, SessionTiming, StepStats,
-    SuiteRecord, TestOutcome,
+    RunReport, SessionPreparation, SessionTiming, StepStats, SuiteRecord, TestOutcome, TestRecord,
 };
 pub use report_consumer::{RunReportConsumer, StderrSummary, StdoutSummary, TracingSummary};
 pub use runner::{BrowserTestRunner, Visibility};

@@ -19,7 +19,7 @@ use crate::{
     },
     frozen_pages::{PageCheck, close_frozen_pages},
     progress::{Activity, Phase},
-    report::{BrowserTestRecord, SessionPreparation, SessionTiming, StepStats, TestOutcome},
+    report::{SessionPreparation, SessionTiming, StepStats, TestOutcome, TestRecord},
     step::StepRecorder,
 };
 
@@ -79,7 +79,7 @@ where
             preparation: run.preparation,
             wait: run.wait,
         };
-        let record = BrowserTestRecord {
+        let record = TestRecord {
             teardown,
             steps: run.steps,
             ..test.record(outcome, Some(session), run.body)

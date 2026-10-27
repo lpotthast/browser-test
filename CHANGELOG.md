@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Tags, which select tests independently of their names and of the suites they run in. Set them with
   `#[browser_test(tags = ["button", "keyboard"])]` or `BrowserTest::tags`, and select tests by them with
-  `TestFilter::with_tag` or `BROWSER_TEST_TAG`. `BrowserTestRecord::tags` lists a test's tags.
+  `TestFilter::with_tag` or `BROWSER_TEST_TAG`. `TestRecord::tags` lists a test's tags.
 - `BrowserTestRunner::with_filter`, the preferred way to select tests, e.g. `.with_filter(TestFilter::from_env()?)`.
   Tests in `TestSuite::unfiltered` suites always run, e.g. checks of the whole run. A run whose filter selects none of
   the other tests fails with `BrowserTestError::NoTestSelected`, so that a mistyped filter can't pass unnoticed.
@@ -26,15 +26,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that needs state of its own, into a type implementing `BrowserTest`. Rename a hand-written test by returning the
   name from `BrowserTest::name`.
 - **Breaking:** `BrowserTests` became `TestSuite`, so that it no longer reads like the `BrowserTest` trait, and
-  `GroupRecord` became `SuiteRecord`. `BrowserTestRunReport::groups` became `suites`, and the run summary lists them
-  under `suites:`. `BrowserTests::filter_tests` was removed: select tests with a `TestFilter` instead.
+  `GroupRecord` became `SuiteRecord`. `BrowserTestRunReport::groups` became `RunReport::suites`, and the run summary
+  lists them under `suites:`. `BrowserTests::filter_tests` was removed: select tests with a `TestFilter` instead.
 - **Breaking:** Tags replace logical groups. `TestGroup`, `BrowserTests::with_test_group`,
   `BrowserTests::filter_groups`, `TestFilter::with_group`, `TestFilter::with_groups_from_env_var` and
-  `BROWSER_TEST_GROUP` were removed, and `BrowserTestRecord::group` became `tags`. Tag the tests of a group instead,
-  e.g. with `#[browser_test(tags = ["button"])]`, and add them to the suite with `TestSuite::with`. Replace
+  `BROWSER_TEST_GROUP` were removed, and `BrowserTestRecord::group` became `TestRecord::tags`. Tag the tests of a group
+  instead, e.g. with `#[browser_test(tags = ["button"])]`, and add them to the suite with `TestSuite::with`. Replace
   `with_group` with `with_tag`, `with_groups_from_env_var` with `with_tag_pattern_from_env_var`, `BROWSER_TEST_GROUP`
   with `BROWSER_TEST_TAG`, and `filter_groups` with a `TestFilter` selecting tags. `#[browser_test]` rejects empty and
   duplicate tags. A test wrapping another one should forward `BrowserTest::tags` as well.
+- **Breaking:** `BrowserTestRunReport` became `RunReport` and `BrowserTestRecord` became `TestRecord`, in line with
+  `SuiteRecord`, `TestOutcome` and `RunReportConsumer`. `StepStats::count` is a `usize`, like every other count of the
+  report.
 - **Breaking:** `TestFilter::from_env` reads the name pattern from `BROWSER_TEST_NAME` instead of `BROWSER_TEST_FILTER`.
 - **Breaking:** `TestFilter` patterns are regular expressions, which match anywhere in the name or tag unless anchored:
   `smoke` also selects the tag `smoke-slow`, `^smoke$` only `smoke`. `BROWSER_TEST_NAME` and `BROWSER_TEST_TAG` hold one

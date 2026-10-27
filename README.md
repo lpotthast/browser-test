@@ -327,7 +327,7 @@ and uses less memory in every test.
 
 ## Timing
 
-At the end of each run, the runner passes a [`BrowserTestRunReport`] to the consumers you add with
+At the end of each run, the runner passes a [`RunReport`] to the consumers you add with
 `BrowserTestRunner::with_report_consumer`. `StderrSummary` prints a summary like this:
 
 ```text
@@ -444,7 +444,7 @@ at your option.
 [with_spare_sessions]: https://docs.rs/browser-test/latest/browser_test/struct.BrowserTestRunner.html#method.with_spare_sessions
 [`SessionReuse`]: https://docs.rs/browser-test/latest/browser_test/struct.SessionReuse.html
 [`SessionReset`]: https://docs.rs/browser-test/latest/browser_test/enum.SessionReset.html
-[`BrowserTestRunReport`]: https://docs.rs/browser-test/latest/browser_test/struct.BrowserTestRunReport.html
+[`RunReport`]: https://docs.rs/browser-test/latest/browser_test/struct.RunReport.html
 [StepExt]: https://docs.rs/browser-test/latest/browser_test/trait.StepExt.html#method.step
 [`ProgressWarnings`]: https://docs.rs/browser-test/latest/browser_test/struct.ProgressWarnings.html
 [`failure_report`]: https://docs.rs/browser-test/latest/browser_test/failure_report/index.html

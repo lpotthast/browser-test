@@ -12,9 +12,9 @@ use std::{
 
 use assertr::prelude::*;
 use browser_test::{
-    BrowserTest, BrowserTestError, BrowserTestRunReport, BrowserTestRunner, CachedData,
-    Cancellation, ElementQueryWait, FailurePolicy, Parallelism, SessionPreparation, SessionReset,
-    SessionReuse, StepExt, TestOutcome, TestSettings, TestSuite, TracingSummary, async_trait,
+    BrowserTest, BrowserTestError, BrowserTestRunner, CachedData, Cancellation, ElementQueryWait,
+    FailurePolicy, Parallelism, RunReport, SessionPreparation, SessionReset, SessionReuse, StepExt,
+    TestOutcome, TestSettings, TestSuite, TracingSummary, async_trait,
     thirtyfour::{ChromiumLikeCapabilities, WebDriver},
 };
 use rootcause::{Report, report};
@@ -195,7 +195,7 @@ fn visits_in(
 /// The result and report of one run.
 struct Run {
     result: Result<(), Report<BrowserTestError>>,
-    report: BrowserTestRunReport,
+    report: RunReport,
 }
 
 /// Run `tests`, capturing the run's report through a report consumer.
@@ -203,7 +203,7 @@ async fn run(runner: BrowserTestRunner, base_url: &str, tests: TestSuite<str>) -
     let captured = Arc::new(Mutex::new(None));
     let consumer_capture = Arc::clone(&captured);
     let result = runner
-        .with_report_consumer(move |report: &BrowserTestRunReport| {
+        .with_report_consumer(move |report: &RunReport| {
             *consumer_capture.lock().unwrap() = Some(report.clone());
         })
         .run(base_url, tests)
@@ -238,7 +238,7 @@ async fn later_tests_find_their_session_ready() {
     let consumed = Arc::new(Mutex::new(Vec::new()));
     let consumer = |name: &'static str| {
         let consumed = Arc::clone(&consumed);
-        move |report: &BrowserTestRunReport| {
+        move |report: &RunReport| {
             consumed.lock().unwrap().push((name, report.tests.len()));
         }
     };
