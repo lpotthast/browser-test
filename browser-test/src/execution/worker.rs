@@ -110,36 +110,43 @@ where
         last_run: None,
         released: None,
     };
-    let session_result = config
-        .chrome
-        .session()
-        .with_caps(|caps: &mut ChromeCapabilities| {
-            configure_chrome_capabilities(caps, config.visible, config.chrome_capabilities_setups)?;
-            if config.session_reuse.is_enabled() {
-                configure_reusable_session(caps, config.session_reuse)?;
-            }
-            profile.configure(caps)
-        })
-        .with_cancellation(config.cancellation.clone())
-        .with_config(|builder| match request.element_query_wait {
-            Some(wait) => builder.poller(Arc::new(wait.into_thirtyfour_poller())),
-            None => builder,
-        })
-        .run(async |session: &Session| {
-            serve_tests(
-                env,
-                session,
-                SessionStart {
-                    activity,
-                    creation_start,
-                    pooled,
-                    reusable,
-                },
-                &mut end,
-            )
-            .await
-        })
-        .await;
+    // Boxed, as a session's future takes about 17 KB.
+    let session_result = Box::pin(
+        config
+            .chrome
+            .session()
+            .with_caps(|caps: &mut ChromeCapabilities| {
+                configure_chrome_capabilities(
+                    caps,
+                    config.visible,
+                    config.chrome_capabilities_setups,
+                )?;
+                if config.session_reuse.is_enabled() {
+                    configure_reusable_session(caps, config.session_reuse)?;
+                }
+                profile.configure(caps)
+            })
+            .with_cancellation(config.cancellation.clone())
+            .with_config(|builder| match request.element_query_wait {
+                Some(wait) => builder.poller(Arc::new(wait.into_thirtyfour_poller())),
+                None => builder,
+            })
+            .run(async |session: &Session| {
+                serve_tests(
+                    env,
+                    session,
+                    SessionStart {
+                        activity,
+                        creation_start,
+                        pooled,
+                        reusable,
+                    },
+                    &mut end,
+                )
+                .await
+            }),
+    )
+    .await;
     if let Some(quit_start) = end.released {
         let teardown = quit_start.elapsed();
         env.warn_if_slow_session("Quitting a browser session", teardown);

@@ -2,7 +2,9 @@
 
 use std::{
     collections::BTreeMap,
+    future::Future,
     panic::AssertUnwindSafe,
+    pin::Pin,
     time::{Duration, Instant},
 };
 
@@ -60,8 +62,13 @@ enum Failure {
         message: String,
         details: Option<PanicDetails>,
     },
-    /// It ran longer than its time limit. `pages` is what the check of its pages found.
-    TimedOut { limit: Duration, pages: PageCheck },
+    /// It ran longer than its time limit. `pages` is what the check of its pages found, and
+    /// `drop_panic` the message and details of a panic while it was stopped, if it panicked.
+    TimedOut {
+        limit: Duration,
+        pages: PageCheck,
+        drop_panic: Option<(String, Option<PanicDetails>)>,
+    },
 }
 
 impl<Context> Env<'_, Context>
@@ -197,29 +204,53 @@ fn failure_report(name: &str, failure: Failure) -> (TestOutcome, Report<BrowserT
             TestOutcome::Failed,
             without_own_location(error.context(BrowserTestError::RunTest { test_name })),
         ),
-        Failure::Panic { message, details } => {
-            let mut report =
-                without_own_location(Report::new(BrowserTestError::Panic { test_name, message }));
-            if let Some(PanicDetails { location, frames }) = details {
-                if let Some(location) = location {
-                    report =
-                        report.attach_custom::<rootcause::handlers::Display, _>(PanicLocation {
-                            location,
-                            frames: frames.clone(),
-                        });
-                }
-                if let Some(frames) = frames {
-                    report = report.attach_custom::<TestCodeFramesHandler, _>(frames);
-                }
-            }
-            (TestOutcome::Panicked, report)
-        }
-        Failure::TimedOut { limit, pages } => (
-            TestOutcome::TimedOut,
-            without_own_location(Report::new(BrowserTestError::TimedOut { test_name, limit }))
-                .attach_custom::<rootcause::handlers::Display, _>(pages),
+        Failure::Panic { message, details } => (
+            TestOutcome::Panicked,
+            panic_report(test_name, message, details),
         ),
+        Failure::TimedOut {
+            limit,
+            pages,
+            drop_panic,
+        } => {
+            let mut report = without_own_location(Report::new(BrowserTestError::TimedOut {
+                test_name: test_name.clone(),
+                limit,
+            }))
+            .attach_custom::<rootcause::handlers::Display, _>(pages);
+            // A panic while the test was stopped is a failure of its own.
+            if let Some((message, details)) = drop_panic {
+                report.children_mut().push(
+                    panic_report(test_name, message, details)
+                        .into_dynamic()
+                        .into_cloneable(),
+                );
+            }
+            (TestOutcome::TimedOut, report)
+        }
     }
+}
+
+/// The report of the test `test_name` that panicked with `message`, where `details` say.
+fn panic_report(
+    test_name: String,
+    message: String,
+    details: Option<PanicDetails>,
+) -> Report<BrowserTestError> {
+    let mut report =
+        without_own_location(Report::new(BrowserTestError::Panic { test_name, message }));
+    if let Some(PanicDetails { location, frames }) = details {
+        if let Some(location) = location {
+            report = report.attach_custom::<rootcause::handlers::Display, _>(PanicLocation {
+                location,
+                frames: frames.clone(),
+            });
+        }
+        if let Some(frames) = frames {
+            report = report.attach_custom::<TestCodeFramesHandler, _>(frames);
+        }
+    }
+    report
 }
 
 /// Run the body of `test`, recording its duration, steps and failure into `run`. A body exceeding
@@ -251,10 +282,17 @@ async fn run_body<Context>(
     // hand-written implementation) is caught as well.
     let prepared = test.ready();
     let body = async { prepared.test.run(session, env.context).await };
-    let body = recorder
-        .scope(AssertUnwindSafe(body).catch_unwind())
-        .instrument(span);
-    let result = tokio::time::timeout(prepared.time_limit, body).await;
+    let mut body = Body::new(
+        recorder
+            .scope(AssertUnwindSafe(body).catch_unwind())
+            .instrument(span),
+    );
+    // The timeout only drops `run`, which borrows the body: `close` drops the body itself.
+    let result = tokio::time::timeout(prepared.time_limit, body.run())
+        .await
+        .map_err(|_elapsed| ());
+    // Before its steps are taken, as steps it drops unfinished record themselves.
+    let drop_panic = body.close().err();
     run.body = Some(start.elapsed());
     run.steps = recorder.take();
     run.recent_steps = recorder.recent_steps();
@@ -273,11 +311,17 @@ async fn run_body<Context>(
                 details: recorder.take_panic(),
             })
         }
-        Err(_elapsed) => {
+        Err(()) => {
             tracing::error!("Browser test '{name}' exceeded its time limit, checking its pages.");
+            let drop_panic = drop_panic.map(|payload| {
+                let message = panic_payload_message(payload.as_ref());
+                tracing::error!("Browser test '{name}' panicked while it was stopped: {message}");
+                (message, recorder.take_panic())
+            });
             Some(Failure::TimedOut {
                 limit: prepared.time_limit,
                 pages: close_frozen_pages(session).await,
+                drop_panic,
             })
         }
     };
@@ -285,5 +329,49 @@ async fn run_body<Context>(
         && let Some(capture) = env.config.driver_output
     {
         capture.catch_up().await;
+    }
+}
+
+/// A test body that catches panics while it is dropped as well, which `catch_unwind` only does
+/// while it is polled. Dropping a body that didn't finish (it timed out, or the run was cancelled)
+/// drops what it holds, whose `Drop` implementations may panic.
+struct Body<F> {
+    future: Option<Pin<Box<F>>>,
+}
+
+impl<F: Future> Body<F> {
+    fn new(future: F) -> Self {
+        Self {
+            future: Some(Box::pin(future)),
+        }
+    }
+
+    /// Run the body until it finishes.
+    async fn run(&mut self) -> F::Output {
+        match &mut self.future {
+            Some(future) => future.as_mut().await,
+            None => unreachable!("a body is only closed after it ran"),
+        }
+    }
+}
+
+impl<F> Body<F> {
+    /// Drop the body. `Err` holds the payload of a panic while dropping it.
+    fn close(mut self) -> std::thread::Result<()> {
+        let future = self.future.take();
+        std::panic::catch_unwind(AssertUnwindSafe(|| drop(future)))
+    }
+}
+
+impl<F> Drop for Body<F> {
+    /// Drop a body that wasn't closed: its run was cancelled, so a panic can only be logged.
+    fn drop(&mut self) {
+        let future = self.future.take();
+        if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| drop(future))) {
+            tracing::error!(
+                "A cancelled browser test panicked while it was stopped: {}",
+                panic_payload_message(payload.as_ref())
+            );
+        }
     }
 }

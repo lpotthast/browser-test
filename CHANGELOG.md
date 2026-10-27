@@ -136,6 +136,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `run.lock` in its directory, which older versions of browser-test look for when they clean up after killed runs.
 - `WebDriver` errors that thirtyfour raises without an HTTP status, e.g. for a window it can't find by name, no longer
   print `State:` within their message.
+- A test that panics while it is stopped at its time limit, e.g. in a `Drop` implementation, no longer brings down the
+  whole run. The test times out, and its report holds the panic as a child.
 
 ## [0.7.0] - 2026-10-13
 

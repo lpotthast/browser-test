@@ -1019,6 +1019,61 @@ async fn a_test_waiting_forever_times_out() {
         .is_equal_to(vec![("run forever".to_owned(), TestOutcome::TimedOut)]);
 }
 
+/// Panics when dropped.
+struct PanicOnDrop;
+
+impl Drop for PanicOnDrop {
+    fn drop(&mut self) {
+        panic!("dropped mid-test");
+    }
+}
+
+/// Runs forever, holding a [`PanicOnDrop`].
+struct PanicsWhenStoppedTest;
+
+impl BrowserTest<IntegrationContext> for PanicsWhenStoppedTest {
+    fn name(&self) -> Cow<'_, str> {
+        Cow::Borrowed("panics when stopped")
+    }
+
+    fn run<'a>(
+        &'a self,
+        _driver: &'a WebDriver,
+        _context: &'a IntegrationContext,
+    ) -> TestFuture<'a> {
+        Box::pin(async move {
+            let _guard = PanicOnDrop;
+            std::future::pending().await
+        })
+    }
+}
+
+/// A test that panics while it is stopped at its time limit times out, its report names the
+/// panic, and the tests after it still run.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_panic_while_stopping_a_timed_out_test_is_reported() {
+    let (runner, outcomes) = record_outcomes(runner().with_time_limit(Duration::from_secs(1)));
+
+    let err = runner
+        .run(
+            &IntegrationContext::default(),
+            TestSuite::sequential()
+                .with(PanicsWhenStoppedTest)
+                .with(page_title_test("after the panic")),
+        )
+        .await
+        .expect_err("the test times out");
+
+    assert_that!(format!("{err:?}"))
+        .contains("Browser test 'panics when stopped' exceeded its time limit of 1.00s.")
+        .contains("Browser test 'panics when stopped' panicked: dropped mid-test");
+    assert_that!(outcomes.lock().unwrap().clone()).is_equal_to(vec![
+        ("panics when stopped".to_owned(), TestOutcome::TimedOut),
+        ("after the panic".to_owned(), TestOutcome::Passed),
+    ]);
+}
+
 /// The page `serve_frame_host` serves at `/frame`.
 const FRAME_PAGE: &str = "<!doctype html><title>frame</title>";
 
