@@ -144,6 +144,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   goes to a test waiting for a session, if any. Otherwise it is logged, and the spare created again, once per spare
   since the last session that could be created. After that, it fails the next test, so that a setup that never works
   doesn't create sessions without end.
+- With `SessionReuse`, preparing a new session for reuse may take 30 seconds, like resetting one. A session taking
+  longer runs one test only, instead of keeping its test from starting indefinitely.
 
 ## [0.7.0] - 2026-10-13
 

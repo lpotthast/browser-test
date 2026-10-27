@@ -30,7 +30,8 @@ use crate::{
     session_reuse::{ResetError, SessionBaseline, configure_reusable_session},
 };
 
-/// How long resetting a session may take. Its steps usually take about 0.1s.
+/// How long resetting a session, or preparing a new one for resets, may take. Their steps usually
+/// take about 0.1s.
 const RESET_TIME_LIMIT: Duration = Duration::from_secs(30);
 
 /// A test assigned to a session.
@@ -236,10 +237,19 @@ where
     }
     // Prepared for dedicated sessions as well: it selects where the test runs.
     let mut baseline = if config.session_reuse.is_enabled() {
-        match SessionBaseline::prepare(session, config.session_reuse.reset()).await {
-            Ok(baseline) => Some(baseline),
-            Err(error) => {
+        let prepare = SessionBaseline::prepare(session, config.session_reuse.reset());
+        match tokio::time::timeout(RESET_TIME_LIMIT, prepare).await {
+            Ok(Ok(baseline)) => Some(baseline),
+            Ok(Err(error)) => {
                 tracing::warn!("A browser session can't be reused, it runs one test only: {error}");
+                None
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "Preparing a browser session for reuse took longer than {}, it runs one test \
+                     only.",
+                    FormatDuration(RESET_TIME_LIMIT),
+                );
                 None
             }
         }
