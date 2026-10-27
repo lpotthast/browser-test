@@ -1,4 +1,4 @@
-use std::{borrow::Cow, fmt, future::Future, panic::AssertUnwindSafe, pin::Pin};
+use std::{borrow::Cow, fmt, future::Future, panic::AssertUnwindSafe, pin::Pin, sync::Arc};
 
 use rootcause::Report;
 use thirtyfour::WebDriver;
@@ -155,6 +155,40 @@ where
 /// `Send`, e.g. `Box::pin(async move { ... })`.
 pub type TestFuture<'a> = Pin<Box<dyn Future<Output = Result<(), Report>> + Send + 'a>>;
 
+/// Implements [`BrowserTest`] for a pointer to a test, forwarding every method to the test, e.g.
+/// for a `Box<dyn BrowserTest<Context>>` built at runtime.
+macro_rules! forward_browser_test {
+    ($($pointer:ident),*) => {$(
+        impl<Context, T> BrowserTest<Context> for $pointer<T>
+        where
+            Context: Sync + ?Sized,
+            T: BrowserTest<Context> + ?Sized,
+        {
+            fn name(&self) -> Cow<'_, str> {
+                (**self).name()
+            }
+
+            fn description(&self) -> Option<Cow<'_, str>> {
+                (**self).description()
+            }
+
+            fn tags(&self) -> Vec<Cow<'_, str>> {
+                (**self).tags()
+            }
+
+            fn settings(&self) -> TestSettings {
+                (**self).settings()
+            }
+
+            fn run<'a>(&'a self, driver: &'a WebDriver, context: &'a Context) -> TestFuture<'a> {
+                (**self).run(driver, context)
+            }
+        }
+    )*};
+}
+
+forward_browser_test!(Box, Arc);
+
 /// A suite of browser tests and nested suites, and how they run.
 ///
 /// A suite runs its entries either one after another ([`Self::sequential`]) or up to a number of
@@ -281,6 +315,21 @@ where
         self
     }
 
+    /// Add tests, in order, e.g. the cases of a parameterized test. Tests of different types
+    /// can be added as `Box<dyn BrowserTest<Context>>`s.
+    #[must_use]
+    pub fn with_all<T>(mut self, tests: impl IntoIterator<Item = T>) -> Self
+    where
+        T: BrowserTest<Context> + 'static,
+    {
+        self.entries.extend(
+            tests
+                .into_iter()
+                .map(|test| SuiteEntry::Test(Box::new(test))),
+        );
+        self
+    }
+
     /// Add a nested suite as one entry of this suite. The nested suite runs its own entries
     /// sequentially or in parallel, as it was created.
     #[must_use]
@@ -377,6 +426,8 @@ where
 mod tests {
     use assertr::prelude::*;
 
+    use std::time::Duration;
+
     use super::*;
     use crate::test_support::{Metadata, StubTest};
 
@@ -417,6 +468,41 @@ mod tests {
             r#"parallelism: Parallelism { max_parallel_tests: 1 }, name: Some("nested"), "#,
             r#"run_always: false, unfiltered: false, entries: ["search works"] }] }"#,
         ));
+    }
+
+    #[test]
+    fn boxed_and_shared_tests_forward_their_metadata() {
+        let settings = TestSettings::new().with_time_limit(Duration::from_secs(5));
+        let test = || {
+            StubTest::new("menu")
+                .with_tags(&["buttons"])
+                .with_settings(settings)
+        };
+        let boxed: Box<dyn BrowserTest> = Box::new(test());
+        let shared: Arc<dyn BrowserTest> = Arc::new(test());
+        for test in [
+            &boxed as &dyn BrowserTest,
+            &shared,
+            &Box::new(Arc::new(test())),
+        ] {
+            assert_that!(test.name()).is_equal_to("menu");
+            assert_that!(test.description()).is_none();
+            assert_that!(test.tags()).contains_exactly(["buttons"]);
+            assert_that!(test.settings()).is_equal_to(settings);
+        }
+    }
+
+    #[test]
+    fn with_all_adds_tests_in_order() {
+        let tests = TestSuite::sequential()
+            .with(StubTest::new("first"))
+            .with_all(["second", "third"].map(StubTest::new))
+            .with_all([
+                Box::new(StubTest::new("fourth")) as Box<dyn BrowserTest>,
+                Box::new(Arc::new(StubTest::new("fifth"))),
+            ]);
+        assert_that!(test_names(&tests))
+            .contains_exactly(["first", "second", "third", "fourth", "fifth"]);
     }
 
     #[test]

@@ -178,7 +178,40 @@ which `#[browser_test(name = "...")]` replaces, and the function's doc comments 
 [attribute's documentation][browser_test] lists every supported signature.
 
 Implement the [`BrowserTest`] trait yourself for tests that take parameters, wrap other tests, or need their own
-timeouts or a browser no other test has used.
+timeouts or a browser no other test has used. `run` returns the test's body as a boxed future, and
+`TestSuite::with_all` adds a test for each of its parameters:
+
+```rust
+use std::borrow::Cow;
+
+use browser_test::thirtyfour::{By, WebDriver};
+use browser_test::{BrowserTest, TestFuture, TestSuite};
+
+/// The link to the Wikipedia edition in `language` is visible.
+struct EditionIsLinked {
+    language: &'static str,
+}
+
+impl BrowserTest<str> for EditionIsLinked {
+    fn name(&self) -> Cow<'_, str> {
+        format!("edition_is_linked::{}", self.language).into()
+    }
+
+    fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver.goto(base_url).await?;
+            driver.find(By::Id(format!("js-link-box-{}", self.language))).await?;
+            Ok(())
+        })
+    }
+}
+
+let tests: TestSuite<str> = TestSuite::sequential()
+    .with_all(["en", "de", "fr"].map(|language| EditionIsLinked { language }));
+```
+
+Tests built at runtime can be added as `Box<dyn BrowserTest<Context>>` or `Arc<dyn BrowserTest<Context>>`, which
+implement `BrowserTest` by forwarding to the test.
 
 ## Organizing Tests
 

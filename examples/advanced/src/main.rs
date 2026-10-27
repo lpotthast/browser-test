@@ -64,8 +64,7 @@ async fn main() -> Result<(), Report> {
     )
     .with(TitleContainsWikipedia)
     .with(SearchInputIsVisible)
-    .with(EditionIsLinked { language: "en" })
-    .with(EditionIsLinked { language: "de" });
+    .with_all(["en", "de"].map(|language| EditionIsLinked { language }));
 
     // Set `BROWSER_TEST_VISIBLE=0` to run headless, in Chrome Headless Shell.
     let visibility = Visibility::from_env()
