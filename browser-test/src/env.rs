@@ -3,7 +3,10 @@ use std::{env, num::NonZeroUsize};
 /// An environment variable whose value cannot be interpreted, returned by the `from_env` and
 /// `from_env_var` constructors.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("environment variable {name} is set to {value:?}, expected {expected}")]
+#[error(
+    "environment variable {name} is set to {value:?}, expected {expected}{}",
+    details.as_ref().map(|details| format!(": {details}")).unwrap_or_default()
+)]
 #[non_exhaustive]
 pub struct InvalidEnvVar {
     /// The variable's name.
@@ -14,6 +17,10 @@ pub struct InvalidEnvVar {
 
     /// What the value should have been.
     pub expected: &'static str,
+
+    /// What is wrong with the value, if more is known than that it isn't what was expected, e.g.
+    /// the problem a regular expression has.
+    pub details: Option<String>,
 }
 
 /// Read `name`'s value, trimmed. `None` if the variable is unset or empty.
@@ -21,6 +28,27 @@ fn env_value(name: &str) -> Option<String> {
     let value = env::var_os(name)?;
     let value = value.to_string_lossy().trim().to_owned();
     (!value.is_empty()).then_some(value)
+}
+
+/// Read `name`'s value, trimmed, failing if it is not valid Unicode instead of converting it
+/// lossily. `None` if the variable is unset or empty.
+pub(crate) fn env_unicode_value(
+    name: &str,
+    expected: &'static str,
+) -> Result<Option<String>, InvalidEnvVar> {
+    match env::var(name) {
+        Ok(value) => {
+            let value = value.trim();
+            Ok((!value.is_empty()).then(|| value.to_owned()))
+        }
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(value)) => Err(InvalidEnvVar {
+            name: name.to_owned(),
+            value: value.to_string_lossy().into_owned(),
+            expected,
+            details: Some("the value is not valid Unicode".to_owned()),
+        }),
+    }
 }
 
 /// Read a boolean flag. `None` if the variable is unset or empty.
@@ -38,6 +66,7 @@ pub(crate) fn env_flag(name: &str) -> Result<Option<bool>, InvalidEnvVar> {
             name: name.to_owned(),
             value,
             expected: "one of 1, true, yes, on, enabled, 0, false, no, off, or disabled",
+            details: None,
         }),
     }
 }
@@ -53,6 +82,7 @@ pub(crate) fn env_positive_number(name: &str) -> Result<Option<NonZeroUsize>, In
             name: name.to_owned(),
             value,
             expected: "a positive number",
+            details: None,
         }),
     }
 }

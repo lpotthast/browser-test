@@ -54,9 +54,6 @@ impl Parse for Arguments {
                     let value = tag.value();
                     let problem = if value.is_empty() {
                         "tags must not be empty"
-                    } else if value.contains(',') || value.trim() != value {
-                        // `BROWSER_TEST_TAG` splits at commas and trims, so it couldn't select it.
-                        "tags must not contain commas or start or end with whitespace"
                     } else if seen.contains(&value) {
                         "duplicate tag"
                     } else {
@@ -104,6 +101,9 @@ mod tests {
         let args = syn::parse_str::<Arguments>("tags = [\"button\", \"keyboard\",]").unwrap();
         let tags: Vec<_> = args.tags.unwrap().iter().map(LitStr::value).collect();
         assert_that!(tags).contains_exactly(["button", "keyboard"]);
+        let args = syn::parse_str::<Arguments>("tags = [\"button,focus\", \" spaced \"]").unwrap();
+        let tags: Vec<_> = args.tags.unwrap().iter().map(LitStr::value).collect();
+        assert_that!(tags).contains_exactly(["button,focus", " spaced "]);
         let args = syn::parse_str::<Arguments>("tags = []").unwrap();
         assert_that!(args.tags).some().is_empty();
     }
@@ -127,14 +127,6 @@ mod tests {
             ("tags = \"button\"", "expected square brackets"),
             ("tags = [\"button\", 42]", "expected string literal"),
             ("tags = [\"button\", \"\"]", "tags must not be empty"),
-            (
-                "tags = [\"button,focus\"]",
-                "tags must not contain commas or start or end with whitespace",
-            ),
-            (
-                "tags = [\" button\"]",
-                "tags must not contain commas or start or end with whitespace",
-            ),
             ("tags = [\"button\", \"button\"]", "duplicate tag"),
             ("tags = [], tags = []", "duplicate `tags` argument"),
             (

@@ -9,9 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Tags, to select tests by independently of their names and of the suites they run in: `BrowserTest::tags`, set
-  with `#[browser_test(tags = ["button", "keyboard"])]`. `TestFilter::with_tag` and `BROWSER_TEST_TAG` select tests by
-  tag, and `BrowserTestRecord::tags` lists a test's tags. A test can have several tags.
+- Tags, which select tests independently of their names and of the suites they run in. Set them with
+  `#[browser_test(tags = ["button", "keyboard"])]` or `BrowserTest::tags`, and select tests by them with
+  `TestFilter::with_tag` or `BROWSER_TEST_TAG`. `BrowserTestRecord::tags` lists a test's tags.
+- `BrowserTestRunner::with_filter`, the preferred way to select tests, e.g. `.with_filter(TestFilter::from_env()?)`.
+  Tests in `TestSuite::unfiltered` suites always run, e.g. checks of the whole run. A run whose filter selects none of
+  the other tests fails with `BrowserTestError::NoTestSelected`, so that a mistyped filter can't pass unnoticed.
+- `InvalidEnvVar::details`, e.g. why a regular expression is invalid.
 
 ### Changed
 
@@ -23,17 +27,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name from `BrowserTest::name`.
 - **Breaking:** `BrowserTests` became `TestSuite`, so that it no longer reads like the `BrowserTest` trait, and
   `GroupRecord` became `SuiteRecord`. `BrowserTestRunReport::groups` became `suites`, and the run summary lists them
-  under `suites:`. `BrowserTests::filter_tests` was removed: select tests with a `TestFilter` and `TestSuite::filter`.
+  under `suites:`. `BrowserTests::filter_tests` was removed: select tests with a `TestFilter` instead.
 - **Breaking:** Tags replace logical groups. `TestGroup`, `BrowserTests::with_test_group`,
   `BrowserTests::filter_groups`, `TestFilter::with_group`, `TestFilter::with_groups_from_env_var` and
   `BROWSER_TEST_GROUP` were removed, and `BrowserTestRecord::group` became `tags`. Tag the tests of a group instead,
   e.g. with `#[browser_test(tags = ["button"])]`, and add them to the suite with `TestSuite::with`. Replace
-  `with_group` with `with_tag`, `with_groups_from_env_var` with `with_tags_from_env_var`, `BROWSER_TEST_GROUP` with
-  `BROWSER_TEST_TAG`, and `filter_groups` with a `TestFilter` selecting tags. `#[browser_test]` rejects tags that
-  `BROWSER_TEST_TAG` can't select: empty ones, ones containing commas or starting or ending with whitespace, and
-  duplicates. A test wrapping another one should forward `BrowserTest::tags` as well.
-- **Breaking:** `TestFilter::from_env` reads name substrings from `BROWSER_TEST_NAME` instead of `BROWSER_TEST_FILTER`,
-  next to tags from `BROWSER_TEST_TAG`.
+  `with_group` with `with_tag`, `with_groups_from_env_var` with `with_tag_pattern_from_env_var`, `BROWSER_TEST_GROUP`
+  with `BROWSER_TEST_TAG`, and `filter_groups` with a `TestFilter` selecting tags. `#[browser_test]` rejects empty and
+  duplicate tags. A test wrapping another one should forward `BrowserTest::tags` as well.
+- **Breaking:** `TestFilter::from_env` reads the name pattern from `BROWSER_TEST_NAME` instead of `BROWSER_TEST_FILTER`.
+- **Breaking:** `TestFilter` patterns are regular expressions, which match anywhere in the name or tag unless anchored:
+  `smoke` also selects the tag `smoke-slow`, `^smoke$` only `smoke`. `BROWSER_TEST_NAME` and `BROWSER_TEST_TAG` hold one
+  pattern each instead of a comma-separated list: replace `press,keyboard` with `press|keyboard`, and `button,focus`
+  with `^(button|focus)$`. `with_name_containing` became `with_name`, and `with_name_substrings_from_env_var` became
+  `with_name_pattern_from_env_var`. `with_name` and `with_tag` panic on invalid patterns. `try_with_name` and
+  `try_with_tag` return an `InvalidPattern` instead, and reading patterns from the environment an `InvalidEnvVar`.
 - **Breaking:** `BrowserTest` and `BrowserTests` (now `TestSuite`) lost their `TestError` type parameter, so that tests
   of different error types can share a suite. `BrowserTest::run` returns a `Report`, into which a `Report<E>` converts
   with `?`. Replace `impl BrowserTest<Context, E>` with `impl BrowserTest<Context>` returning `Result<(), Report>`, and

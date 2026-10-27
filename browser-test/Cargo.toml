@@ -30,6 +30,7 @@ chrome-for-testing-manager = { version = "0.15.0", default-features = false, fea
 futures-util = { version = "0.3.32", default-features = false, features = ["sink", "std"] }
 reqwest = { version = "0.13.5", default-features = false }
 rootcause.workspace = true
+regex = { version = "1.13.1", default-features = false, features = ["perf", "std", "unicode"] }
 serde_json = { version = "1.0.145", default-features = false, features = ["std"] }
 thirtyfour = { version = "0.38.1", default-features = false, features = ["bidi", "cdp", "reqwest"] }
 thiserror = { version = "2.0.17", default-features = false, features = ["std"] }

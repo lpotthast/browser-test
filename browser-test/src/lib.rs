@@ -35,7 +35,7 @@ pub use cancellation::Cancellation;
 pub use driver_output::DriverOutput;
 pub use env::InvalidEnvVar;
 pub use error::BrowserTestError;
-pub use filter::TestFilter;
+pub use filter::{InvalidPattern, TestFilter};
 pub use pause::Pause;
 pub use progress::ProgressWarnings;
 pub use report::{

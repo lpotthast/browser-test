@@ -53,6 +53,21 @@ pub enum BrowserTestError {
         failed_tests: usize,
     },
 
+    /// The runner's filter (see
+    /// [`BrowserTestRunner::with_filter`](crate::BrowserTestRunner::with_filter)) selected none of
+    /// the tests it could have, so that a mistyped filter doesn't pass a run without tests. Tests of
+    /// [`TestSuite::unfiltered`](crate::TestSuite::unfiltered) suites don't count. No test ran.
+    #[error(
+        "The test filter selected no test (name patterns: {name_patterns:?}, tag patterns: \
+         {tag_patterns:?})."
+    )]
+    NoTestSelected {
+        /// The filter's name patterns, as written.
+        name_patterns: Vec<String>,
+        /// The filter's tag patterns, as written.
+        tag_patterns: Vec<String>,
+    },
+
     /// The directory holding the run's Chrome profiles could not be created.
     #[error("Failed to create the directory for Chrome profiles.")]
     CreateChromeProfiles,

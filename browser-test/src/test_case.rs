@@ -127,8 +127,7 @@ where
     ///
     /// Tags don't change how the test runs, and are independent of its name and of the
     /// [`TestSuite`]s it runs in. `#[browser_test(tags = ["button"])]` sets them. Defaults to none.
-    /// Tags that are empty, contain commas or start or end with whitespace can't be selected
-    /// through `BROWSER_TEST_TAG`, so the attribute rejects them.
+    /// The attribute rejects empty and duplicate tags.
     ///
     /// The runner and filters read the tags before the test runs: return the same tags each time.
     fn tags(&self) -> Vec<Cow<'_, str>> {
@@ -211,6 +210,7 @@ where
     pub(crate) parallelism: Parallelism,
     pub(crate) name: Option<String>,
     pub(crate) run_always: bool,
+    pub(crate) unfiltered: bool,
     pub(crate) entries: Vec<SuiteEntry<Context>>,
 }
 
@@ -240,6 +240,7 @@ where
             parallelism,
             name: None,
             run_always: false,
+            unfiltered: false,
             entries: Vec::new(),
         }
     }
@@ -257,6 +258,15 @@ where
     #[must_use]
     pub const fn run_always(mut self) -> Self {
         self.run_always = true;
+        self
+    }
+
+    /// Keep all of this suite's tests, including those of nested suites, whatever the filter of
+    /// the run (see [`crate::BrowserTestRunner::with_filter`]) or [`Self::filter`] selects, e.g. for
+    /// checks of the whole run. Usually combined with [`Self::run_always`].
+    #[must_use]
+    pub const fn unfiltered(mut self) -> Self {
+        self.unfiltered = true;
         self
     }
 
@@ -281,10 +291,14 @@ where
     /// Keep only the tests `filter` selects, in this suite and nested ones, e.g.
     /// [`TestFilter::from_env`].
     ///
+    /// Prefer giving the filter to the runner with
+    /// [`BrowserTestRunner::with_filter`](crate::BrowserTestRunner::with_filter), which applies it
+    /// the same way. Use this to inspect or reuse a filtered suite.
+    ///
     /// A test whose name or tags panic while the filter reads them is kept, so that the run
-    /// reports it as failed. Nested suites keep how they run, and empty ones are removed. Add tests
-    /// that must always run, e.g. checks of the whole run, after filtering: [`Self::run_always`]
-    /// does not exempt tests from filters.
+    /// reports it as failed. Suites marked [`Self::unfiltered`] keep all their tests, which
+    /// [`Self::run_always`] alone doesn't. Nested suites keep how they run, and empty ones are
+    /// removed.
     #[must_use]
     pub fn filter(mut self, filter: &TestFilter) -> Self {
         if !filter.selects_all() {
@@ -293,9 +307,12 @@ where
         self
     }
 
-    /// Keep only the tests `include` accepts, in this suite and nested ones, and remove nested
-    /// suites left empty.
+    /// Keep only the tests `include` accepts, in this suite and nested ones not marked
+    /// [`Self::unfiltered`], and remove nested suites left empty.
     fn retain(&mut self, include: &mut impl FnMut(&dyn BrowserTest<Context>) -> bool) {
+        if self.unfiltered {
+            return;
+        }
         self.entries.retain_mut(|entry| match entry {
             SuiteEntry::Test(test) => include(test.as_ref()),
             SuiteEntry::Suite(suite) => {
@@ -303,6 +320,16 @@ where
                 !suite.is_empty()
             }
         });
+    }
+
+    /// Whether this suite contains a test outside of [`Self::unfiltered`] suites, directly or in
+    /// nested suites.
+    pub(crate) fn has_filterable_tests(&self) -> bool {
+        !self.unfiltered
+            && self.entries.iter().any(|entry| match entry {
+                SuiteEntry::Test(_) => true,
+                SuiteEntry::Suite(suite) => suite.has_filterable_tests(),
+            })
     }
 
     /// Whether this suite contains no test, directly or in nested suites.
@@ -324,6 +351,7 @@ where
             .field("parallelism", &self.parallelism)
             .field("name", &self.name)
             .field("run_always", &self.run_always)
+            .field("unfiltered", &self.unfiltered)
             .field("entries", &self.entries)
             .finish()
     }
@@ -363,7 +391,7 @@ mod tests {
 
         // Kept, so that the run reports them as failed. A filter by name doesn't read tags.
         assert_that!(entries(
-            suite().filter(&TestFilter::new().with_name_containing("checkout"))
+            suite().filter(&TestFilter::new().with_name("checkout"))
         ))
         .is_equal_to("[<name() panicked>]");
         assert_that!(entries(
@@ -384,9 +412,9 @@ mod tests {
 
         assert_that!(format!("{tests:?}")).is_equal_to(concat!(
             r#"TestSuite { parallelism: Parallelism { max_parallel_tests: 1 }, name: None, "#,
-            r#"run_always: false, entries: ["opens home page", TestSuite { parallelism: "#,
-            r#"Parallelism { max_parallel_tests: 1 }, name: Some("nested"), run_always: false, "#,
-            r#"entries: ["search works"] }] }"#,
+            r#"run_always: false, unfiltered: false, entries: ["opens home page", TestSuite { "#,
+            r#"parallelism: Parallelism { max_parallel_tests: 1 }, name: Some("nested"), "#,
+            r#"run_always: false, unfiltered: false, entries: ["search works"] }] }"#,
         ));
     }
 
@@ -423,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_combines_exact_tags_with_name_substrings_in_registration_order() {
+    fn selection_combines_tag_and_name_patterns_in_registration_order() {
         assert_that!(test_names(&suite().filter(&TestFilter::new()))).contains_exactly([
             "untagged hover",
             "atom::hover",
@@ -432,13 +460,18 @@ mod tests {
             "keyboard::focus",
         ]);
         assert_that!(test_names(
-            &suite().filter(&TestFilter::new().with_name_containing("hover"))
+            &suite().filter(&TestFilter::new().with_name("hover"))
         ))
         .contains_exactly(["untagged hover", "atom::hover", "other::hover"]);
         assert_that!(test_names(
-            &suite().filter(&TestFilter::new().with_tag("buttons"))
+            &suite().filter(&TestFilter::new().with_tag("^buttons$"))
         ))
         .contains_exactly(["atom::hover", "hook::press"]);
+        // Unanchored patterns match anywhere in a tag.
+        assert_that!(test_names(
+            &suite().filter(&TestFilter::new().with_tag("buttons"))
+        ))
+        .contains_exactly(["atom::hover", "hook::press", "other::hover"]);
         assert_that!(test_names(
             &suite().filter(&TestFilter::new().with_tag("keyboard"))
         ))
@@ -446,10 +479,10 @@ mod tests {
         assert_that!(test_names(
             &suite().filter(
                 &TestFilter::new()
-                    .with_tag("buttons")
+                    .with_tag("^buttons$")
                     .with_tag("focus")
-                    .with_name_containing("press")
-                    .with_name_containing("focus")
+                    .with_name("press")
+                    .with_name("focus")
             )
         ))
         .contains_exactly(["hook::press", "keyboard::focus"]);
@@ -461,18 +494,14 @@ mod tests {
         .is_true();
         assert_that!(
             suite()
-                .filter(
-                    &TestFilter::new()
-                        .with_tag("buttons")
-                        .with_name_containing("absent")
-                )
+                .filter(&TestFilter::new().with_tag("^buttons$").with_name("absent"))
                 .is_empty()
         )
         .is_true();
     }
 
     #[test]
-    fn selection_preserves_execution_policy_and_allows_unconditional_checks() {
+    fn selection_preserves_execution_policy() {
         let tests = suite().filter(&TestFilter::new().with_tag("focus"));
         assert_that!(tests.parallelism).is_equal_to(Parallelism::parallel(2));
         let SuiteEntry::Suite(stage) = &tests.entries[0] else {
@@ -481,11 +510,39 @@ mod tests {
         assert_that!(stage.name.as_deref()).is_equal_to(Some("stage"));
         assert_that!(stage.parallelism).is_equal_to(Parallelism::sequential());
         assert_that!(stage.run_always).is_true();
-        let tests = tests.with_nested(
-            TestSuite::sequential()
-                .run_always()
-                .with(StubTest::new("after all")),
-        );
-        assert_that!(test_names(&tests)).contains_exactly(["keyboard::focus", "after all"]);
+    }
+
+    #[test]
+    fn unfiltered_suites_keep_all_their_tests() {
+        let tests = || {
+            suite().with_nested(
+                TestSuite::sequential()
+                    .named("after all")
+                    .run_always()
+                    .unfiltered()
+                    .with(StubTest::new("server did not panic"))
+                    .with_nested(TestSuite::sequential().with(StubTest::new("no console errors"))),
+            )
+        };
+        assert_that!(test_names(
+            &tests().filter(&TestFilter::new().with_tag("focus"))
+        ))
+        .contains_exactly([
+            "keyboard::focus",
+            "server did not panic",
+            "no console errors",
+        ]);
+        assert_that!(test_names(
+            &tests().filter(&TestFilter::new().with_name("missing"))
+        ))
+        .contains_exactly(["server did not panic", "no console errors"]);
+        // Marking the outermost suite exempts every test.
+        assert_that!(
+            suite()
+                .unfiltered()
+                .filter(&TestFilter::new().with_name("missing"))
+                .is_empty()
+        )
+        .is_false();
     }
 }

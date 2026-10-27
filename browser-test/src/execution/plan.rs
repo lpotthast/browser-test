@@ -158,6 +158,8 @@ where
         parallelism,
         name,
         run_always,
+        // The runner filtered the suite before planning it.
+        unfiltered: _,
         entries,
     } = suite;
     let named = name.is_some();

@@ -16,7 +16,7 @@ use thirtyfour::{ChromeCapabilities, error::WebDriverResult};
 use crate::TestSettings;
 use crate::{
     BrowserTestError, Cancellation, DriverOutput, ElementQueryWait, FailurePolicy, Pause,
-    ProgressWarnings, SessionReuse, TestSuite, Timeouts,
+    ProgressWarnings, SessionReuse, TestFilter, TestSuite, Timeouts,
     cancellation::cancelled_result,
     driver_output::{DriverOutputCapture, attach_browser_driver_output_to_result},
     env::{InvalidEnvVar, env_flag},
@@ -91,6 +91,7 @@ pub struct BrowserTestRunner {
     visibility: Visibility,
     pause: Pause,
     failure_policy: FailurePolicy,
+    filter: TestFilter,
     test_defaults: TestDefaults,
     chrome_capabilities_setups: Vec<Arc<ChromeCapabilitiesSetup>>,
     driver_output: DriverOutput,
@@ -112,6 +113,7 @@ impl fmt::Debug for BrowserTestRunner {
             .field("visibility", &self.visibility)
             .field("pause", &self.pause)
             .field("failure_policy", &self.failure_policy)
+            .field("filter", &self.filter)
             .field("test_defaults", &self.test_defaults)
             .field(
                 "chrome_capabilities_setup_count",
@@ -145,6 +147,7 @@ impl BrowserTestRunner {
             visibility: Visibility::Headless,
             pause: Pause::disabled(),
             failure_policy: FailurePolicy::FailFast,
+            filter: TestFilter::new(),
             test_defaults: TestDefaults::new(),
             chrome_capabilities_setups: Vec::new(),
             driver_output: DriverOutput::disabled(),
@@ -226,6 +229,19 @@ impl BrowserTestRunner {
     #[must_use]
     pub const fn with_failure_policy(mut self, failure_policy: FailurePolicy) -> Self {
         self.failure_policy = failure_policy;
+        self
+    }
+
+    /// Run only the tests `filter` selects, e.g. [`TestFilter::from_env`]. Defaults to
+    /// [`TestFilter::new`], running every test.
+    ///
+    /// This is the preferred way to select tests. Suites marked [`TestSuite::unfiltered`], e.g.
+    /// checks of the whole run, keep all their tests. A run whose filter selects none of the other
+    /// tests fails with [`BrowserTestError::NoTestSelected`] without running any, so that a
+    /// mistyped filter doesn't pass a run.
+    #[must_use]
+    pub fn with_filter(mut self, filter: TestFilter) -> Self {
+        self.filter = filter;
         self
     }
 
@@ -385,7 +401,7 @@ impl BrowserTestRunner {
     /// resumed.
     ///
     /// `tests` decides which tests run one after another and which at the same time, see
-    /// [`TestSuite`]. The run stops on the first failure by default. Use
+    /// [`TestSuite`]. Only the tests the filter selects run, see [`Self::with_filter`]. The run stops on the first failure by default. Use
     /// [`Self::with_failure_policy`] to run every test and return all failures as child reports on
     /// one aggregate report.
     ///
@@ -406,7 +422,8 @@ impl BrowserTestRunner {
     /// Returns an error if the shutdown signals cannot be listened for (see
     /// [`Cancellation::on_shutdown_signals`]), if the directory for Chrome profiles cannot be
     /// created, if Chrome for Testing cannot be launched or shut down, if a session cannot be
-    /// created, if any test fails, or [`BrowserTestError::Cancelled`] if the run is cancelled.
+    /// created, if any test fails, [`BrowserTestError::NoTestSelected`] if the filter selects no
+    /// test, or [`BrowserTestError::Cancelled`] if the run is cancelled.
     pub async fn run<Context>(
         &self,
         context: &Context,
@@ -415,6 +432,11 @@ impl BrowserTestRunner {
     where
         Context: Sync + ?Sized,
     {
+        let had_filterable_tests = tests.has_filterable_tests();
+        let tests = tests.filter(&self.filter);
+        if had_filterable_tests && !tests.has_filterable_tests() {
+            return Err(Report::new(self.filter.selected_no_test()));
+        }
         // Before listening for shutdown signals, as an empty run has nothing to clean up.
         if tests.is_empty() {
             tracing::info!("Skipping browser test run because no tests were provided.");

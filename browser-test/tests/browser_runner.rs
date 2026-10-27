@@ -14,8 +14,8 @@ use std::{
 use assertr::prelude::*;
 use browser_test::{
     BrowserTest, BrowserTestError, BrowserTestRunReport, BrowserTestRunner, Cancellation,
-    CancellationToken, FailurePolicy, Parallelism, StepExt, TestOutcome, TestSettings, TestSuite,
-    async_trait, browser_test,
+    CancellationToken, FailurePolicy, Parallelism, StepExt, TestFilter, TestOutcome, TestSettings,
+    TestSuite, async_trait, browser_test,
     thirtyfour::{By, ChromiumLikeCapabilities, WebDriver, prelude::ElementQueryable},
 };
 use rootcause::{Report, prelude::ResultExt};
@@ -857,6 +857,59 @@ fn record_outcomes(runner: BrowserTestRunner) -> (BrowserTestRunner, Outcomes) {
             .collect();
     });
     (runner, outcomes)
+}
+
+/// The runner runs only the tests its filter selects, and every test of unfiltered suites.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn the_runner_applies_its_filter() {
+    let (runner, outcomes) =
+        record_outcomes(runner().with_filter(TestFilter::new().with_name("^selected$")));
+    runner
+        .run(
+            &IntegrationContext::default(),
+            TestSuite::sequential()
+                .with(page_title_test("selected"))
+                .with(page_title_test("not selected"))
+                .with_nested(
+                    TestSuite::sequential()
+                        .unfiltered()
+                        .with(page_title_test("whole run check")),
+                ),
+        )
+        .await
+        .unwrap();
+    assert_that!(outcomes.lock().unwrap().clone()).contains_exactly([
+        ("selected".to_owned(), TestOutcome::Passed),
+        ("whole run check".to_owned(), TestOutcome::Passed),
+    ]);
+}
+
+/// A filter selecting none of the tests fails the run, even if unfiltered suites have tests, so
+/// that a mistyped filter doesn't pass it.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_filter_selecting_no_test_fails_the_run() {
+    let (runner, outcomes) =
+        record_outcomes(runner().with_filter(TestFilter::new().with_tag("button,focus")));
+    let err = runner
+        .run(
+            &IntegrationContext::default(),
+            TestSuite::sequential()
+                .with(page_title_test("untagged"))
+                .with_nested(
+                    TestSuite::sequential()
+                        .unfiltered()
+                        .with(page_title_test("whole run check")),
+                ),
+        )
+        .await
+        .expect_err("the filter selects no test");
+    assert_that!(err.current_context()).is_equal_to(&BrowserTestError::NoTestSelected {
+        name_patterns: Vec::new(),
+        tag_patterns: vec!["button,focus".to_owned()],
+    });
+    assert_that!(outcomes.lock().unwrap().clone()).is_empty();
 }
 
 /// A test exceeding its own time limit on a frozen page times out, the page is closed (so its

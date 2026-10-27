@@ -182,8 +182,8 @@ fn tags_select_generated_tests() {
         .filter(
             &TestFilter::new()
                 .with_tag("smoke")
-                .with_name_containing("other::borrowed_page")
-                .with_name_containing("no_context"),
+                .with_name("other::borrowed_page")
+                .with_name("no_context"),
         );
     assert_that!(format!("{tests:?}"))
         .contains(r#"entries: ["macros::no_context", "macros::other::borrowed_page"]"#);
@@ -198,14 +198,14 @@ fn names_and_descriptions_are_independent() {
     assert_that!(
         TestSuite::sequential()
             .with(test)
-            .filter(&TestFilter::new().with_name_containing("keyboard::events"))
+            .filter(&TestFilter::new().with_name("keyboard::events"))
             .is_empty()
     )
     .is_false();
     assert_that!(
         TestSuite::sequential()
             .with(HandlesKeyboardEvents)
-            .filter(&TestFilter::new().with_name_containing("Keyboard events reach"))
+            .filter(&TestFilter::new().with_name("Keyboard events reach"))
             .is_empty()
     )
     .is_true();

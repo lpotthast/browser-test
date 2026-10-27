@@ -65,8 +65,7 @@ async fn main() -> Result<(), Report> {
     .with(TitleContainsWikipedia)
     .with(SearchInputIsVisible)
     .with(EditionIsLinked { language: "en" })
-    .with(EditionIsLinked { language: "de" })
-    .filter(&TestFilter::from_env().context("Reading the test filter")?);
+    .with(EditionIsLinked { language: "de" });
 
     // Set `BROWSER_TEST_VISIBLE=0` to run headless, in Chrome Headless Shell.
     let visibility = Visibility::from_env()
@@ -106,6 +105,7 @@ async fn main() -> Result<(), Report> {
             Duration::from_millis(500),
         ))
         .with_failure_policy(FailurePolicy::RunAll)
+        .with_filter(TestFilter::from_env().context("Reading the test filter")?)
         .with_driver_output(
             DriverOutput::from_env()
                 .context("Reading the driver output setting")?

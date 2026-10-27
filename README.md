@@ -190,8 +190,39 @@ all failures are reported together.
 
 To run only some of your tests, select them with a [`TestFilter`], by name or by tag. Tag a test with
 `#[browser_test(tags = ["button"])]`, or return its tags from `BrowserTest::tags`. Tags don't change how tests run, and
-are independent of the suites they run in. `TestFilter::from_env()` reads the selection from `BROWSER_TEST_NAME` and
-`BROWSER_TEST_TAG`. The runner runs every test it is given, so apply the filter with `TestSuite::filter`.
+are independent of the suites they run in. Names and tags are selected by regular expressions, which match anywhere
+unless anchored: `BROWSER_TEST_NAME='keyboard|^checkout::'` selects tests whose names contain `keyboard` or start with
+`checkout::`, and `BROWSER_TEST_TAG='^(button|focus)$'` the tests tagged exactly `button` or `focus`.
+`TestFilter::from_env()` reads the selection from these two variables. Give the filter to the runner with `with_filter`,
+and mark suites that must always run, e.g. checks of the whole run, `unfiltered()`:
+
+```rust,no_run
+# use rootcause::Report;
+# #[browser_test::browser_test]
+# async fn server_did_not_panic() -> Result<(), Report> { Ok(()) }
+# fn component_tests() -> browser_test::TestSuite { browser_test::TestSuite::sequential() }
+# async fn run() -> Result<(), Report> {
+use browser_test::{BrowserTestRunner, Cancellation, TestFilter, TestSuite};
+
+let tests = TestSuite::sequential()
+    .with_nested(component_tests())
+    .with_nested(
+        TestSuite::sequential()
+            .run_always()
+            .unfiltered()
+            .with(ServerDidNotPanic),
+    );
+
+BrowserTestRunner::new(Cancellation::on_shutdown_signals())
+    .with_filter(TestFilter::from_env()?)
+    .run(&(), tests)
+    .await?;
+# Ok(())
+# }
+```
+
+Without a filter, the runner runs every test it is given, whatever the environment says. A run whose filter selects
+none of the tests outside of unfiltered suites fails without running any, so that a mistyped filter can't pass it.
 
 ## Configuring the Runner
 
@@ -203,7 +234,8 @@ use std::time::Duration;
 use browser_test::thirtyfour::ChromiumLikeCapabilities;
 use browser_test::{
     BrowserTestRunner, Cancellation, Channel, ChromeBinary, DriverOutput, ElementQueryWait,
-    FailurePolicy, Pause, ProgressWarnings, SessionReuse, StderrSummary, Timeouts, Visibility,
+    FailurePolicy, Pause, ProgressWarnings, SessionReuse, StderrSummary, TestFilter, Timeouts,
+    Visibility,
 };
 
 let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals())
@@ -229,6 +261,8 @@ let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals())
     .with_pause(Pause::disabled())
     .with_driver_output(DriverOutput::tail_lines(200))
     .with_failure_report_hooks(true)
+    // Which tests run.
+    .with_filter(TestFilter::new().with_tag("^smoke$"))
     // What happens with the report of each run.
     .with_report_consumer(StderrSummary);
 ```
@@ -236,12 +270,13 @@ let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals())
 Some options can be read from environment variables, which makes them easy to switch on for a single run:
 
 ```rust,no_run
-use browser_test::{BrowserTestRunner, Cancellation, DriverOutput, Pause, Visibility};
+use browser_test::{BrowserTestRunner, Cancellation, DriverOutput, Pause, TestFilter, Visibility};
 
 let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals())
     .with_visibility(Visibility::from_env()?.unwrap_or_default())
     .with_pause(Pause::from_env()?.unwrap_or_default())
-    .with_driver_output(DriverOutput::from_env()?.unwrap_or_default());
+    .with_driver_output(DriverOutput::from_env()?.unwrap_or_default())
+    .with_filter(TestFilter::from_env()?);
 # Ok::<(), browser_test::InvalidEnvVar>(())
 ```
 
@@ -260,8 +295,8 @@ BROWSER_TEST_VISIBLE=1 BROWSER_TEST_PAUSE=1 BROWSER_TEST_DRIVER_OUTPUT=1 cargo t
 | `BROWSER_TEST_DRIVER_OUTPUT_TAIL_LINES` | `DriverOutput::from_env()` | Output lines to keep (default 200).           |
 | `BROWSER_TEST_PARALLELISM`              | `Parallelism::from_env()`  | Number of tests to run at the same time.      |
 | `BROWSER_TEST_SESSION_REUSE`            | `SessionReuse::from_env()` | Turn session reuse on or off.                 |
-| `BROWSER_TEST_NAME`                     | `TestFilter::from_env()`   | Test name substrings, comma-separated.        |
-| `BROWSER_TEST_TAG`                      | `TestFilter::from_env()`   | Exact test tags, comma-separated.             |
+| `BROWSER_TEST_NAME`                     | `TestFilter::from_env()`   | Regex matched anywhere in test names.         |
+| `BROWSER_TEST_TAG`                      | `TestFilter::from_env()`   | Regex matched anywhere in test tags.          |
 
 Boolean variables accept `0`/`1`, `false`/`true`, `no`/`yes`, `off`/`on` and `disabled`/`enabled`, regardless of case.
 The pause gives you time to look at the app or attach a debugger before the browser starts.
