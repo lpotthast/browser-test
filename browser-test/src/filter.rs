@@ -5,7 +5,7 @@ use std::panic::AssertUnwindSafe;
 use crate::{BrowserTest, InvalidEnvVar};
 
 /// Default environment variable read by [`TestFilter::from_env`] for name substrings.
-pub(crate) const DEFAULT_NAME_FILTER_ENV: &str = "BROWSER_TEST_FILTER";
+pub(crate) const DEFAULT_NAME_FILTER_ENV: &str = "BROWSER_TEST_NAME";
 
 /// Default environment variable read by [`TestFilter::from_env`] for tags.
 pub(crate) const DEFAULT_TAG_FILTER_ENV: &str = "BROWSER_TEST_TAG";
@@ -33,7 +33,7 @@ pub(crate) const DEFAULT_TAG_FILTER_ENV: &str = "BROWSER_TEST_TAG";
 ///     .with_name_containing("keyboard");
 /// ```
 ///
-/// Let whoever runs the tests select them through `BROWSER_TEST_FILTER` and `BROWSER_TEST_TAG`,
+/// Let whoever runs the tests select them through `BROWSER_TEST_NAME` and `BROWSER_TEST_TAG`,
 /// and add checks of the whole run after filtering, so that they always run:
 ///
 /// ```
@@ -84,7 +84,7 @@ impl TestFilter {
         self
     }
 
-    /// Read name substrings from `BROWSER_TEST_FILTER` and tags from `BROWSER_TEST_TAG`.
+    /// Read name substrings from `BROWSER_TEST_NAME` and tags from `BROWSER_TEST_TAG`.
     ///
     /// See [`Self::with_name_substrings_from_env_var`] and [`Self::with_tags_from_env_var`] for
     /// the syntax. Unset variables select every test.
@@ -102,7 +102,7 @@ impl TestFilter {
     /// [`Self::with_name_containing`] does.
     ///
     /// Whitespace around each substring is ignored, and so are empty ones: an unset or empty
-    /// variable adds none. `BROWSER_TEST_FILTER=press,keyboard` selects tests whose names contain
+    /// variable adds none. `BROWSER_TEST_NAME=press,keyboard` selects tests whose names contain
     /// `press` or `keyboard`. The variable is read when this function is called.
     ///
     /// # Errors
@@ -207,12 +207,12 @@ mod tests {
 
     #[test]
     fn environment_lists_add_to_the_filter() {
-        let names = EnvVarGuard::new("BROWSER_TEST_FILTER_CUSTOM");
+        let names = EnvVarGuard::new("BROWSER_TEST_NAME_CUSTOM");
         names.set("press");
         assert_eq!(
             TestFilter::new()
                 .with_name_containing("hover")
-                .with_name_substrings_from_env_var("BROWSER_TEST_FILTER_CUSTOM")
+                .with_name_substrings_from_env_var("BROWSER_TEST_NAME_CUSTOM")
                 .unwrap(),
             TestFilter::new()
                 .with_name_containing("hover")
@@ -234,11 +234,11 @@ mod tests {
     #[test]
     fn non_unicode_filter_is_an_error() {
         use std::os::unix::ffi::OsStrExt;
-        let names = EnvVarGuard::new("BROWSER_TEST_FILTER_INVALID");
+        let names = EnvVarGuard::new("BROWSER_TEST_NAME_INVALID");
         names.set(std::ffi::OsStr::from_bytes(&[0xff]));
         let error = TestFilter::new()
-            .with_name_substrings_from_env_var("BROWSER_TEST_FILTER_INVALID")
+            .with_name_substrings_from_env_var("BROWSER_TEST_NAME_INVALID")
             .unwrap_err();
-        assert_eq!(error.name, "BROWSER_TEST_FILTER_INVALID");
+        assert_eq!(error.name, "BROWSER_TEST_NAME_INVALID");
     }
 }

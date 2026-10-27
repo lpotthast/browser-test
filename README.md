@@ -190,7 +190,7 @@ all failures are reported together.
 
 To run only some of your tests, select them with a [`TestFilter`], by name or by tag. Tag a test with
 `#[browser_test(tags = ["button"])]`, or return its tags from `BrowserTest::tags`. Tags don't change how tests run, and
-are independent of the suites they run in. `TestFilter::from_env()` reads the selection from `BROWSER_TEST_FILTER` and
+are independent of the suites they run in. `TestFilter::from_env()` reads the selection from `BROWSER_TEST_NAME` and
 `BROWSER_TEST_TAG`. The runner runs every test it is given, so apply the filter with `TestSuite::filter`.
 
 ## Configuring the Runner
@@ -260,7 +260,7 @@ BROWSER_TEST_VISIBLE=1 BROWSER_TEST_PAUSE=1 BROWSER_TEST_DRIVER_OUTPUT=1 cargo t
 | `BROWSER_TEST_DRIVER_OUTPUT_TAIL_LINES` | `DriverOutput::from_env()` | Output lines to keep (default 200).           |
 | `BROWSER_TEST_PARALLELISM`              | `Parallelism::from_env()`  | Number of tests to run at the same time.      |
 | `BROWSER_TEST_SESSION_REUSE`            | `SessionReuse::from_env()` | Turn session reuse on or off.                 |
-| `BROWSER_TEST_FILTER`                   | `TestFilter::from_env()`   | Test name substrings, comma-separated.        |
+| `BROWSER_TEST_NAME`                     | `TestFilter::from_env()`   | Test name substrings, comma-separated.        |
 | `BROWSER_TEST_TAG`                      | `TestFilter::from_env()`   | Exact test tags, comma-separated.             |
 
 Boolean variables accept `0`/`1`, `false`/`true`, `no`/`yes`, `off`/`on` and `disabled`/`enabled`, regardless of case.
@@ -381,9 +381,9 @@ cargo run --manifest-path examples/minimal/Cargo.toml
 cargo run --manifest-path examples/advanced/Cargo.toml
 ```
 
-Both open Wikipedia in a visible browser. The advanced example adds a parallel suite, test tags and filters, timed steps,
-the run summary, tracing spans, a custom error type for tests, explicit timeouts, driver output capture and the pause
-prompt.
+Both open Wikipedia in a visible browser. The advanced example adds a parallel suite, test tags and filters, timed
+steps, the run summary, tracing spans, a custom error type for tests, explicit timeouts, driver output capture and the
+pause prompt.
 
 ## Leptos Projects
 

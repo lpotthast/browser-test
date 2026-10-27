@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BROWSER_TEST_TAG`, and `filter_groups` with a `TestFilter` selecting tags. `#[browser_test]` rejects tags that
   `BROWSER_TEST_TAG` can't select: empty ones, ones containing commas or starting or ending with whitespace, and
   duplicates. A test wrapping another one should forward `BrowserTest::tags` as well.
+- **Breaking:** `TestFilter::from_env` reads name substrings from `BROWSER_TEST_NAME` instead of `BROWSER_TEST_FILTER`,
+  next to tags from `BROWSER_TEST_TAG`.
 - **Breaking:** `BrowserTest` and `BrowserTests` (now `TestSuite`) lost their `TestError` type parameter, so that tests
   of different error types can share a suite. `BrowserTest::run` returns a `Report`, into which a `Report<E>` converts
   with `?`. Replace `impl BrowserTest<Context, E>` with `impl BrowserTest<Context>` returning `Result<(), Report>`, and

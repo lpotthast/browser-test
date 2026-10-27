@@ -55,7 +55,7 @@ async fn main() -> Result<(), Report> {
     };
 
     // Four tests, two at a time: later tests run in a spare session or in the reset session of an
-    // earlier test. Set e.g. `BROWSER_TEST_TAG=smoke` or `BROWSER_TEST_FILTER=edition` to run only
+    // earlier test. Set e.g. `BROWSER_TEST_TAG=smoke` or `BROWSER_TEST_NAME=edition` to run only
     // some of them.
     let tests = TestSuite::parallel(
         Parallelism::from_env()
