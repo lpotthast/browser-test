@@ -7,11 +7,16 @@
 //!
 //! ```text
 //! <ChromeProfilesDir>/
-//!     run-<pid>-<nanos>-<n>/    one per run, removed when the run ends
-//!         run.lock              locked while the run lives
-//!         session-0/            one per session, removed when the session ends
+//!     run-<pid>-<nanos>-<n>.lock    locked while the run lives, removed after its directory
+//!     run-<pid>-<nanos>-<n>/        one per run, removed when the run ends
+//!         run.lock                  locked as well, for older versions of browser-test
+//!         session-0/                one per session, removed when the session ends
 //!         session-1/
 //! ```
+//!
+//! A run's lock is a sibling of its directory, as Windows cannot rename a directory holding an
+//! open file. Older versions of browser-test lock `run.lock` in the directory, and only look for
+//! that one, so a run locks it as well, once its directory is named.
 //!
 //! # Cleaning up after killed runs
 //!
@@ -19,9 +24,10 @@
 //! runs. Their locks tell them apart:
 //!
 //! - The operating system releases a lock when its process exits, however it exits. A run
-//!   directory whose lock nobody holds belongs to an ended run, and is removed.
-//! - A run directory without a lock file is removed as well. A run creates its lock file before
-//!   it names the directory `run-*`, and the file only goes away while the directory is removed.
+//!   directory whose locks nobody holds belongs to an ended run, and is removed with its lock
+//!   file.
+//! - A run directory without lock files is removed as well. A run creates its lock file before
+//!   it names the directory `run-*`, and the file only goes away after the directory is removed.
 //!   So such a directory is left over from an interrupted removal, or was recreated by a Chrome
 //!   that outlived its run.
 //! - A lock file that cannot be opened or locked counts as held, and its directory stays.
@@ -31,7 +37,8 @@
 //!
 //! A run's directory is named `.staging-*` until it holds its lock. One whose lock nobody holds is
 //! removed once it is older than [`STAGING_GRACE`]: its run was killed while it started, as a
-//! starting run locks its directory right away. Other entries are never removed.
+//! starting run locks its directory right away. So is a lock file without a directory, whose run
+//! was killed while it started or ended. Other entries are never removed.
 
 use std::{
     collections::BTreeSet,
@@ -67,6 +74,10 @@ const STAGING_DIR_PREFIX: &str = ".staging-";
 /// its lock file right after its directory, so this only spares runs starting at the moment.
 const STAGING_GRACE: Duration = Duration::from_secs(10 * 60);
 
+/// Suffix of a run's lock file, next to its directory: `run-<name>.lock`.
+const LOCK_FILE_SUFFIX: &str = ".lock";
+
+/// Name of the lock file in a run's directory, which older versions of browser-test look for.
 const LOCK_FILE_NAME: &str = "run.lock";
 
 const USER_DATA_DIR_SWITCH: &str = "user-data-dir";
@@ -188,10 +199,11 @@ impl ChromeProfilesDir {
 /// The directory of one run, holding the profiles of its sessions.
 #[derive(Debug)]
 pub(crate) struct RunProfiles {
-    // Fields drop in declaration order. The lock goes first, because Windows cannot remove a
-    // directory holding an open file.
-    lock: RunLock,
+    // Fields drop in declaration order. The lock in the directory goes first, because Windows
+    // cannot remove a directory holding an open file. The run's lock goes after the directory.
+    legacy_lock: RunLock,
     dir: OwnedDir,
+    lock: RunLock,
     next_session: AtomicUsize,
     // Last: a sweep may remove the directory once it is no longer registered.
     live: LiveRun,
@@ -221,14 +233,16 @@ impl RunProfiles {
 
         let name = Self::unique_name();
         let live = LiveRun::register(name.clone());
-        // The directory gets its run name only once it holds its lock, so that a concurrent sweep
-        // never sees it unlocked. Should a step fail, dropping `dir` removes it.
+        // The directory gets its run name only once the run holds its lock, so that a concurrent
+        // sweep never sees it unlocked. Should a step fail, dropping `dir` and `lock` removes them.
+        let lock = RunLock::acquire_new(lock_file(&base, &name))?;
         let mut dir = OwnedDir::create(base.join(format!("{STAGING_DIR_PREFIX}{name}")))?;
-        let lock = RunLock::acquire_new(&dir.path().join(LOCK_FILE_NAME))?;
         dir.rename(base.join(format!("{RUN_DIR_PREFIX}{name}")))?;
+        let legacy_lock = RunLock::acquire_new(dir.path().join(LOCK_FILE_NAME))?;
         Ok(Self {
-            lock,
+            legacy_lock,
             dir,
+            lock,
             next_session: AtomicUsize::new(0),
             live,
         })
@@ -261,22 +275,48 @@ impl RunProfiles {
                 continue;
             };
             // `file_type` does not follow symlinks.
-            if !entry.file_type().is_ok_and(|file_type| file_type.is_dir())
-                || LiveRun::is_alive(name)
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if file_type.is_file()
+                && !staging
+                && let Some(name) = name.strip_suffix(LOCK_FILE_SUFFIX)
             {
+                Self::remove_abandoned_lock_file(base, name, &path);
                 continue;
             }
-            let path = entry.path();
+            if !file_type.is_dir() || LiveRun::is_alive(name) {
+                continue;
+            }
             if staging && !Self::is_older_than(&path, STAGING_GRACE) {
                 continue;
             }
-            if !RunLock::is_held(&path.join(LOCK_FILE_NAME)) {
+            let lock = lock_file(base, name);
+            if !RunLock::is_held(&lock) && !RunLock::is_held(&path.join(LOCK_FILE_NAME)) {
                 tracing::debug!(
                     "Removing Chrome profiles of an ended run: {}",
                     path.display()
                 );
                 remove_dir(&path);
+                remove_file(&lock);
             }
+        }
+    }
+
+    /// Remove the lock file at `path` of the run `name` if it has no directory and nobody holds
+    /// it, once it is older than [`STAGING_GRACE`]: a starting run creates its directory right
+    /// after its lock file, and an ending run removes its lock file right after its directory.
+    fn remove_abandoned_lock_file(base: &Path, name: &str, path: &Path) {
+        let has_dir = [RUN_DIR_PREFIX, STAGING_DIR_PREFIX]
+            .iter()
+            .any(|prefix| base.join(format!("{prefix}{name}")).exists());
+        if !has_dir
+            && !LiveRun::is_alive(name)
+            && Self::is_older_than(path, STAGING_GRACE)
+            && !RunLock::is_held(path)
+        {
+            remove_file(path);
         }
     }
 
@@ -305,12 +345,22 @@ impl RunProfiles {
     /// Dropping removes it as well, blocking the thread. That only happens if the run ends early.
     pub(crate) async fn remove(self) {
         let Self {
-            lock, dir, live, ..
+            legacy_lock,
+            dir,
+            lock,
+            live,
+            ..
         } = self;
-        drop(lock);
+        drop(legacy_lock);
         dir.remove().await;
+        drop(lock);
         drop(live);
     }
+}
+
+/// The lock file of the run `name` in `base`, next to its directory.
+fn lock_file(base: &Path, name: &str) -> PathBuf {
+    base.join(format!("{RUN_DIR_PREFIX}{name}{LOCK_FILE_SUFFIX}"))
 }
 
 /// The profile of one session.
@@ -354,19 +404,26 @@ impl SessionProfile {
     }
 }
 
-/// An exclusive lock on a run's lock file. The operating system releases it when the process
-/// exits, however it exits.
+/// An exclusive lock on a run's lock file, which is removed when the lock is dropped. The
+/// operating system releases the lock when the process exits, however it exits.
 #[derive(Debug)]
 struct RunLock {
-    _file: File,
+    file: Option<File>,
+    path: PathBuf,
 }
 
 impl RunLock {
     /// Create the lock file at `path` and lock it.
-    fn acquire_new(path: &Path) -> io::Result<Self> {
-        let file = File::create_new(path)?;
-        file.try_lock()?;
-        Ok(Self { _file: file })
+    fn acquire_new(path: PathBuf) -> io::Result<Self> {
+        let file = File::create_new(&path)?;
+        let lock = Self {
+            file: Some(file),
+            path,
+        };
+        if let Some(file) = &lock.file {
+            file.try_lock()?;
+        }
+        Ok(lock)
     }
 
     /// Whether a process holds the lock on the lock file at `path`.
@@ -384,6 +441,14 @@ impl RunLock {
             Ok(()) => false,
             Err(TryLockError::WouldBlock | TryLockError::Error(_)) => true,
         }
+    }
+}
+
+impl Drop for RunLock {
+    fn drop(&mut self) {
+        // Closed first, as Windows cannot remove an open file.
+        drop(self.file.take());
+        remove_file(&self.path);
     }
 }
 
@@ -430,6 +495,18 @@ fn private_dir_builder() -> fs::DirBuilder {
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
     builder
+}
+
+/// Remove the file at `path`, logging failures.
+fn remove_file(path: &Path) {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => tracing::warn!(
+            "Failed to remove Chrome profiles lock file {}: {error}",
+            path.display()
+        ),
+    }
 }
 
 /// Remove `path` and everything in it, logging failures.
@@ -519,12 +596,63 @@ mod tests {
     fn a_starting_run_leaves_the_runs_of_its_process_alone() {
         let profiles_dir = TestProfilesDir::new("own-runs");
         let alive = profiles_dir.create_run();
-        // As if its lock were not seen as held, as on NFS for a probe of the same process.
-        fs::remove_file(alive.dir.path().join(LOCK_FILE_NAME)).expect("lock file should exist");
+        // As if its locks were not seen as held, as on NFS for a probe of the same process.
+        fs::remove_file(&alive.lock.path).expect("lock file should exist");
+        fs::remove_file(&alive.legacy_lock.path).expect("lock file should exist");
 
         let _next = profiles_dir.create_run();
 
         assert_that!(alive.dir.path()).is_a_directory();
+    }
+
+    #[test]
+    fn a_run_locks_a_file_next_to_its_directory_and_one_in_it() {
+        let profiles_dir = TestProfilesDir::new("lock-files");
+        let run = profiles_dir.create_run();
+        let dir_name = run
+            .dir
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("the directory has a name");
+
+        assert_that!(run.lock.path.clone())
+            .is_equal_to(profiles_dir.path().join(format!("{dir_name}.lock")));
+        assert_that!(RunLock::is_held(&run.lock.path)).is_true();
+        assert_that!(run.legacy_lock.path.clone()).is_equal_to(run.dir.path().join(LOCK_FILE_NAME));
+        assert_that!(RunLock::is_held(&run.legacy_lock.path)).is_true();
+    }
+
+    #[test]
+    fn a_starting_run_removes_old_lock_files_of_ended_runs() {
+        let profiles_dir = TestProfilesDir::new("lock-file-sweep");
+        let base = profiles_dir.path();
+        private_dir_builder()
+            .recursive(true)
+            .create(base)
+            .expect("dir should be created");
+        let lock_file_aged = |name: &str, age: Duration| {
+            let path = lock_file(base, name);
+            File::create(&path)
+                .and_then(|file| file.set_modified(SystemTime::now() - age))
+                .expect("lock file should be created");
+            path
+        };
+        // Killed while it started or ended.
+        let old = lock_file_aged("killed", 2 * STAGING_GRACE);
+        // Starting at the moment.
+        let young = lock_file_aged("starting", Duration::ZERO);
+        // Its directory is removed with it, if it belongs to an ended run.
+        let with_dir = lock_file_aged("with-dir", 2 * STAGING_GRACE);
+        fs::create_dir(base.join(format!("{RUN_DIR_PREFIX}with-dir")))
+            .expect("dir should be created");
+
+        let _next = profiles_dir.create_run();
+
+        assert_that!(old).does_not_exist();
+        assert_that!(young).is_a_file();
+        assert_that!(with_dir).does_not_exist();
+        assert_that!(base.join(format!("{RUN_DIR_PREFIX}with-dir"))).does_not_exist();
     }
 
     #[cfg(unix)]
@@ -574,7 +702,8 @@ mod tests {
         assert_that!(alive.dir.path()).is_a_directory();
         assert_that!(foreign).is_a_directory();
         assert_that!(staging).is_a_directory();
-        assert_that!(entry_count(base)).is_equal_to(4);
+        // The two live runs have a lock file each.
+        assert_that!(entry_count(base)).is_equal_to(6);
 
         drop(alive);
         drop(next);

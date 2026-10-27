@@ -1354,8 +1354,8 @@ async fn next_run_removes_the_chrome_profiles_of_a_killed_run() -> RunnerResult 
     let profiles_dir = child.profiles_dir();
 
     child.kill().await;
-    // The killed run could not clean up.
-    assert_that!(dir_entry_count(&profiles_dir)).is_equal_to(1);
+    // The killed run could not clean up its directory and lock file.
+    assert_that!(dir_entry_count(&profiles_dir)).is_equal_to(2);
 
     runner()
         .with_chrome_profiles_dir(&profiles_dir)

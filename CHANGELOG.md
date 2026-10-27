@@ -131,6 +131,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   report like one in the current tab, instead of its page being taken for frozen and closed. A frozen page that the
   browser still lists after closing it has its renderer crashed. A check of the pages that runs out of time still
   names the frozen pages it found, and the report no longer claims to know why a page didn't respond.
+- A run no longer renames the directory for the Chrome profiles of its sessions while it holds an open lock file in it,
+  which Windows may refuse. A run's lock file is now next to its directory, `run-<name>.lock`. The run also locks
+  `run.lock` in its directory, which older versions of browser-test look for when they clean up after killed runs.
 - `WebDriver` errors that thirtyfour raises without an HTTP status, e.g. for a window it can't find by name, no longer
   print `State:` within their message.
 
