@@ -53,6 +53,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RunTests` and `NoTestSelected`) are `#[non_exhaustive]`, so that they can gain fields without a breaking change.
   Match them with `..`, e.g. `BrowserTestError::RunTests { failed_tests, .. }`. They can no longer be constructed
   outside of `browser-test`.
+- **Breaking:** `ProgressWarnings::with_test_running`, `with_session` and `with_slow_step` take a `Duration`, like
+  the setters of `Timeouts`, and the new `without_test_running`, `without_session` and `without_slow_step` disable a
+  warning. Replace `with_session(Some(d))` with `with_session(d)`, and `with_session(None)` with `without_session()`.
+- **Breaking:** `DriverOutput::tail_lines(n)` became `DriverOutput::enabled().with_tail_lines(n)`, and
+  `DriverOutput::tail_line_count` became `tail_lines`, so that the getter is named like its setter. `enabled()` keeps
+  200 lines, like `BROWSER_TEST_DRIVER_OUTPUT=1`, and turns on capture like `Pause::enabled()` and
+  `SessionReuse::enabled()` do.
 - **Breaking:** `BrowserTestRunReport` became `RunReport` and `BrowserTestRecord` became `TestRecord`, in line with
   `SuiteRecord`, `TestOutcome` and `RunReportConsumer`. `StepStats::count` is a `usize`, like every other count of the
   report.

@@ -643,7 +643,7 @@ impl BrowserTestRunner {
 
     fn driver_output_capture_for_run(&self) -> Option<DriverOutputCapture> {
         self.driver_output
-            .tail_line_count()
+            .tail_lines()
             .map(DriverOutputCapture::new)
     }
 }
@@ -787,7 +787,7 @@ mod tests {
     #[test]
     fn driver_output_creates_a_fresh_capture_per_run() {
         let runner = BrowserTestRunner::new(Cancellation::disabled())
-            .with_driver_output(DriverOutput::tail_lines(1));
+            .with_driver_output(DriverOutput::enabled().with_tail_lines(1));
 
         let first = runner
             .driver_output_capture_for_run()

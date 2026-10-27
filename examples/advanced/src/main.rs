@@ -109,7 +109,7 @@ async fn main() -> Result<(), Report> {
         .with_driver_output(
             DriverOutput::from_env()
                 .context("Reading the driver output setting")?
-                .unwrap_or(DriverOutput::tail_lines(100)),
+                .unwrap_or(DriverOutput::enabled().with_tail_lines(100)),
         )
         .with_session_reuse(
             SessionReuse::from_env()
@@ -127,9 +127,9 @@ async fn main() -> Result<(), Report> {
         })
         .with_progress_warnings(
             ProgressWarnings::default()
-                .with_test_running(Some(Duration::from_secs(20)))
-                .with_session(Some(Duration::from_secs(10)))
-                .with_slow_step(Some(Duration::from_secs(3))),
+                .with_test_running(Duration::from_secs(20))
+                .with_session(Duration::from_secs(10))
+                .with_slow_step(Duration::from_secs(3)),
         )
         .with_report_consumer(StderrSummary)
         .with_report_consumer(|report: &RunReport| {

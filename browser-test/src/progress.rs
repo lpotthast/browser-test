@@ -13,7 +13,7 @@ use crate::{report::FormatDuration, step::DEFAULT_SLOW_STEP};
 /// Slow progress often hints at a slowed-down system (e.g. a busy CI machine) or at a test waiting
 /// for something that never happens. Warnings are logged through `tracing` at `warn` level.
 ///
-/// Every threshold is optional: `None` disables its warnings.
+/// Every warning can be disabled on its own, with the `without_*` methods.
 ///
 /// # Examples
 ///
@@ -24,8 +24,8 @@ use crate::{report::FormatDuration, step::DEFAULT_SLOW_STEP};
 ///
 /// let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals()).with_progress_warnings(
 ///     ProgressWarnings::default()
-///         .with_test_running(Some(Duration::from_secs(60)))
-///         .with_slow_step(None),
+///         .with_test_running(Duration::from_secs(60))
+///         .without_slow_step(),
 /// );
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -59,42 +59,63 @@ impl ProgressWarnings {
     }
 
     /// Warn when a test body is still running after `threshold`, and again every time
-    /// `threshold` passes. `None` disables these warnings. Defaults to 30 seconds.
+    /// `threshold` passes. Defaults to 30 seconds.
     #[must_use]
-    pub const fn with_test_running(mut self, threshold: Option<Duration>) -> Self {
-        self.test_running = threshold;
+    pub const fn with_test_running(mut self, threshold: Duration) -> Self {
+        self.test_running = Some(threshold);
         self
     }
 
-    /// Warn when creating, resetting or quitting a session takes longer than `threshold`. `None`
-    /// disables these warnings. Defaults to 5 seconds.
+    /// Never warn about test bodies that are still running.
     #[must_use]
-    pub const fn with_session(mut self, threshold: Option<Duration>) -> Self {
-        self.session = threshold;
+    pub const fn without_test_running(mut self) -> Self {
+        self.test_running = None;
         self
     }
 
-    /// Warn when a [`crate::Step`] takes longer than `threshold`. `None` disables these warnings.
-    /// Defaults to 2 seconds.
+    /// Warn when creating, resetting or quitting a session takes longer than `threshold`.
+    /// Defaults to 5 seconds.
     #[must_use]
-    pub const fn with_slow_step(mut self, threshold: Option<Duration>) -> Self {
-        self.slow_step = threshold;
+    pub const fn with_session(mut self, threshold: Duration) -> Self {
+        self.session = Some(threshold);
         self
     }
 
-    /// Threshold for test bodies that are still running.
+    /// Never warn about slow sessions.
+    #[must_use]
+    pub const fn without_session(mut self) -> Self {
+        self.session = None;
+        self
+    }
+
+    /// Warn when a [`crate::Step`] takes longer than `threshold`. Defaults to 2 seconds.
+    #[must_use]
+    pub const fn with_slow_step(mut self, threshold: Duration) -> Self {
+        self.slow_step = Some(threshold);
+        self
+    }
+
+    /// Never warn about slow [`crate::Step`]s.
+    #[must_use]
+    pub const fn without_slow_step(mut self) -> Self {
+        self.slow_step = None;
+        self
+    }
+
+    /// Threshold for test bodies that are still running, `None` if these warnings are disabled.
     #[must_use]
     pub const fn test_running(self) -> Option<Duration> {
         self.test_running
     }
 
-    /// Threshold for creating, resetting and quitting sessions.
+    /// Threshold for creating, resetting and quitting sessions, `None` if these warnings are
+    /// disabled.
     #[must_use]
     pub const fn session(self) -> Option<Duration> {
         self.session
     }
 
-    /// Threshold for [`crate::Step`]s.
+    /// Threshold for [`crate::Step`]s, `None` if these warnings are disabled.
     #[must_use]
     pub const fn slow_step(self) -> Option<Duration> {
         self.slow_step
@@ -245,13 +266,20 @@ mod tests {
     #[test]
     fn disabled_never_ticks() {
         assert_that!(ProgressWarnings::disabled().tick()).is_none();
+        assert_that!(
+            ProgressWarnings::default()
+                .without_test_running()
+                .without_session()
+                .without_slow_step()
+        )
+        .is_equal_to(ProgressWarnings::disabled());
     }
 
     #[test]
     fn tick_follows_the_smallest_threshold() {
         let warnings = ProgressWarnings::default()
-            .with_test_running(Some(Duration::from_millis(400)))
-            .with_session(None);
+            .with_test_running(Duration::from_millis(400))
+            .without_session();
 
         assert_that!(warnings.tick()).is_equal_to(Some(Duration::from_millis(100)));
     }

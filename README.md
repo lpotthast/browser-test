@@ -264,7 +264,7 @@ let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals())
     .with_time_limit(Duration::from_secs(300))
     .with_progress_warnings(ProgressWarnings::default())
     .with_pause(Pause::disabled())
-    .with_driver_output(DriverOutput::tail_lines(200))
+    .with_driver_output(DriverOutput::enabled().with_tail_lines(200))
     .with_failure_report_hooks(true)
     // Which tests run.
     .with_filter(TestFilter::new().with_tag("^smoke$"))
