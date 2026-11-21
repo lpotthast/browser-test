@@ -6,8 +6,8 @@ mod description;
 mod signature;
 
 use arguments::Arguments;
-use heck::ToUpperCamelCase;
-use manyhow::{ErrorMessage, bail, ensure, error_message};
+use heck::{ToSnakeCase as _, ToUpperCamelCase as _};
+use manyhow::{ErrorMessage, bail, ensure};
 use proc_macro2::{Group, Ident, Span, TokenStream, TokenTree};
 use quote::{ToTokens as _, format_ident, quote, quote_spanned};
 use signature::{Inputs, TestSignature};
@@ -108,8 +108,9 @@ fn expand_test(
         inputs,
         input_spans,
     } = TestSignature::parse(&function.sig)?;
-    let function_name = function.sig.ident.unraw().to_string();
-    let name = struct_name(&function.sig.ident, &function_name)?;
+    let (name, function_name) = test_names(&function.sig.ident)?;
+    function.sig.ident = function_name;
+    let struct_name = name.unraw().to_string();
     // Only a test with tags has tags of its own.
     let tags = args.tags.filter(|tags| !tags.is_empty()).map(|tags| {
         quote! {
@@ -133,7 +134,7 @@ fn expand_test(
     });
     let test_name = args.name.map_or_else(
         // Qualified, as the caller's module may define macros of these names.
-        || quote!(::core::concat!(::core::module_path!(), "::", #function_name)),
+        || quote!(::core::concat!(::core::module_path!(), "::", #struct_name)),
         |name| quote!(#name),
     );
     let attributes = StructAttributes::take(&mut function);
@@ -173,6 +174,8 @@ fn expand_test(
     Ok(quote! {
         #test_struct
 
+        // Only the struct, which runs the function, warns of a test that is never registered.
+        #[allow(dead_code)]
         #function
 
         // `run` returns the function's future without an `async` block of its own, only wrapped in
@@ -210,10 +213,18 @@ fn expand_dummy(mut function: ItemFn, crate_path: Option<&TokenStream>) -> Token
     if function.sig.receiver().is_some() {
         return function.into_token_stream();
     }
-    let name = struct_name(&function.sig.ident, &function.sig.ident.unraw().to_string()).ok();
+    // A function not named in `PascalCase` keeps its name, and gets the struct the error suggests,
+    // so that registering it reports no error of its own.
+    let name = match test_names(&function.sig.ident) {
+        Ok((name, function_name)) => {
+            function.sig.ident = function_name;
+            Some(name)
+        }
+        Err(_) => pascal_case(&function.sig.ident).filter(|name| *name != function.sig.ident),
+    };
     let attributes = StructAttributes::take(&mut function);
     let function = quote! {
-        #[allow(dead_code)]
+        #[allow(dead_code, non_snake_case)]
         #function
     };
     let Some(name) = name else {
@@ -294,10 +305,9 @@ impl StructAttributes {
             lints,
             visibility,
         } = self;
-        quote! {
-            #(#docs)*
-            #(#cfgs)*
-            #(#lints)*
+        // Spanned at the function's name, which the struct's name keeps, so that going to the
+        // struct's definition leads to the function.
+        let declaration = quote_spanned! {name.span()=>
             #[derive(
                 ::std::fmt::Debug,
                 ::std::clone::Clone,
@@ -305,13 +315,19 @@ impl StructAttributes {
                 ::std::default::Default,
             )]
             #visibility struct #name;
+        };
+        quote! {
+            #(#docs)*
+            #(#cfgs)*
+            #(#lints)*
+            #declaration
         }
     }
 }
 
 /// Takes the struct's lint attributes from `attrs`: copies of the `#[allow]`s, which are harmless
-/// where nothing triggers them, and the `missing_docs` lints of the `#[expect]`s, which only the
-/// struct, public unlike the function, can fulfill.
+/// where nothing triggers them, and the `missing_docs` and `dead_code` lints of the `#[expect]`s,
+/// which only the struct can fulfill: it is public unlike the function, and the one never used.
 fn take_lints(attrs: &mut Vec<Attribute>) -> Vec<Attribute> {
     let mut lints = Vec::new();
     attrs.retain_mut(|attr| {
@@ -332,10 +348,11 @@ fn take_lints(attrs: &mut Vec<Attribute>) -> Vec<Attribute> {
         let (reason, entries): (Vec<_>, Vec<_>) = entries.into_iter().partition(
             |entry| matches!(entry, Meta::NameValue(entry) if entry.path.is_ident("reason")),
         );
-        let (missing_docs, others): (Vec<_>, Vec<_>) = entries
-            .into_iter()
-            .partition(|entry| matches!(entry, Meta::Path(path) if path.is_ident("missing_docs")));
-        if missing_docs.is_empty() {
+        let (struct_lints, others): (Vec<_>, Vec<_>) = entries.into_iter().partition(|entry| {
+            matches!(entry, Meta::Path(path)
+                    if path.is_ident("missing_docs") || path.is_ident("dead_code"))
+        });
+        if struct_lints.is_empty() {
             return true;
         }
         // The attribute, with the lints `entries` and its reason.
@@ -346,7 +363,7 @@ fn take_lints(attrs: &mut Vec<Attribute>) -> Vec<Attribute> {
             }
             attr
         };
-        lints.push(relisted(&missing_docs));
+        lints.push(relisted(&struct_lints));
         if others.is_empty() {
             return false;
         }
@@ -386,24 +403,58 @@ fn crate_path() -> manyhow::Result<TokenStream> {
     }
 }
 
-/// The `PascalCase` name of the test's struct, spanned at the function's name.
-fn struct_name(function: &Ident, function_name: &str) -> manyhow::Result<Ident> {
-    let struct_name = function_name.to_upper_camel_case();
+/// The names of the test's struct and function: `function`, which must be named in `PascalCase`,
+/// and its `snake_case` form, spanned at it.
+fn test_names(function: &Ident) -> manyhow::Result<(Ident, Ident)> {
+    let name = function.unraw().to_string();
+    if !name.starts_with(char::is_uppercase) {
+        let message = "browser tests are named in PascalCase, like the struct they define";
+        match pascal_case(function) {
+            Some(suggestion) => bail!(
+                function,
+                "{message}";
+                help = "rename the function to `{suggestion}`",
+            ),
+            None => bail!(function, "{message}"),
+        }
+    }
     ensure!(
-        !RESERVED_NAMES.contains(&struct_name.as_str()),
+        !RESERVED_NAMES.contains(&name.as_str()),
         function,
-        "a browser test named `{function_name}` would define `struct {struct_name};`, shadowing \
-         the prelude's `{struct_name}`";
+        "a browser test named `{name}` would define `struct {name};`, shadowing the prelude's \
+         `{name}`";
         help = "rename the function, and keep the test's name with `#[browser_test(name = \"...\")]`",
     );
-    let mut name = syn::parse_str::<Ident>(&struct_name).map_err(|_| {
-        error_message!(
-            function,
-            "function name must produce a valid PascalCase struct name"
-        )
-    })?;
+    let function_name = name.to_snake_case();
+    // Keywords are raw identifiers, except for those that can't be.
+    if syn::parse_str::<Ident>(&function_name).is_ok() {
+        return Ok((
+            function.clone(),
+            Ident::new(&function_name, function.span()),
+        ));
+    }
+    ensure!(
+        !["crate", "self", "super"].contains(&function_name.as_str()),
+        function,
+        "a browser test named `{name}` would define `fn {function_name}`, a keyword";
+        help = "rename the function, and keep the test's name with `#[browser_test(name = \"...\")]`",
+    );
+    Ok((
+        function.clone(),
+        Ident::new_raw(&function_name, function.span()),
+    ))
+}
+
+/// `function`'s name in `PascalCase`, spanned at it, unless that is no valid name for a test's
+/// struct.
+fn pascal_case(function: &Ident) -> Option<Ident> {
+    let name = function.unraw().to_string().to_upper_camel_case();
+    if RESERVED_NAMES.contains(&name.as_str()) {
+        return None;
+    }
+    let mut name = syn::parse_str::<Ident>(&name).ok()?;
     name.set_span(function.span());
-    Ok(name)
+    Some(name)
 }
 
 #[cfg(test)]
@@ -414,70 +465,82 @@ mod tests {
     use quote::ToTokens as _;
     use syn::{Attribute, parse_quote};
 
-    use super::{Arguments, crate_path, expand_test, take_lints};
+    use super::{Arguments, crate_path, expand_test, take_lints, test_names};
 
     #[test]
     fn invalid_signatures_explain_the_unsupported_part() {
         for (source, message) in [
             (
-                "fn test(_: &()) -> Result<(), Report> { Ok(()) }",
+                "fn Test(_: &()) -> Result<(), Report> { Ok(()) }",
                 "browser tests must be async functions",
             ),
             (
-                "async unsafe fn test() -> Result<(), Report> { Ok(()) }",
+                "async unsafe fn Test() -> Result<(), Report> { Ok(()) }",
                 "browser tests must be safe Rust functions",
             ),
             (
-                "async fn test<T>(_: &T) -> Result<(), Report> { Ok(()) }",
+                "async fn Test<T>(_: &T) -> Result<(), Report> { Ok(()) }",
                 "browser tests cannot have type or const parameters",
             ),
             (
-                "async fn test(_: &(), _: &(), _: &()) -> Result<(), Report> { Ok(()) }",
+                "async fn Test(_: &(), _: &(), _: &()) -> Result<(), Report> { Ok(()) }",
                 "expected no arguments, &Context, or &WebDriver and &Context",
             ),
             (
-                "async fn test(_: &mut ()) -> Result<(), Report> { Ok(()) }",
+                "async fn Test(_: &mut ()) -> Result<(), Report> { Ok(()) }",
                 "browser test arguments must be shared references",
             ),
             (
-                "async fn test(_: ()) -> Result<(), Report> { Ok(()) }",
+                "async fn Test(_: ()) -> Result<(), Report> { Ok(()) }",
                 "browser test arguments must be shared references",
             ),
             (
-                "async fn test(&self) -> Result<(), Report> { Ok(()) }",
+                "async fn Test(&self) -> Result<(), Report> { Ok(()) }",
                 "browser tests must be free functions",
             ),
             (
-                "async fn test(driver: &thirtyfour::WebDriver) -> Result<(), Report> { Ok(()) }",
+                "async fn Test(driver: &thirtyfour::WebDriver) -> Result<(), Report> { Ok(()) }",
                 "a single argument is the run's context, not the session's driver",
             ),
             (
-                "async fn test(context: &str, driver: &WebDriver) -> Result<(), Report> { Ok(()) }",
+                "async fn Test(context: &str, driver: &WebDriver) -> Result<(), Report> { Ok(()) }",
                 "the second argument is the run's context, not the session's driver",
             ),
             (
-                "async fn test() {}",
+                "async fn Test() {}",
                 "browser tests must return Result<(), Report>",
             ),
             (
-                "async fn none() -> Result<(), Report> { Ok(()) }",
+                "async fn None() -> Result<(), Report> { Ok(()) }",
                 "shadowing the prelude's `None`",
             ),
             (
-                "async fn r#ok() -> Result<(), Report> { Ok(()) }",
+                "async fn r#Ok() -> Result<(), Report> { Ok(()) }",
                 "shadowing the prelude's `Ok`",
             ),
             (
-                "async fn result() -> Result<(), Report> { Ok(()) }",
+                "async fn Result() -> Result<(), Report> { Ok(()) }",
                 "shadowing the prelude's `Result`",
             ),
             (
-                "async fn copy() -> Result<(), Report> { Ok(()) }",
-                "shadowing the prelude's `Copy`",
+                "async fn page_title() -> Result<(), Report> { Ok(()) }",
+                "browser tests are named in PascalCase, like the struct they define",
+            ),
+            (
+                "async fn page_title() -> Result<(), Report> { Ok(()) }",
+                "rename the function to `PageTitle`",
+            ),
+            (
+                "async fn result() -> Result<(), Report> { Ok(()) }",
+                "browser tests are named in PascalCase",
             ),
             (
                 "async fn __() -> Result<(), Report> { Ok(()) }",
-                "function name must produce a valid PascalCase struct name",
+                "browser tests are named in PascalCase",
+            ),
+            (
+                "async fn Crate() -> Result<(), Report> { Ok(()) }",
+                "would define `fn crate`, a keyword",
             ),
         ] {
             let function = syn::parse_str(source).unwrap();
@@ -489,11 +552,27 @@ mod tests {
     }
 
     #[test]
-    fn struct_lints_are_allows_and_expected_missing_docs() {
+    fn tests_are_structs_of_the_functions_name_running_its_snake_case_form() {
+        for (source, struct_name, function_name) in [
+            ("PageTitle", "PageTitle", "page_title"),
+            ("r#Type", "r#Type", "r#type"),
+            ("Loop", "Loop", "r#loop"),
+            ("HTTPServer2", "HTTPServer2", "http_server2"),
+        ] {
+            let function = syn::parse_str(source).unwrap();
+            let (name, function) = test_names(&function).unwrap();
+            assert_that!(name.to_string()).is_equal_to(struct_name);
+            assert_that!(function.to_string()).is_equal_to(function_name);
+        }
+    }
+
+    #[test]
+    fn struct_lints_are_allows_and_expected_missing_docs_and_dead_code() {
         let mut attrs: Vec<Attribute> = vec![
             parse_quote!(#[allow(dead_code)]),
             parse_quote!(#[expect(missing_docs, unused_variables, reason = "generated")]),
             parse_quote!(#[expect(missing_docs)]),
+            parse_quote!(#[expect(dead_code, unused_mut)]),
             parse_quote!(#[expect(unused_mut)]),
             parse_quote!(#[inline]),
         ];
@@ -508,10 +587,12 @@ mod tests {
             "# [allow (dead_code)]",
             "# [expect (missing_docs , reason = \"generated\")]",
             "# [expect (missing_docs ,)]",
+            "# [expect (dead_code ,)]",
         ]);
         assert_that!(tokens(&attrs)).contains_exactly([
             "# [allow (dead_code)]",
             "# [expect (unused_variables , reason = \"generated\")]",
+            "# [expect (unused_mut ,)]",
             "# [expect (unused_mut)]",
             "# [inline]",
         ]);

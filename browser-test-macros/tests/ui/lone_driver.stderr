@@ -2,7 +2,7 @@ error: a single argument is the run's context, not the session's driver
 
          = help: take the driver and the context: `(driver: &WebDriver, context: &Context)`, with `&()` for a run without context
 
- --> tests/ui/lone_driver.rs:4:22
+ --> tests/ui/lone_driver.rs:4:21
   |
-4 | async fn driver_only(_driver: &browser_test::thirtyfour::WebDriver) -> Result<(), rootcause::Report> {
-  |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+4 | async fn DriverOnly(_driver: &browser_test::thirtyfour::WebDriver) -> Result<(), rootcause::Report> {
+  |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

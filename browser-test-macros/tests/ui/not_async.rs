@@ -1,7 +1,7 @@
 use browser_test::browser_test;
 
 #[browser_test]
-fn synchronous(_context: &()) -> Result<(), rootcause::Report> {
+fn Synchronous(_context: &()) -> Result<(), rootcause::Report> {
     Ok(())
 }
 

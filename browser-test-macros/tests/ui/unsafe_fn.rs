@@ -1,7 +1,7 @@
 use browser_test::browser_test;
 
 #[browser_test]
-async unsafe fn unsafe_test(_context: &()) -> Result<(), rootcause::Report> {
+async unsafe fn UnsafeTest(_context: &()) -> Result<(), rootcause::Report> {
     Ok(())
 }
 

@@ -1,7 +1,7 @@
 use browser_test::browser_test;
 
 #[browser_test]
-async extern "C" fn extern_test(_context: &()) -> Result<(), rootcause::Report> {
+async extern "C" fn ExternTest(_context: &()) -> Result<(), rootcause::Report> {
     Ok(())
 }
 

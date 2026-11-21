@@ -1,7 +1,7 @@
 use browser_test::browser_test;
 
 #[browser_test]
-async fn returns_string_errors() -> Result<(), String> {
+async fn ReturnsStringErrors() -> Result<(), String> {
     Ok(())
 }
 

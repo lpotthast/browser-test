@@ -19,19 +19,19 @@ use proc_macro2::TokenStream;
 ///
 /// /// The home page greets the visitor.
 /// #[browser_test]
-/// async fn shows_greeting(base_url: &str) -> Result<(), Report> {
+/// async fn ShowsGreeting(base_url: &str) -> Result<(), Report> {
 ///     // Navigate and assert through a page object or helpers taking `base_url`.
 ///     Ok(())
 /// }
 ///
 /// /// Opens the page itself, through the session's `WebDriver`.
 /// #[browser_test(name = "navigation::home", tags = ["smoke"], time_limit = Duration::from_secs(10))]
-/// async fn opens_home_page(driver: &WebDriver, base_url: &str) -> Result<(), Report> {
+/// async fn OpensHomePage(driver: &WebDriver, base_url: &str) -> Result<(), Report> {
 ///     driver.goto(base_url).await?;
 ///     Ok(())
 /// }
 ///
-/// assert_that!(ShowsGreeting.name()).ends_with("::shows_greeting");
+/// assert_that!(ShowsGreeting.name()).ends_with("::ShowsGreeting");
 /// assert_that!(ShowsGreeting.description().as_deref())
 ///     .is_equal_to(Some("The home page greets the visitor."));
 /// assert_that!(OpensHomePage.name()).is_equal_to("navigation::home");
@@ -46,18 +46,22 @@ use proc_macro2::TokenStream;
 ///
 /// # The generated test
 ///
-/// `async fn shows_greeting` becomes `struct ShowsGreeting;`, a unit struct named in `PascalCase`
-/// with the function's visibility, its doc comments and its `#[cfg]`s. It derives `Debug`,
-/// `Clone`, `Copy` and `Default`. Register it with `TestSuite::with(ShowsGreeting)`. The
-/// function itself stays as the test's body, private to its module, under its own name (which
-/// failure reports and `#[tracing::instrument]` show), and all its other attributes (e.g.
-/// `#[allow]`, `#[expect]`, `#[tracing::instrument]`) stay on it. Its `#[allow]`s apply to the
-/// struct as well, and the `missing_docs` lints its `#[expect]`s list move to the struct, which
-/// only a public struct can trigger. `#[cfg_attr]`s are expanded before the attribute sees them,
-/// so e.g. `#[cfg_attr(.., doc = "...")]` documents the struct.
+/// A test is named like the struct it defines, in `PascalCase`, as are e.g. Leptos components:
+/// `async fn ShowsGreeting` becomes `struct ShowsGreeting;`, a unit struct with the function's
+/// name, visibility, doc comments and `#[cfg]`s. Going to the struct's definition, e.g. from
+/// `TestSuite::with(ShowsGreeting)`, which registers it, leads to the function. It derives
+/// `Debug`, `Clone`, `Copy` and `Default`. Functions not named in `PascalCase` (whose first
+/// character is not uppercase, e.g. `shows_greeting`) are rejected.
 ///
-/// - **Name**: `BrowserTest::name` returns the module-qualified function name
-///   (`module_path!()` and the function name, e.g. `my_tests::checkout::shows_greeting`), which
+/// The function itself stays as the test's body, private to its module, renamed to `snake_case`
+/// (`shows_greeting`, which failure reports and `#[tracing::instrument]` show), and all its other
+/// attributes (e.g. `#[allow]`, `#[expect]`, `#[tracing::instrument]`) stay on it. Its `#[allow]`s
+/// apply to the struct as well, and the `missing_docs` and `dead_code` lints its `#[expect]`s list
+/// move to the struct, which only the struct can trigger. `#[cfg_attr]`s are expanded before the
+/// attribute sees them, so e.g. `#[cfg_attr(.., doc = "...")]` documents the struct.
+///
+/// - **Name**: `BrowserTest::name` returns the module-qualified name of the test as written
+///   (`module_path!()` and the struct's name, e.g. `my_tests::checkout::ShowsGreeting`), which
 ///   `TestFilter` matches. `#[browser_test(name = "checkout::greeting")]` sets another one, e.g.
 ///   one that stays the same when the function moves to another module.
 /// - **Description**: `BrowserTest::description` returns the doc comments, as written, without the
@@ -95,12 +99,13 @@ use proc_macro2::TokenStream;
 /// `(driver: &WebDriver, context: &Context)`, with `&()` for a run without context. A second
 /// `&WebDriver` argument is rejected as well, as the driver comes first.
 ///
-/// A test never registered with `TestSuite` warns as an unused function (`dead_code`), unless
-/// its struct is public.
+/// A test never registered with `TestSuite` warns as a struct that is never constructed
+/// (`dead_code`), unless it is public.
 ///
-/// Functions whose struct would shadow a name of the standard prelude in the function's module are
-/// rejected, e.g. `result` (`Result`), `copy` (`Copy`) or `ok` (`Ok`). Rename them, and keep the
-/// test's name with `name = "..."`.
+/// Tests whose struct would shadow a name of the standard prelude in the function's module are
+/// rejected, e.g. `Result`, `Copy` or `Ok`, as are those whose function would be one of the
+/// keywords `crate`, `self` and `super`. Rename them, and keep the test's name with
+/// `name = "..."`. Other keywords become raw identifiers: `async fn Loop` runs `fn r#loop`.
 #[manyhow::manyhow]
 #[proc_macro_attribute]
 pub fn browser_test(

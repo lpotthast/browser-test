@@ -4,7 +4,7 @@ use browser_test::browser_test;
 use rootcause::Report;
 
 #[browser_test]
-async fn forgotten() -> Result<(), Report> {
+async fn Forgotten() -> Result<(), Report> {
     Ok(())
 }
 

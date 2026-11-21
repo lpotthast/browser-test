@@ -57,6 +57,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `#[browser_test]`, with `#[browser_test(name = "...")]` instead of `.named("...")`. Turn a closure, or a function
   that needs state of its own, into a type implementing `BrowserTest`. Rename a hand-written test by returning the
   name from `BrowserTest::name`.
+- **Breaking:** `#[browser_test]` functions are named like the struct they define, in `PascalCase`, like e.g. Leptos
+  components: `async fn PageTitle` defines `struct PageTitle;`, so that a test is registered under the name it is
+  written with, and going to the struct's definition leads to the function. The function is renamed to `snake_case`
+  (`page_title`), which backtraces and `#[tracing::instrument]` show. Functions not named in `PascalCase` are rejected,
+  with the name to use. Test names default to the module-qualified name as written, e.g. `checkout::PageTitle` instead
+  of `checkout::page_title`, like those of hand-written tests. Keep the previous name with
+  `#[browser_test(name = "checkout::page_title")]`, or update filters matching it.
+- `#[browser_test]` reports a test that is never registered as a struct that is never constructed, instead of an unused
+  function, and moves the `dead_code` lints of its `#[expect]`s to the struct.
 - **Breaking:** `BrowserTests` became `TestSuite`, so that it no longer reads like the `BrowserTest` trait, and
   `GroupRecord` became `SuiteRecord`. `BrowserTestRunReport::groups` became `RunReport::suites`, and the run summary
   lists them under `suites:`. `BrowserTests::filter_tests` was removed: select tests with a `TestFilter` instead.

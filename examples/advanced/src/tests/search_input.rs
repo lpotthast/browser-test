@@ -7,7 +7,7 @@ use crate::tests::{WikipediaTestError, goto, wait_for_visible};
 
 /// The search input is visible.
 #[browser_test]
-pub(crate) async fn search_input_is_visible(
+pub(crate) async fn SearchInputIsVisible(
     driver: &WebDriver,
     context: &Context,
 ) -> Result<(), Report<WikipediaTestError>> {

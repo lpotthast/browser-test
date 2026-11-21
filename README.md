@@ -94,7 +94,7 @@ struct Context {
 
 /// The page title names Wikipedia.
 #[browser_test]
-async fn page_title(driver: &WebDriver, context: &Context) -> Result<(), Report> {
+async fn PageTitle(driver: &WebDriver, context: &Context) -> Result<(), Report> {
     driver.goto(&context.base_url).await?;
 
     let title = driver.title().await?;
@@ -118,10 +118,10 @@ async fn main() -> Result<(), Report<BrowserTestError>> {
 }
 ```
 
-`#[browser_test]` turns `page_title` into a unit struct named `PageTitle` that implements `BrowserTest<Context>` (see
-[Writing Tests](#writing-tests)). You add it to a `TestSuite` and pass that to the runner together with the
-context. `run` returns an error if the runner itself fails, a test returns an error, panics or times out, or the
-run is cancelled. The error is a `Report<BrowserTestError>` with the details.
+`#[browser_test]` turns `PageTitle` into a unit struct of that name that implements `BrowserTest<Context>` (see
+[Writing Tests](#writing-tests)). You add it to a `TestSuite` and pass that to the runner together with the context.
+`run` returns an error if the runner itself fails, a test returns an error, panics or times out, or the run is
+cancelled. The error is a `Report<BrowserTestError>` with the details.
 
 The runner works without further settings. [Configuring the Runner](#configuring-the-runner) shows every option, and
 each one is documented on [`BrowserTestRunner`].
@@ -172,10 +172,12 @@ let _ = rustls::crypto::ring::default_provider().install_default();
 ## Writing Tests
 
 `#[browser_test]` is the easiest way to write a test. The function takes no arguments, the run's context
-(`&Context`), or the session's driver and the context (`&WebDriver, &Context`), and returns `Result<(), Report>`. The
-generated struct is named after the function in `PascalCase`. The test's name is the module-qualified function name,
-which `#[browser_test(name = "...")]` replaces, and the function's doc comments become the test's description. The
-[attribute's documentation][browser_test] lists every supported signature.
+(`&Context`), or the session's driver and the context (`&WebDriver, &Context`), and returns `Result<(), Report>`. Like
+the struct it becomes, and like e.g. Leptos components, the function is named in `PascalCase`, so that you register it
+under the name you wrote, and going to its definition leads to the function. The function itself is renamed to
+`snake_case` (`page_title`), which backtraces show. The test's name is the module-qualified name you wrote (e.g.
+`checkout::PageTitle`), which `#[browser_test(name = "...")]` replaces, and the function's doc comments become the
+test's description. The [attribute's documentation][browser_test] lists every supported signature.
 
 Implement the [`BrowserTest`] trait yourself for tests that take parameters, wrap other tests, or need their own
 timeouts or a browser no other test has used. `run` returns the test's body as a boxed future, and
@@ -235,7 +237,7 @@ and mark suites that must always run, e.g. checks of the whole run, `unfiltered(
 ```rust,no_run
 # use browser_test::rootcause::Report;
 # #[browser_test::browser_test]
-# async fn server_did_not_panic() -> Result<(), Report> { Ok(()) }
+# async fn ServerDidNotPanic() -> Result<(), Report> { Ok(()) }
 # fn component_tests() -> browser_test::TestSuite { browser_test::TestSuite::sequential() }
 # async fn run() -> Result<(), Report> {
 use browser_test::{BrowserTestRunner, Cancellation, TestFilter, TestSuite};

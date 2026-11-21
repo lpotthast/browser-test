@@ -10,7 +10,7 @@ struct Context {
 
 /// The page title names Wikipedia.
 #[browser_test]
-async fn page_title(driver: &WebDriver, context: &Context) -> Result<(), Report> {
+async fn PageTitle(driver: &WebDriver, context: &Context) -> Result<(), Report> {
     driver.goto(&context.base_url).await?;
 
     let title = driver.title().await?;

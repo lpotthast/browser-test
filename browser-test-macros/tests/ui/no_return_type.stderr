@@ -1,5 +1,5 @@
 error: browser tests must return Result<(), Report>
  --> tests/ui/no_return_type.rs:4:1
   |
-4 | async fn no_result(_context: &()) {}
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+4 | async fn NoResult(_context: &()) {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

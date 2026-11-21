@@ -436,7 +436,7 @@ async fn failure_reports_locate_errors_in_test_code() {
 
 /// Calls [`find_missing`] from a `#[browser_test]` function.
 #[browser_test]
-async fn missing_element(
+async fn MissingElement(
     driver: &WebDriver,
     context: &IntegrationContext,
 ) -> Result<(), Report<IntegrationTestError>> {
@@ -447,7 +447,7 @@ async fn missing_element(
     find_missing(driver).await
 }
 
-/// The test code of a `#[browser_test]` ends at its function, named as written.
+/// The test code of a `#[browser_test]` ends at its function, renamed to `snake_case`.
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn failure_reports_name_browser_test_functions() {

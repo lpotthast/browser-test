@@ -1,5 +1,5 @@
 error: browser tests must be safe Rust functions
  --> tests/ui/unsafe_fn.rs:4:1
   |
-4 | async unsafe fn unsafe_test(_context: &()) -> Result<(), rootcause::Report> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+4 | async unsafe fn UnsafeTest(_context: &()) -> Result<(), rootcause::Report> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

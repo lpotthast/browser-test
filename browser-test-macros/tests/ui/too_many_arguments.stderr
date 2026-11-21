@@ -1,5 +1,5 @@
 error: expected no arguments, &Context, or &WebDriver and &Context
  --> tests/ui/too_many_arguments.rs:4:16
   |
-4 | async fn three(_driver: &WebDriver, _context: &(), _extra: &()) -> Result<(), rootcause::Report> {
+4 | async fn Three(_driver: &WebDriver, _context: &(), _extra: &()) -> Result<(), rootcause::Report> {
   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
