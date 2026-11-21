@@ -2,9 +2,11 @@
 
 extern crate self as browser_test;
 
-pub use async_trait::async_trait;
 pub use browser_test_macros::browser_test;
-pub use chrome_for_testing_manager::{CancellationToken, Channel, ChromeBinary};
+pub use chrome_for_testing_manager::{
+    CancellationToken, Channel, ChromeBinary, Version, VersionRequest,
+};
+pub use rootcause;
 pub use thirtyfour;
 
 mod cancellation;
@@ -39,15 +41,14 @@ pub use filter::{InvalidPattern, TestFilter};
 pub use pause::Pause;
 pub use progress::ProgressWarnings;
 pub use report::{
-    BrowserTestRecord, BrowserTestRunReport, SessionPreparation, SessionTiming, StepStats,
-    SuiteRecord, TestOutcome,
+    RunReport, SessionPreparation, SessionTiming, StepStats, SuiteRecord, TestOutcome, TestRecord,
 };
 pub use report_consumer::{RunReportConsumer, StderrSummary, StdoutSummary, TracingSummary};
 pub use runner::{BrowserTestRunner, Visibility};
 pub use scheduler::{FailurePolicy, Parallelism};
 pub use session_reuse::{CachedData, KeptCaches, SessionReset, SessionReuse};
 pub use step::{Step, StepExt};
-pub use test_case::{BrowserTest, TestSuite};
+pub use test_case::{BrowserTest, TestFuture, TestSuite};
 pub use test_settings::TestSettings;
 pub use timeout::Timeouts;
 pub use wait::ElementQueryWait;
@@ -78,6 +79,9 @@ pub mod __private {
         fn into_dynamic(self) -> DynamicResult;
     }
 
+    // Not named in the error of another result, which would show rootcause's internal path to
+    // `Report`.
+    #[diagnostic::do_not_recommend]
     impl<E: ?Sized + 'static> TestResult for Result<(), Report<E>> {
         fn into_dynamic(self) -> DynamicResult {
             self.map_err(Report::into_dynamic)

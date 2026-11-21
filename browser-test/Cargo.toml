@@ -22,19 +22,22 @@ native-tls = ["chrome-for-testing-manager/native-tls"]
 # Enables `#[derive(Component)]` in the re-exported `thirtyfour`.
 component = ["thirtyfour/component"]
 
+# Implements `serde::Serialize` for the run report types, e.g. to write the report as JSON.
+serde = ["dep:serde"]
+
 [dependencies]
-async-trait = { version = "0.1.83", default-features = false }
 backtrace = { version = "0.3.76", default-features = false, features = ["std"] }
 browser-test-macros.workspace = true
 chrome-for-testing-manager = { version = "0.15.0", default-features = false, features = ["thirtyfour"] }
 futures-util = { version = "0.3.32", default-features = false, features = ["sink", "std"] }
+regex = { version = "1.13.1", default-features = false, features = ["perf", "std", "unicode"] }
 reqwest = { version = "0.13.5", default-features = false }
 rootcause.workspace = true
-regex = { version = "1.13.1", default-features = false, features = ["perf", "std", "unicode"] }
+serde = { version = "1.0.228", default-features = false, features = ["derive", "std"], optional = true }
 serde_json = { version = "1.0.145", default-features = false, features = ["std"] }
 thirtyfour = { version = "0.38.1", default-features = false, features = ["bidi", "cdp", "reqwest"] }
 thiserror = { version = "2.0.17", default-features = false, features = ["std"] }
-tokio = { version = "1.48.0", default-features = false, features = ["io-std", "io-util", "macros", "net", "rt", "signal", "sync", "time"] }
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "net", "rt", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect"] }
 tracing = { version = "0.1.41", default-features = false, features = ["std"] }
 url = { version = "2.5.8", default-features = false, features = ["std"] }
@@ -45,7 +48,7 @@ nix = { version = "0.31.3", default-features = false, features = ["user"] }
 [dev-dependencies]
 assertr = { workspace = true, features = ["rootcause"] }
 serial_test = { version = "4.0.1", default-features = false, features = ["async"] }
-tokio = { version = "1.52.3", default-features = false, features = ["macros", "net", "rt-multi-thread", "signal"] }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "test-util"] }
 
 [lints]
 workspace = true

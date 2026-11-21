@@ -2,7 +2,8 @@
 
 use manyhow::error_message;
 use syn::{
-    Expr, Ident, LitStr, Token, bracketed,
+    Expr, Ident, LitStr, Path, Token, bracketed,
+    ext::IdentExt as _,
     parse::{Parse, ParseStream},
     punctuated::Punctuated,
 };
@@ -16,21 +17,26 @@ pub(crate) struct Arguments {
     pub(super) tags: Option<Vec<LitStr>>,
     /// `time_limit = <expr>`: the test's time limit, a `std::time::Duration`.
     pub(super) time_limit: Option<Expr>,
+    /// `crate = <path>`: the path to `browser-test`, replacing the one found in `Cargo.toml`.
+    pub(super) crate_path: Option<Path>,
 }
 
 impl Parse for Arguments {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let mut args = Self::default();
         while !input.is_empty() {
-            let key: Ident = input.parse()?;
+            // `crate` is a keyword.
+            let key = Ident::parse_any(input)?;
             let duplicate = match key.to_string().as_str() {
                 "name" => args.name.is_some(),
                 "tags" => args.tags.is_some(),
                 "time_limit" => args.time_limit.is_some(),
+                "crate" => args.crate_path.is_some(),
                 _ => {
                     return Err(error_message!(
                         key,
-                        "expected `name = \"...\"`, `tags = [\"...\"]` or `time_limit = <Duration>`"
+                        "expected `name = \"...\"`, `tags = [\"...\"]`, `time_limit = <Duration>` \
+                         or `crate = <path>`"
                     )
                     .into());
                 }
@@ -63,8 +69,10 @@ impl Parse for Arguments {
                     return Err(error_message!(tag, "{problem}").into());
                 }
                 args.tags = Some(tags.into_iter().collect());
-            } else {
+            } else if key == "time_limit" {
                 args.time_limit = Some(input.parse()?);
+            } else {
+                args.crate_path = Some(input.parse()?);
             }
             if !input.is_empty() {
                 input.parse::<Token![,]>()?;
@@ -109,6 +117,14 @@ mod tests {
     }
 
     #[test]
+    fn crate_arguments_accept_paths() {
+        assert_that!(syn::parse_str::<Arguments>("").unwrap().crate_path).is_none();
+        let args = syn::parse_str::<Arguments>("crate = crate::reexports::browser_test").unwrap();
+        assert_that!(args.crate_path.unwrap().to_token_stream().to_string())
+            .is_equal_to("crate :: reexports :: browser_test");
+    }
+
+    #[test]
     fn name_arguments_accept_strings_and_reject_invalid_options() {
         assert_that!(syn::parse_str::<Arguments>("").unwrap().name).is_none();
         let args = syn::parse_str::<Arguments>("name = \"keyboard::events\",").unwrap();
@@ -116,7 +132,8 @@ mod tests {
         for (source, message) in [
             (
                 "path = \"/keyboard\"",
-                "expected `name = \"...\"`, `tags = [\"...\"]` or `time_limit = <Duration>`",
+                "expected `name = \"...\"`, `tags = [\"...\"]`, `time_limit = <Duration>` or \
+                 `crate = <path>`",
             ),
             (
                 "name = \"one\", name = \"two\"",
@@ -133,6 +150,8 @@ mod tests {
                 "time_limit = Duration::from_secs(1), time_limit = Duration::from_secs(2)",
                 "duplicate `time_limit` argument",
             ),
+            ("crate = \"browser_test\"", "expected identifier"),
+            ("crate = a, crate = b", "duplicate `crate` argument"),
         ] {
             assert_that!(syn::parse_str::<Arguments>(source).err())
                 .some()

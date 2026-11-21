@@ -1,0 +1,14 @@
+error: browser tests are named in PascalCase, like the struct they define
+
+         = help: rename the function to `PageTitle`
+
+ --> tests/ui/snake_case_name.rs:8:10
+  |
+8 | async fn page_title() -> Result<(), Report> {
+  |          ^^^^^^^^^^
+
+error: browser tests are named in PascalCase, like the struct they define
+  --> tests/ui/snake_case_name.rs:13:10
+   |
+13 | async fn __() -> Result<(), Report> {
+   |          ^^

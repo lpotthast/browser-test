@@ -1,0 +1,8 @@
+error: a browser test named `Crate` would define `fn crate`, a keyword
+
+         = help: rename the function, and keep the test's name with `#[browser_test(name = "...")]`
+
+ --> tests/ui/keyword_name.rs:4:10
+  |
+4 | async fn Crate() -> Result<(), rootcause::Report> {
+  |          ^^^^^

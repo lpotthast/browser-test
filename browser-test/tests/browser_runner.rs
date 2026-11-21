@@ -13,9 +13,9 @@ use std::{
 
 use assertr::prelude::*;
 use browser_test::{
-    BrowserTest, BrowserTestError, BrowserTestRunReport, BrowserTestRunner, Cancellation,
-    CancellationToken, FailurePolicy, Parallelism, StepExt, TestFilter, TestOutcome, TestSettings,
-    TestSuite, async_trait, browser_test,
+    BrowserTest, BrowserTestError, BrowserTestRunner, Cancellation, CancellationToken,
+    FailurePolicy, Parallelism, RunReport, StepExt, TestFilter, TestFuture, TestOutcome,
+    TestSettings, TestSuite, browser_test,
     thirtyfour::{By, ChromiumLikeCapabilities, WebDriver, prelude::ElementQueryable},
 };
 use rootcause::{Report, prelude::ResultExt};
@@ -30,6 +30,7 @@ const FIXTURE_PAGE_TITLE: &str = "browser-test fixture";
 
 /// Set for a child run (see [`ChildRun`]): the directory in which it keeps its profiles and
 /// signals that its test is running.
+#[cfg(unix)]
 const CHILD_RUN_DIR_ENV: &str = "BROWSER_TEST_CHILD_RUN_DIR";
 
 #[derive(Debug)]
@@ -70,6 +71,9 @@ enum IntegrationTestError {
     #[error("failed to open a dialog")]
     OpenDialog,
 
+    #[error("failed to switch to another window")]
+    SwitchWindow,
+
     #[error("failed to focus an element from script")]
     FocusElement,
 
@@ -85,34 +89,35 @@ struct PageTitleTest {
     started: Option<Arc<AtomicUsize>>,
 }
 
-#[async_trait]
 impl BrowserTest<IntegrationContext> for PageTitleTest {
     fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed(self.name.as_str())
     }
 
-    async fn run(&self, driver: &WebDriver, context: &IntegrationContext) -> Result<(), Report> {
-        if let Some(started) = &self.started {
-            started.fetch_add(1, Ordering::SeqCst);
-        }
+    fn run<'a>(&'a self, driver: &'a WebDriver, context: &'a IntegrationContext) -> TestFuture<'a> {
+        Box::pin(async move {
+            if let Some(started) = &self.started {
+                started.fetch_add(1, Ordering::SeqCst);
+            }
 
-        driver
-            .goto(context.page_url)
-            .await
-            .context(IntegrationTestError::OpenTestPage)?;
-        let title = driver
-            .title()
-            .await
-            .context(IntegrationTestError::ReadTitle)?;
+            driver
+                .goto(context.page_url)
+                .await
+                .context(IntegrationTestError::OpenTestPage)?;
+            let title = driver
+                .title()
+                .await
+                .context(IntegrationTestError::ReadTitle)?;
 
-        if title != context.expected_title {
-            rootcause::bail!(IntegrationTestError::UnexpectedTitle {
-                expected: context.expected_title,
-                actual: title,
-            });
-        }
+            if title != context.expected_title {
+                rootcause::bail!(IntegrationTestError::UnexpectedTitle {
+                    expected: context.expected_title,
+                    actual: title,
+                });
+            }
 
-        Ok(())
+            Ok(())
+        })
     }
 }
 
@@ -120,35 +125,36 @@ impl BrowserTest<IntegrationContext> for PageTitleTest {
 /// page has focus.
 struct FocusEventTest;
 
-#[async_trait]
 impl BrowserTest<IntegrationContext> for FocusEventTest {
     fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed("focus event")
     }
 
-    async fn run(&self, driver: &WebDriver, context: &IntegrationContext) -> Result<(), Report> {
-        driver
-            .goto(context.page_url)
-            .await
-            .context(IntegrationTestError::OpenTestPage)?;
-        let fired: bool = driver
-            .execute(
-                "const input = document.createElement('input');
-                 document.body.append(input);
-                 let fired = false;
-                 input.addEventListener('focus', () => fired = true);
-                 input.focus();
-                 return fired;",
-                vec![],
-            )
-            .await
-            .context(IntegrationTestError::FocusElement)?
-            .convert()
-            .context(IntegrationTestError::FocusElement)?;
-        if !fired {
-            rootcause::bail!(IntegrationTestError::NoFocusEvent);
-        }
-        Ok(())
+    fn run<'a>(&'a self, driver: &'a WebDriver, context: &'a IntegrationContext) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver
+                .goto(context.page_url)
+                .await
+                .context(IntegrationTestError::OpenTestPage)?;
+            let fired: bool = driver
+                .execute(
+                    "const input = document.createElement('input');
+                     document.body.append(input);
+                     let fired = false;
+                     input.addEventListener('focus', () => fired = true);
+                     input.focus();
+                     return fired;",
+                    vec![],
+                )
+                .await
+                .context(IntegrationTestError::FocusElement)?
+                .convert()
+                .context(IntegrationTestError::FocusElement)?;
+            if !fired {
+                rootcause::bail!(IntegrationTestError::NoFocusEvent);
+            }
+            Ok(())
+        })
     }
 }
 
@@ -168,34 +174,40 @@ async fn find_missing(driver: &WebDriver) -> Result<(), Report<IntegrationTestEr
     Ok(())
 }
 
-#[async_trait]
 impl BrowserTest<IntegrationContext> for MissingElementTest {
     fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed("missing element")
     }
 
-    async fn run(&self, driver: &WebDriver, context: &IntegrationContext) -> Result<(), Report> {
-        driver
-            .goto(context.page_url)
-            .step("goto")
-            .await
-            .context(IntegrationTestError::OpenTestPage)?;
-        Ok(find_missing(driver).await?)
+    fn run<'a>(&'a self, driver: &'a WebDriver, context: &'a IntegrationContext) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver
+                .goto(context.page_url)
+                .step("goto")
+                .await
+                .context(IntegrationTestError::OpenTestPage)?;
+            Ok(find_missing(driver).await?)
+        })
     }
 }
 
 /// Panics, as a failed assertion does.
 struct PanickingTest;
 
-#[async_trait]
 impl BrowserTest<IntegrationContext> for PanickingTest {
     fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed("panicking")
     }
 
-    async fn run(&self, _driver: &WebDriver, _context: &IntegrationContext) -> Result<(), Report> {
-        assert_that!(1).is_equal_to(2);
-        Ok(())
+    fn run<'a>(
+        &'a self,
+        _driver: &'a WebDriver,
+        _context: &'a IntegrationContext,
+    ) -> TestFuture<'a> {
+        Box::pin(async move {
+            assert_that!(1).is_equal_to(2);
+            Ok(())
+        })
     }
 }
 
@@ -203,15 +215,21 @@ impl BrowserTest<IntegrationContext> for PanickingTest {
 /// assertion from its own code does.
 struct PanickingInADependencyTest;
 
-#[async_trait]
 impl BrowserTest<IntegrationContext> for PanickingInADependencyTest {
     fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed("panicking in a dependency")
     }
 
-    async fn run(&self, _driver: &WebDriver, _context: &IntegrationContext) -> Result<(), Report> {
-        let _ = std::hint::black_box(std::time::Duration::MAX) + std::time::Duration::from_secs(1);
-        Ok(())
+    fn run<'a>(
+        &'a self,
+        _driver: &'a WebDriver,
+        _context: &'a IntegrationContext,
+    ) -> TestFuture<'a> {
+        Box::pin(async move {
+            let _ =
+                std::hint::black_box(std::time::Duration::MAX) + std::time::Duration::from_secs(1);
+            Ok(())
+        })
     }
 }
 
@@ -229,19 +247,20 @@ impl RunForeverTest {
     }
 }
 
-#[async_trait]
 impl BrowserTest<IntegrationContext> for RunForeverTest {
     fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed("run forever")
     }
 
-    async fn run(&self, driver: &WebDriver, context: &IntegrationContext) -> Result<(), Report> {
-        driver
-            .goto(context.page_url)
-            .await
-            .context(IntegrationTestError::OpenTestPage)?;
-        (self.on_running)();
-        std::future::pending().await
+    fn run<'a>(&'a self, driver: &'a WebDriver, context: &'a IntegrationContext) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver
+                .goto(context.page_url)
+                .await
+                .context(IntegrationTestError::OpenTestPage)?;
+            (self.on_running)();
+            std::future::pending().await
+        })
     }
 }
 
@@ -251,21 +270,26 @@ struct IntentionalFailureTest {
     started: Option<Arc<AtomicUsize>>,
 }
 
-#[async_trait]
 impl BrowserTest<IntegrationContext> for IntentionalFailureTest {
     fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed("intentional failure")
     }
 
-    async fn run(&self, _driver: &WebDriver, _context: &IntegrationContext) -> Result<(), Report> {
-        if let Some(started) = &self.started {
-            started.fetch_add(1, Ordering::SeqCst);
-            while started.load(Ordering::SeqCst) < 2 {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    fn run<'a>(
+        &'a self,
+        _driver: &'a WebDriver,
+        _context: &'a IntegrationContext,
+    ) -> TestFuture<'a> {
+        Box::pin(async move {
+            if let Some(started) = &self.started {
+                started.fetch_add(1, Ordering::SeqCst);
+                while started.load(Ordering::SeqCst) < 2 {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
             }
-        }
 
-        Err(rootcause::report!(IntegrationTestError::IntentionalFailure).into())
+            Err(rootcause::report!(IntegrationTestError::IntentionalFailure).into())
+        })
     }
 }
 
@@ -273,18 +297,23 @@ struct PanicTest {
     started: Option<Arc<AtomicUsize>>,
 }
 
-#[async_trait]
 impl BrowserTest<IntegrationContext> for PanicTest {
     fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed("intentional panic")
     }
 
-    async fn run(&self, _driver: &WebDriver, _context: &IntegrationContext) -> Result<(), Report> {
-        if let Some(started) = &self.started {
-            started.fetch_add(1, Ordering::SeqCst);
-        }
+    fn run<'a>(
+        &'a self,
+        _driver: &'a WebDriver,
+        _context: &'a IntegrationContext,
+    ) -> TestFuture<'a> {
+        Box::pin(async move {
+            if let Some(started) = &self.started {
+                started.fetch_add(1, Ordering::SeqCst);
+            }
 
-        panic!("intentional browser test panic");
+            panic!("intentional browser test panic");
+        })
     }
 }
 
@@ -299,7 +328,6 @@ struct MetadataPanicTest {
     panic_in: MetadataPanicHook,
 }
 
-#[async_trait]
 impl BrowserTest<IntegrationContext> for MetadataPanicTest {
     fn name(&self) -> Cow<'_, str> {
         if matches!(self.panic_in, MetadataPanicHook::Name) {
@@ -325,8 +353,21 @@ impl BrowserTest<IntegrationContext> for MetadataPanicTest {
         TestSettings::new()
     }
 
-    async fn run(&self, _driver: &WebDriver, _context: &IntegrationContext) -> Result<(), Report> {
-        Ok(())
+    fn run<'a>(
+        &'a self,
+        _driver: &'a WebDriver,
+        _context: &'a IntegrationContext,
+    ) -> TestFuture<'a> {
+        Box::pin(async move { Ok(()) })
+    }
+}
+
+/// The number of failed tests of the error of a run in which tests failed. `None` for another
+/// error.
+fn failed_tests(err: &Report<BrowserTestError>) -> Option<usize> {
+    match err.current_context() {
+        BrowserTestError::RunTests { failed_tests, .. } => Some(*failed_tests),
+        _ => None,
     }
 }
 
@@ -395,7 +436,7 @@ async fn failure_reports_locate_errors_in_test_code() {
 
 /// Calls [`find_missing`] from a `#[browser_test]` function.
 #[browser_test]
-async fn missing_element(
+async fn MissingElement(
     driver: &WebDriver,
     context: &IntegrationContext,
 ) -> Result<(), Report<IntegrationTestError>> {
@@ -406,7 +447,7 @@ async fn missing_element(
     find_missing(driver).await
 }
 
-/// The test code of a `#[browser_test]` ends at its function, named as written.
+/// The test code of a `#[browser_test]` ends at its function, renamed to `snake_case`.
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn failure_reports_name_browser_test_functions() {
@@ -524,20 +565,33 @@ async fn run_all_runs_successful_page_title_tests() -> RunnerResult {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn run_all_reports_intentional_failure_and_runs_page_title_test() {
-    let err = runner()
-        .with_failure_policy(FailurePolicy::RunAll)
-        .run(
+    let (runner, outcomes) = record_outcomes(runner().with_failure_policy(FailurePolicy::RunAll));
+    let (result, report) = runner
+        .run_with_report(
             &IntegrationContext::default(),
             TestSuite::sequential()
                 .with(IntentionalFailureTest { started: None })
                 .with(page_title_test("page title")),
         )
-        .await
-        .expect_err("run-all should report the intentional failure");
+        .await;
+    let err = result.expect_err("run-all should report the intentional failure");
 
-    assert_that!(err.to_string())
-        .contains(BrowserTestError::RunTests { failed_tests: 1 }.to_string());
+    assert_that!(failed_tests(&err)).is_equal_to(Some(1));
     assert_that!(err).has_child_count(1);
+    let reported: Vec<_> = report
+        .tests
+        .iter()
+        .map(|test| (test.name.clone(), test.outcome))
+        .collect();
+    assert_that!(reported.clone()).contains_exactly([
+        ("intentional failure".to_owned(), TestOutcome::Failed),
+        ("page title".to_owned(), TestOutcome::Passed),
+    ]);
+    // The consumers got the same report.
+    assert_that!(outcomes.lock().unwrap().clone()).is_equal_to(reported);
+    assert_that!(report.tests[0].failure.as_deref().unwrap_or_default())
+        .contains("intentional browser test failure");
+    assert_that!(report.tests[1].failure.clone()).is_none();
 }
 
 /// Implements `run` by hand, and panics before returning its future.
@@ -548,17 +602,11 @@ impl BrowserTest<IntegrationContext> for PanicsBeforeItsFuture {
         Cow::Borrowed("panics before its future")
     }
 
-    fn run<'test, 'driver, 'context, 'future>(
-        &'test self,
-        _driver: &'driver WebDriver,
-        _context: &'context IntegrationContext,
-    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), Report>> + Send + 'future>>
-    where
-        'test: 'future,
-        'driver: 'future,
-        'context: 'future,
-        Self: 'future,
-    {
+    fn run<'a>(
+        &'a self,
+        _driver: &'a WebDriver,
+        _context: &'a IntegrationContext,
+    ) -> TestFuture<'a> {
         panic!("no future")
     }
 }
@@ -611,8 +659,7 @@ async fn run_all_reports_metadata_hook_panics_and_runs_remaining_page_title_test
         .expect_err("run-all should report metadata hook panics");
 
     assert_that!(started.load(Ordering::SeqCst)).is_equal_to(1);
-    assert_that!(err.to_string())
-        .contains(BrowserTestError::RunTests { failed_tests: 3 }.to_string());
+    assert_that!(failed_tests(&err)).is_equal_to(Some(3));
     assert_that!(err).has_child_count(3);
     assert_that!(format!("{err:?}")).contains("unnamed test at index 0");
     assert_that!(format!("{err:?}")).contains("tags hook failed");
@@ -644,8 +691,7 @@ async fn parallel_run_all_reports_panic_and_runs_remaining_page_title_tests() {
         .expect_err("run-all should report the intentional panic");
 
     assert_that!(started.load(Ordering::SeqCst)).is_equal_to(3);
-    assert_that!(err.to_string())
-        .contains(BrowserTestError::RunTests { failed_tests: 1 }.to_string());
+    assert_that!(failed_tests(&err)).is_equal_to(Some(1));
     assert_that!(err).has_child_count(1);
 }
 
@@ -673,8 +719,7 @@ async fn parallel_fail_fast_waits_for_running_page_title_test_without_starting_m
         .await
         .expect_err("fail-fast should report the intentional failure");
 
-    assert_that!(err.to_string())
-        .contains(BrowserTestError::RunTests { failed_tests: 1 }.to_string());
+    assert_that!(failed_tests(&err)).is_equal_to(Some(1));
     assert_that!(err).has_child_count(1);
     assert_that!(started.load(Ordering::SeqCst)).is_equal_to(2);
 }
@@ -720,6 +765,7 @@ async fn capability_setup_setting_user_data_dir_fails_the_session() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn unusable_chrome_profiles_dir_fails_the_run() {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -741,6 +787,7 @@ async fn unusable_chrome_profiles_dir_fails_the_run() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn cancelled_token_cancels_the_run_before_any_test_starts() {
     let cancellation = CancellationToken::new();
     cancellation.cancel();
@@ -801,14 +848,13 @@ async fn cancellation_stops_the_run_and_its_browsers() {
                     .contains(&*profiles_dir.path().to_string_lossy())
         })
     };
-    assert_that!(eventually(|| !leftovers())).is_true();
+    assert_that!(eventually(|| !leftovers()).await).is_true();
 }
 
 /// Opens the fixture page and freezes it: its main thread runs an endless chain of microtasks.
 /// Every later `WebDriver` command of the session waits for it.
 struct FreezingTest;
 
-#[async_trait]
 impl BrowserTest<IntegrationContext> for FreezingTest {
     fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed("freezing")
@@ -818,27 +864,29 @@ impl BrowserTest<IntegrationContext> for FreezingTest {
         TestSettings::new().with_time_limit(Duration::from_secs(3))
     }
 
-    async fn run(&self, driver: &WebDriver, context: &IntegrationContext) -> Result<(), Report> {
-        driver
-            .goto(context.page_url)
-            .await
-            .context(IntegrationTestError::OpenTestPage)?;
-        driver
-            .execute(
-                "setTimeout(() => {
-                     const spin = () => queueMicrotask(spin);
-                     spin();
-                 });",
-                vec![],
-            )
-            .await
-            .context(IntegrationTestError::FreezePage)?;
-        // Waits for the frozen page.
-        driver
-            .title()
-            .await
-            .context(IntegrationTestError::ReadTitle)?;
-        Ok(())
+    fn run<'a>(&'a self, driver: &'a WebDriver, context: &'a IntegrationContext) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver
+                .goto(context.page_url)
+                .await
+                .context(IntegrationTestError::OpenTestPage)?;
+            driver
+                .execute(
+                    "setTimeout(() => {
+                         const spin = () => queueMicrotask(spin);
+                         spin();
+                     });",
+                    vec![],
+                )
+                .await
+                .context(IntegrationTestError::FreezePage)?;
+            // Waits for the frozen page.
+            driver
+                .title()
+                .await
+                .context(IntegrationTestError::ReadTitle)?;
+            Ok(())
+        })
     }
 }
 
@@ -849,7 +897,7 @@ type Outcomes = Arc<std::sync::Mutex<Vec<(String, TestOutcome)>>>;
 fn record_outcomes(runner: BrowserTestRunner) -> (BrowserTestRunner, Outcomes) {
     let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
     let reported = Arc::clone(&outcomes);
-    let runner = runner.with_report_consumer(move |report: &BrowserTestRunReport| {
+    let runner = runner.with_report_consumer(move |report: &RunReport| {
         *reported.lock().unwrap() = report
             .tests
             .iter()
@@ -905,10 +953,16 @@ async fn a_filter_selecting_no_test_fails_the_run() {
         )
         .await
         .expect_err("the filter selects no test");
-    assert_that!(err.current_context()).is_equal_to(&BrowserTestError::NoTestSelected {
-        name_patterns: Vec::new(),
-        tag_patterns: vec!["button,focus".to_owned()],
-    });
+    let BrowserTestError::NoTestSelected {
+        name_patterns,
+        tag_patterns,
+        ..
+    } = err.current_context()
+    else {
+        panic!("expected NoTestSelected, got {err:?}");
+    };
+    assert_that!(name_patterns).is_empty();
+    assert_that!(tag_patterns).contains_exactly(["button,focus"]);
     assert_that!(outcomes.lock().unwrap().clone()).is_empty();
 }
 
@@ -965,6 +1019,61 @@ async fn a_test_waiting_forever_times_out() {
         .is_equal_to(vec![("run forever".to_owned(), TestOutcome::TimedOut)]);
 }
 
+/// Panics when dropped.
+struct PanicOnDrop;
+
+impl Drop for PanicOnDrop {
+    fn drop(&mut self) {
+        panic!("dropped mid-test");
+    }
+}
+
+/// Runs forever, holding a [`PanicOnDrop`].
+struct PanicsWhenStoppedTest;
+
+impl BrowserTest<IntegrationContext> for PanicsWhenStoppedTest {
+    fn name(&self) -> Cow<'_, str> {
+        Cow::Borrowed("panics when stopped")
+    }
+
+    fn run<'a>(
+        &'a self,
+        _driver: &'a WebDriver,
+        _context: &'a IntegrationContext,
+    ) -> TestFuture<'a> {
+        Box::pin(async move {
+            let _guard = PanicOnDrop;
+            std::future::pending().await
+        })
+    }
+}
+
+/// A test that panics while it is stopped at its time limit times out, its report names the
+/// panic, and the tests after it still run.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_panic_while_stopping_a_timed_out_test_is_reported() {
+    let (runner, outcomes) = record_outcomes(runner().with_time_limit(Duration::from_secs(1)));
+
+    let err = runner
+        .run(
+            &IntegrationContext::default(),
+            TestSuite::sequential()
+                .with(PanicsWhenStoppedTest)
+                .with(page_title_test("after the panic")),
+        )
+        .await
+        .expect_err("the test times out");
+
+    assert_that!(format!("{err:?}"))
+        .contains("Browser test 'panics when stopped' exceeded its time limit of 1.00s.")
+        .contains("Browser test 'panics when stopped' panicked: dropped mid-test");
+    assert_that!(outcomes.lock().unwrap().clone()).is_equal_to(vec![
+        ("panics when stopped".to_owned(), TestOutcome::TimedOut),
+        ("after the panic".to_owned(), TestOutcome::Passed),
+    ]);
+}
+
 /// The page `serve_frame_host` serves at `/frame`.
 const FRAME_PAGE: &str = "<!doctype html><title>frame</title>";
 
@@ -1014,7 +1123,6 @@ struct FreezingFrameTest {
     url: String,
 }
 
-#[async_trait]
 impl BrowserTest<IntegrationContext> for FreezingFrameTest {
     fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed("freezing frame")
@@ -1024,31 +1132,37 @@ impl BrowserTest<IntegrationContext> for FreezingFrameTest {
         TestSettings::new().with_time_limit(Duration::from_secs(3))
     }
 
-    async fn run(&self, driver: &WebDriver, _context: &IntegrationContext) -> Result<(), Report> {
-        driver
-            .goto(&self.url)
-            .await
-            .context(IntegrationTestError::OpenTestPage)?;
-        driver
-            .enter_frame(0)
-            .await
-            .context(IntegrationTestError::FreezePage)?;
-        driver
-            .execute(
-                "setTimeout(() => {
-                     const spin = () => queueMicrotask(spin);
-                     spin();
-                 });",
-                vec![],
-            )
-            .await
-            .context(IntegrationTestError::FreezePage)?;
-        // Waits for the frozen frame.
-        driver
-            .execute("return document.title;", vec![])
-            .await
-            .context(IntegrationTestError::ReadTitle)?;
-        Ok(())
+    fn run<'a>(
+        &'a self,
+        driver: &'a WebDriver,
+        _context: &'a IntegrationContext,
+    ) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver
+                .goto(&self.url)
+                .await
+                .context(IntegrationTestError::OpenTestPage)?;
+            driver
+                .enter_frame(0)
+                .await
+                .context(IntegrationTestError::FreezePage)?;
+            driver
+                .execute(
+                    "setTimeout(() => {
+                         const spin = () => queueMicrotask(spin);
+                         spin();
+                     });",
+                    vec![],
+                )
+                .await
+                .context(IntegrationTestError::FreezePage)?;
+            // Waits for the frozen frame.
+            driver
+                .execute("return document.title;", vec![])
+                .await
+                .context(IntegrationTestError::ReadTitle)?;
+            Ok(())
+        })
     }
 }
 
@@ -1086,7 +1200,6 @@ async fn a_frozen_frame_of_another_site_is_closed() {
 /// Opens the fixture page, opens an `alert`, and waits for it to be closed, which never happens.
 struct DialogTest;
 
-#[async_trait]
 impl BrowserTest<IntegrationContext> for DialogTest {
     fn name(&self) -> Cow<'_, str> {
         Cow::Borrowed("dialog")
@@ -1096,16 +1209,18 @@ impl BrowserTest<IntegrationContext> for DialogTest {
         TestSettings::new().with_time_limit(Duration::from_secs(3))
     }
 
-    async fn run(&self, driver: &WebDriver, context: &IntegrationContext) -> Result<(), Report> {
-        driver
-            .goto(context.page_url)
-            .await
-            .context(IntegrationTestError::OpenTestPage)?;
-        driver
-            .execute("setTimeout(() => alert('waiting for you'));", vec![])
-            .await
-            .context(IntegrationTestError::OpenDialog)?;
-        std::future::pending().await
+    fn run<'a>(&'a self, driver: &'a WebDriver, context: &'a IntegrationContext) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver
+                .goto(context.page_url)
+                .await
+                .context(IntegrationTestError::OpenTestPage)?;
+            driver
+                .execute("setTimeout(() => alert('waiting for you'));", vec![])
+                .await
+                .context(IntegrationTestError::OpenDialog)?;
+            std::future::pending().await
+        })
     }
 }
 
@@ -1134,6 +1249,67 @@ async fn a_dialog_is_named_rather_than_a_frozen_page() {
         ("dialog".to_owned(), TestOutcome::TimedOut),
         ("after a dialog".to_owned(), TestOutcome::Passed),
     ]);
+}
+
+/// Opens an `alert` in a second tab, switches back to the first one, and waits forever.
+struct DialogInAnotherTabTest;
+
+impl BrowserTest<IntegrationContext> for DialogInAnotherTabTest {
+    fn name(&self) -> Cow<'_, str> {
+        Cow::Borrowed("dialog in another tab")
+    }
+
+    fn settings(&self) -> TestSettings {
+        TestSettings::new().with_time_limit(Duration::from_secs(3))
+    }
+
+    fn run<'a>(&'a self, driver: &'a WebDriver, context: &'a IntegrationContext) -> TestFuture<'a> {
+        Box::pin(async move {
+            let first = driver
+                .window()
+                .await
+                .context(IntegrationTestError::SwitchWindow)?;
+            let second = driver
+                .new_tab()
+                .await
+                .context(IntegrationTestError::SwitchWindow)?;
+            driver
+                .switch_to_window(second)
+                .await
+                .context(IntegrationTestError::SwitchWindow)?;
+            driver
+                .goto(context.page_url)
+                .await
+                .context(IntegrationTestError::OpenTestPage)?;
+            driver
+                .execute("setTimeout(() => alert('waiting in another tab'));", vec![])
+                .await
+                .context(IntegrationTestError::OpenDialog)?;
+            driver
+                .switch_to_window(first)
+                .await
+                .context(IntegrationTestError::SwitchWindow)?;
+            std::future::pending().await
+        })
+    }
+}
+
+/// A dialog in a tab other than the session's current one is named as well, rather than its page
+/// called frozen and closed.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_dialog_in_another_tab_is_named_rather_than_a_frozen_page() {
+    let err = runner()
+        .run(
+            &IntegrationContext::default(),
+            TestSuite::sequential().with(DialogInAnotherTabTest),
+        )
+        .await
+        .expect_err("the test times out");
+
+    assert_that!(format!("{err:?}"))
+        .contains("A dialog is open, which its page waits for: waiting in another tab")
+        .does_not_contain("Frozen");
 }
 
 /// Run by `sigint_cancels_the_run` and `sigterm_cancels_the_run` in a child process. Does nothing
@@ -1205,16 +1381,14 @@ async fn assert_signal_cancels_the_run(child_test: &str, signal: &str) {
     let groups = process_groups_of_tree(child.id());
 
     child.signal_group(signal);
-    let status = child.wait_for_exit();
+    let status = child.wait_for_exit().await;
 
     // The run returned its error, so the test failed instead of being killed by the signal.
     assert_that!(status.code()).is_equal_to(Some(101));
     // libtest prints the returned error with `Debug`, which prints a report's messages.
     assert_that!(child.output()).contains(BrowserTestError::Cancelled.to_string());
-    assert_that!(eventually(|| !groups
-        .iter()
-        .any(|group| process_group_exists(*group))))
-    .is_true();
+    assert_that!(eventually(|| !groups.iter().any(|group| process_group_exists(*group))).await)
+        .is_true();
     assert_that!(dir_entry_count(&child.profiles_dir())).is_equal_to(0);
 }
 
@@ -1234,9 +1408,9 @@ async fn next_run_removes_the_chrome_profiles_of_a_killed_run() -> RunnerResult 
     let mut child = ChildRun::start("child_run_to_be_killed").await;
     let profiles_dir = child.profiles_dir();
 
-    child.kill();
-    // The killed run could not clean up.
-    assert_that!(dir_entry_count(&profiles_dir)).is_equal_to(1);
+    child.kill().await;
+    // The killed run could not clean up its directory and lock file.
+    assert_that!(dir_entry_count(&profiles_dir)).is_equal_to(2);
 
     runner()
         .with_chrome_profiles_dir(&profiles_dir)
@@ -1342,7 +1516,7 @@ impl ChildRun {
     }
 
     /// Wait until the child exited, at most a minute.
-    fn wait_for_exit(&mut self) -> std::process::ExitStatus {
+    async fn wait_for_exit(&mut self) -> std::process::ExitStatus {
         use std::time::{Duration, Instant};
 
         let deadline = Instant::now() + Duration::from_secs(60);
@@ -1351,16 +1525,25 @@ impl ChildRun {
                 return status;
             }
             assert_that!(Instant::now()).is_less_than(deadline);
-            std::thread::sleep(Duration::from_millis(50));
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 
     /// Kill the child and its descendants with `SIGKILL`, and wait until they all exited.
+    async fn kill(&mut self) {
+        let groups = self.send_kill();
+        // Dying Chrome processes must not write into profiles that the next run removes.
+        assert_that!(eventually(|| !groups.iter().any(|group| process_group_exists(*group))).await)
+            .is_true();
+    }
+
+    /// Send `SIGKILL` to the child and its descendants, and reap the child. Returns the process
+    /// groups killed, whose processes may still be exiting.
     ///
     /// `tokio-process-tools` starts `ChromeDriver` in a process group of its own, which its Chrome
     /// processes join. Killing the child's group alone would leave them running, so every group in
     /// the child's process tree is killed.
-    fn kill(&mut self) {
+    fn send_kill(&mut self) -> std::collections::BTreeSet<u32> {
         let groups = process_groups_of_tree(self.id());
         let _ = std::process::Command::new("kill")
             .arg("-KILL")
@@ -1368,18 +1551,16 @@ impl ChildRun {
             .args(groups.iter().map(|group| format!("-{group}")))
             .status();
         let _ = self.process.wait();
-        // Dying Chrome processes must not write into profiles that the next run removes.
-        assert_that!(eventually(|| !groups
-            .iter()
-            .any(|group| process_group_exists(*group))))
-        .is_true();
+        groups
     }
 }
 
 #[cfg(unix)]
 impl Drop for ChildRun {
+    /// Kills what a failed test left running. Drop cannot await the processes' exit, which only
+    /// [`ChildRun::kill`] needs to ensure.
     fn drop(&mut self) {
-        self.kill();
+        self.send_kill();
     }
 }
 
@@ -1450,7 +1631,7 @@ fn process_group_exists(group: u32) -> bool {
 
 /// Whether `condition` holds within ten seconds. Processes take a moment to exit.
 #[cfg(unix)]
-fn eventually(condition: impl Fn() -> bool) -> bool {
+async fn eventually(condition: impl Fn() -> bool) -> bool {
     use std::time::{Duration, Instant};
 
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -1458,7 +1639,7 @@ fn eventually(condition: impl Fn() -> bool) -> bool {
         if Instant::now() > deadline {
             return false;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     true
 }

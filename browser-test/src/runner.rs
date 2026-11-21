@@ -5,6 +5,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(doc)]
+use chrome_for_testing_manager::Version;
 use chrome_for_testing_manager::{
     CancellationToken, Channel, ChromeBinary, ChromeForTesting, ChromeForTestingConfig,
     VersionRequest,
@@ -18,12 +20,15 @@ use crate::{
     BrowserTestError, Cancellation, DriverOutput, ElementQueryWait, FailurePolicy, Pause,
     ProgressWarnings, SessionReuse, TestFilter, TestSuite, Timeouts,
     cancellation::cancelled_result,
-    driver_output::{DriverOutputCapture, attach_browser_driver_output_to_result},
+    driver_output::{
+        DriverOutputCapture, attach_browser_driver_output_to_result,
+        every_failure_has_session_output,
+    },
     env::{InvalidEnvVar, env_flag},
     execution::{ChromeCapabilitiesSetup, Execution, ExecutionConfig, execute_tests},
     pause::{self, PauseDecision},
     profile::{ChromeProfilesDir, RunProfiles},
-    report::BrowserTestRunReport,
+    report::RunReport,
     report_consumer::RunReportConsumer,
     test_settings::TestDefaults,
 };
@@ -87,7 +92,7 @@ impl Visibility {
 /// slowly.
 #[derive(Clone)]
 pub struct BrowserTestRunner {
-    channel: Channel,
+    version: VersionRequest,
     visibility: Visibility,
     pause: Pause,
     failure_policy: FailurePolicy,
@@ -109,7 +114,7 @@ pub struct BrowserTestRunner {
 impl fmt::Debug for BrowserTestRunner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BrowserTestRunner")
-            .field("channel", &self.channel)
+            .field("version", &self.version)
             .field("visibility", &self.visibility)
             .field("pause", &self.pause)
             .field("failure_policy", &self.failure_policy)
@@ -143,7 +148,7 @@ impl BrowserTestRunner {
     #[must_use]
     pub fn new(cancellation: Cancellation) -> Self {
         Self {
-            channel: Channel::Stable,
+            version: VersionRequest::LatestIn(Channel::Stable),
             visibility: Visibility::Headless,
             pause: Pause::disabled(),
             failure_policy: FailurePolicy::FailFast,
@@ -163,10 +168,34 @@ impl BrowserTestRunner {
         }
     }
 
-    /// Select the Chrome release channel. Defaults to [`Channel::Stable`].
+    /// Run the latest Chrome of `channel`. Defaults to [`Channel::Stable`].
+    ///
+    /// Short for [`Self::with_version`] with [`VersionRequest::LatestIn`]. Whichever of the two is
+    /// called last decides the version.
     #[must_use]
-    pub fn with_channel(mut self, channel: Channel) -> Self {
-        self.channel = channel;
+    pub fn with_channel(self, channel: Channel) -> Self {
+        self.with_version(VersionRequest::LatestIn(channel))
+    }
+
+    /// Select the version of Chrome (and chromedriver) to run: the latest of a [`Channel`], or a
+    /// fixed [`Version`] to pin, e.g. so that every run of a CI pipeline uses the same browser.
+    /// Defaults to the latest of [`Channel::Stable`].
+    ///
+    /// A version that Chrome for Testing does not provide for the platform (or for the
+    /// [headless binary](Self::with_headless_chrome_binary)) fails the run with
+    /// [`BrowserTestError::LaunchChromeForTesting`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use browser_test::{BrowserTestRunner, Cancellation, Version};
+    ///
+    /// let version: Version = "147.0.7727.56".parse().expect("valid version");
+    /// let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals()).with_version(version);
+    /// ```
+    #[must_use]
+    pub fn with_version(mut self, version: impl Into<VersionRequest>) -> Self {
+        self.version = version.into();
         self
     }
 
@@ -245,8 +274,9 @@ impl BrowserTestRunner {
         self
     }
 
-    /// Capture recent browser-driver output and attach it to the error of a failed run, which
-    /// holds the errors of its failed tests. Defaults to [`DriverOutput::disabled`].
+    /// Capture recent browser-driver output and attach it to the errors of failed tests: the lines
+    /// of each test's session while it ran. A run that failed otherwise gets its last lines. See
+    /// [`DriverOutput`]. Defaults to [`DriverOutput::disabled`].
     #[must_use]
     pub const fn with_driver_output(mut self, driver_output: DriverOutput) -> Self {
         self.driver_output = driver_output;
@@ -328,9 +358,6 @@ impl BrowserTestRunner {
     /// Visible runs ([`Visibility::Visible`]) default to `0`: a spare session's browser window
     /// would open on top of the window of the running test. Set spare sessions explicitly to
     /// create them in visible runs as well.
-    ///
-    /// Spare sessions use the runner's element query wait. A test overriding it with
-    /// [`TestSettings::with_element_query_wait`] gets a session created when its turn comes.
     #[must_use]
     pub const fn with_spare_sessions(mut self, spare_sessions: usize) -> Self {
         self.spare_sessions = Some(spare_sessions);
@@ -384,7 +411,8 @@ impl BrowserTestRunner {
     /// summary of the run's test results and timings.
     ///
     /// Consumers are called in the order they were added. Without a consumer, the report is
-    /// neither printed nor logged. See [`RunReportConsumer`].
+    /// neither printed nor logged. See [`RunReportConsumer`], and [`Self::run_with_report`] to get
+    /// the report of a run directly.
     #[must_use]
     pub fn with_report_consumer(mut self, consumer: impl RunReportConsumer + 'static) -> Self {
         self.report_consumers.push(Arc::new(consumer));
@@ -408,7 +436,8 @@ impl BrowserTestRunner {
     /// A run without tests returns `Ok(())` right away, even if cancelled.
     ///
     /// Logs each test's timing when it finishes. If tests ran, the run's report is handed to the
-    /// consumers added with [`Self::with_report_consumer`].
+    /// consumers added with [`Self::with_report_consumer`]. [`Self::run_with_report`] returns it
+    /// as well.
     ///
     /// Non-empty runs require a multithreaded Tokio runtime because [`ChromeForTesting::launch`]
     /// requires one. Use `#[tokio::test(flavor = "multi_thread")]` for browser tests.
@@ -432,20 +461,58 @@ impl BrowserTestRunner {
     where
         Context: Sync + ?Sized,
     {
+        self.run_with_report(context, tests).await.0
+    }
+
+    /// Run `tests` like [`Self::run`], and return the run's report along with its result.
+    ///
+    /// The report is the one handed to the consumers added with [`Self::with_report_consumer`],
+    /// which are still called. For a run that started no test (e.g. without tests, or one that
+    /// failed before starting any), it is empty, and no consumer is called.
+    ///
+    /// # Errors
+    ///
+    /// The result holds the errors [`Self::run`] returns.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use browser_test::{BrowserTestRunner, Cancellation, TestSuite};
+    /// # async fn run(tests: TestSuite) -> Result<(), browser_test::rootcause::Report> {
+    /// let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals());
+    /// let (result, report) = runner.run_with_report(&(), tests).await;
+    /// for test in report.tests.iter().filter(|test| test.outcome.is_failed()) {
+    ///     eprintln!("{} failed", test.name);
+    /// }
+    /// result?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn run_with_report<Context>(
+        &self,
+        context: &Context,
+        tests: TestSuite<Context>,
+    ) -> (Result<(), Report<BrowserTestError>>, RunReport)
+    where
+        Context: Sync + ?Sized,
+    {
+        let mut report = RunReport::default();
         let had_filterable_tests = tests.has_filterable_tests();
         let tests = tests.filter(&self.filter);
         if had_filterable_tests && !tests.has_filterable_tests() {
-            return Err(Report::new(self.filter.selected_no_test()));
+            return (Err(Report::new(self.filter.selected_no_test())), report);
         }
         // Before listening for shutdown signals, as an empty run has nothing to clean up.
         if tests.is_empty() {
             tracing::info!("Skipping browser test run because no tests were provided.");
-            return Ok(());
+            return (Ok(()), report);
         }
         crate::failure_report::install(self.failure_report_hooks);
-        let cancellation = self.cancellation.run_token()?;
+        let cancellation = match self.cancellation.run_token() {
+            Ok(cancellation) => cancellation,
+            Err(error) => return (Err(error), report),
+        };
         let start = Instant::now();
-        let mut report = BrowserTestRunReport::default();
         let result = self
             .run_reporting(context, tests, &cancellation, &mut report)
             .await;
@@ -460,7 +527,7 @@ impl BrowserTestRunner {
                 consumer.consume(&report);
             }
         }
-        result
+        (result, report)
     }
 
     async fn run_reporting<Context>(
@@ -468,7 +535,7 @@ impl BrowserTestRunner {
         context: &Context,
         tests: TestSuite<Context>,
         cancellation: &CancellationToken,
-        report: &mut BrowserTestRunReport,
+        report: &mut RunReport,
     ) -> Result<(), Report<BrowserTestError>>
     where
         Context: Sync + ?Sized,
@@ -490,7 +557,7 @@ impl BrowserTestRunner {
         // A launch failure carries the driver's recent output itself.
         let chrome = ChromeForTesting::launch(
             ChromeForTestingConfig::builder()
-                .version(VersionRequest::LatestIn(self.channel.clone()))
+                .version(self.version.clone())
                 .chrome_binary(self.chrome_binary_for_run())
                 .cache_dir_opt(self.chrome_for_testing_cache_dir.clone())
                 .cancellation(cancellation.clone())
@@ -505,7 +572,14 @@ impl BrowserTestRunner {
             .map(|capture| capture.follow(&chrome));
 
         let execution = self
-            .run_tests(&chrome, &profiles, cancellation, context, tests)
+            .run_tests(
+                &chrome,
+                &profiles,
+                cancellation,
+                driver_output.as_ref(),
+                context,
+                tests,
+            )
             .await;
         report.tests = execution.records;
         report.suites = execution.suites;
@@ -526,11 +600,21 @@ impl BrowserTestRunner {
             output_follower.finish().await;
         }
 
+        // Failed tests carry the output of their sessions. The run's adds what happened outside of
+        // them, e.g. while a session couldn't be created or the driver shut down.
+        let needs_run_output = shutdown_result.is_err()
+            || test_result
+                .as_ref()
+                .is_err_and(|report| !every_failure_has_session_output(report));
         let result = match shutdown_result {
             Ok(()) => test_result,
             Err(shutdown_error) => merge_shutdown_result(test_result, shutdown_error),
         };
-        attach_browser_driver_output_to_result(result, driver_output.as_ref())
+        if needs_run_output {
+            attach_browser_driver_output_to_result(result, driver_output.as_ref())
+        } else {
+            result
+        }
     }
 
     fn chrome_binary_for_run(&self) -> ChromeBinary {
@@ -554,6 +638,7 @@ impl BrowserTestRunner {
         chrome: &ChromeForTesting,
         profiles: &RunProfiles,
         cancellation: &CancellationToken,
+        driver_output: Option<&DriverOutputCapture>,
         context: &Context,
         tests: TestSuite<Context>,
     ) -> Execution
@@ -571,13 +656,14 @@ impl BrowserTestRunner {
             progress_warnings: self.progress_warnings,
             spare_sessions: self.spare_sessions_for_run(),
             session_reuse: self.session_reuse,
+            driver_output,
         };
         execute_tests(&config, context, tests).await
     }
 
     fn driver_output_capture_for_run(&self) -> Option<DriverOutputCapture> {
         self.driver_output
-            .tail_line_count()
+            .tail_lines()
             .map(DriverOutputCapture::new)
     }
 }
@@ -608,7 +694,7 @@ mod tests {
     };
 
     use assertr::prelude::*;
-    use chrome_for_testing_manager::{DriverOutputLine, DriverOutputSource};
+    use chrome_for_testing_manager::{DriverOutputLine, DriverOutputSource, Version};
     use thirtyfour::ChromiumLikeCapabilities;
 
     use super::*;
@@ -619,6 +705,7 @@ mod tests {
         let runner = BrowserTestRunner::new(Cancellation::disabled());
 
         assert_that!(runner.failure_policy).is_equal_to(FailurePolicy::FailFast);
+        assert_that!(runner.version.clone()).is_equal_to(VersionRequest::LatestIn(Channel::Stable));
         assert_that!(runner.visibility).is_equal_to(Visibility::Headless);
         assert_that!(runner.pause.is_enabled()).is_false();
         assert_that!(runner.driver_output_capture_for_run()).is_none();
@@ -632,6 +719,7 @@ mod tests {
 
         let runner = BrowserTestRunner::new(Cancellation::disabled())
             .with_failure_policy(FailurePolicy::RunAll)
+            .with_channel(Channel::Beta)
             .with_visibility(Visibility::Visible)
             .with_pause(Pause::enabled())
             .with_timeouts(timeouts)
@@ -641,6 +729,7 @@ mod tests {
             .with_chrome_profiles_dir("target/profiles");
 
         assert_that!(runner.failure_policy).is_equal_to(FailurePolicy::RunAll);
+        assert_that!(runner.version.clone()).is_equal_to(VersionRequest::LatestIn(Channel::Beta));
         assert_that!(runner.visibility).is_equal_to(Visibility::Visible);
         assert_that!(runner.pause.is_enabled()).is_true();
         assert_that!(runner.test_defaults).is_equal_to(TestDefaults {
@@ -653,6 +742,19 @@ mod tests {
             .is_equal_to(Some(PathBuf::from("/tmp/browser-test-cft-cache")));
         assert_that!(runner.chrome_profiles_dir)
             .is_equal_to(ChromeProfilesDir::new("target/profiles"));
+    }
+
+    #[test]
+    fn the_last_version_or_channel_wins() {
+        let version: Version = "147.0.7727.56".parse().expect("valid version");
+        let runner = BrowserTestRunner::new(Cancellation::disabled()).with_version(version);
+        assert_that!(runner.version.clone()).is_equal_to(VersionRequest::Fixed(version));
+
+        let runner = runner.with_channel(Channel::Dev);
+        assert_that!(runner.version.clone()).is_equal_to(VersionRequest::LatestIn(Channel::Dev));
+
+        let runner = runner.with_version(Channel::Canary);
+        assert_that!(runner.version).is_equal_to(VersionRequest::LatestIn(Channel::Canary));
     }
 
     #[test]
@@ -705,7 +807,7 @@ mod tests {
     #[test]
     fn driver_output_creates_a_fresh_capture_per_run() {
         let runner = BrowserTestRunner::new(Cancellation::disabled())
-            .with_driver_output(DriverOutput::tail_lines(1));
+            .with_driver_output(DriverOutput::enabled().with_tail_lines(1));
 
         let first = runner
             .driver_output_capture_for_run()
@@ -718,8 +820,8 @@ mod tests {
             "first run",
         ));
 
-        assert_that!(first.snapshot().total_lines).is_equal_to(1);
-        assert_that!(second.snapshot().total_lines).is_equal_to(0);
+        assert_that!(first.position()).is_equal_to(1);
+        assert_that!(second.position()).is_equal_to(0);
     }
 
     #[tokio::test]
@@ -727,14 +829,17 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&calls);
         let runner = BrowserTestRunner::new(Cancellation::disabled()).with_report_consumer(
-            move |_report: &BrowserTestRunReport| {
+            move |_report: &RunReport| {
                 counter.fetch_add(1, Ordering::SeqCst);
             },
         );
 
-        let result = runner.run(&(), TestSuite::<()>::sequential()).await;
+        let (result, report) = runner
+            .run_with_report(&(), TestSuite::<()>::sequential())
+            .await;
 
         assert_that!(result).is_ok();
+        assert_that!(report).is_equal_to(RunReport::default());
         assert_that!(calls.load(Ordering::SeqCst)).is_equal_to(0);
     }
 

@@ -1,3 +1,8 @@
+# The toolchain whose compiler output the trybuild UI tests expect in their `.stderr` files. That output changes
+# between Rust releases, so CI runs the UI tests on this version only (see `test-ui`). Bump it deliberately and
+# regenerate the files with `TRYBUILD=overwrite just test-ui`.
+ui_toolchain := "1.99.1"
+
 # Lists all available commands.
 list:
     just --list
@@ -21,7 +26,7 @@ msrv:
 
 # Check if the current dependency version bounds are sufficient.
 minimal-versions:
-    cargo minimal-versions check --workspace --direct
+    cargo minimal-versions check --workspace --direct --all-targets --all-features
 
 # Check whether current changes require a breaking release.
 semver-checks:
@@ -39,6 +44,18 @@ fmt-check:
     cargo fmt --all --manifest-path examples/minimal/Cargo.toml -- --check
     cargo fmt --all --manifest-path examples/advanced/Cargo.toml -- --check
 
+# Check that all Cargo.toml dependency tables are sorted, including the examples.
+sort-check:
+    cargo sort --check --workspace
+    cargo sort --check examples/minimal
+    cargo sort --check examples/advanced
+
+# Check that the lockfiles, including those of the examples, are up to date.
+lockfile-check:
+    cargo fetch --locked
+    cargo fetch --locked --manifest-path examples/minimal/Cargo.toml
+    cargo fetch --locked --manifest-path examples/advanced/Cargo.toml
+
 # Check the code, including the examples.
 check:
     cargo check --workspace --all-targets
@@ -46,16 +63,23 @@ check:
     cargo check --manifest-path examples/minimal/Cargo.toml --all-targets
     cargo check --manifest-path examples/advanced/Cargo.toml --all-targets
 
+# Check every feature of browser-test on its own, e.g. each TLS backend.
+check-features:
+    cargo hack --each-feature check -p browser-test --all-targets
+
 # Lint the code, including the examples.
 clippy:
-    cargo clippy --workspace -- -D warnings
     cargo clippy --workspace --all-targets --all-features -- -D warnings
     cargo clippy --manifest-path examples/minimal/Cargo.toml --all-targets -- -D warnings
     cargo clippy --manifest-path examples/advanced/Cargo.toml --all-targets -- -D warnings
 
 # Run all tests, including the browser-tests launching Chrome for Testing. `--no-capture` shows tracing output.
 test:
-    cargo test --workspace -- --no-capture
+    cargo test --workspace --features browser-test/serde -- --no-capture
+
+# Run the trybuild UI tests on `ui_toolchain`, the toolchain their expected compiler output was generated with.
+test-ui:
+    cargo +{{ui_toolchain}} test -p browser-test-macros --test ui
 
 # Build all crates.
 build:
@@ -86,7 +110,10 @@ tidy:
 # Run the full non-mutating validation suite.
 verify:
     just fmt-check
+    just sort-check
+    just lockfile-check
     just check
+    just check-features
     just clippy
     just test
     just build

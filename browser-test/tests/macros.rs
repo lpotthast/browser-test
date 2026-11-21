@@ -14,7 +14,7 @@ struct Page<'a> {
 ///
 ///     Indented Markdown stays indented.
 #[browser_test]
-pub(crate) async fn borrowed_page(page: &Page<'_>) -> Result<(), Report> {
+pub(crate) async fn BorrowedPage(page: &Page<'_>) -> Result<(), Report> {
     tokio::task::yield_now().await;
     assert_that!(page.title).is_equal_to("title");
     Ok(())
@@ -22,21 +22,21 @@ pub(crate) async fn borrowed_page(page: &Page<'_>) -> Result<(), Report> {
 
 #[browser_test]
 #[allow(clippy::elidable_lifetime_names)] // Exercise explicit lifetime syntax.
-async fn explicit_lifetime<'page>(page: &Page<'page>) -> Result<(), Report> {
+async fn ExplicitLifetime<'page>(page: &Page<'page>) -> Result<(), Report> {
     tokio::task::yield_now().await;
     assert_that!(page.title).is_equal_to("title");
     Ok(())
 }
 
 #[browser_test]
-async fn nested_reference(context: &&str) -> Result<(), Report> {
+async fn NestedReference(context: &&str) -> Result<(), Report> {
     tokio::task::yield_now().await;
     assert_that!(*context).is_equal_to("title");
     Ok(())
 }
 
 #[browser_test]
-async fn raw_driver(
+async fn RawDriver(
     _driver: &browser_test::thirtyfour::WebDriver,
     _context: &str,
 ) -> Result<(), Report> {
@@ -45,21 +45,21 @@ async fn raw_driver(
 }
 
 #[browser_test(tags = ["smoke"])]
-async fn no_context() -> Result<(), Report> {
+async fn NoContext() -> Result<(), Report> {
     tokio::task::yield_now().await;
     Ok(())
 }
 
 /// Keyboard events reach their handler.
 #[browser_test(name = "keyboard::events", tags = ["smoke", "keyboard"])]
-async fn handles_keyboard_events() -> Result<(), Report> {
+async fn HandlesKeyboardEvents() -> Result<(), Report> {
     tokio::task::yield_now().await;
     Ok(())
 }
 
 #[browser_test]
 #[doc = concat!("Computed", " documentation.")]
-async fn computed_documentation() -> Result<(), Report> {
+async fn ComputedDocumentation() -> Result<(), Report> {
     tokio::task::yield_now().await;
     Ok(())
 }
@@ -68,14 +68,62 @@ async fn computed_documentation() -> Result<(), Report> {
 #[browser_test]
 #[inline]
 #[expect(unused_variables)]
-async fn function_attributes() -> Result<(), Report> {
+async fn FunctionAttributes() -> Result<(), Report> {
     let unused = ();
     tokio::task::yield_now().await;
     Ok(())
 }
 
+/// Lint attributes for the struct reach it: its `#[allow]`s, and the `missing_docs` and `dead_code` of
+/// its `#[expect]`s.
+#[deny(missing_docs, unfulfilled_lint_expectations)]
+pub mod lints {
+    use super::*;
+
+    #[browser_test]
+    #[allow(missing_docs)]
+    pub async fn Allowed() -> Result<(), Report> {
+        tokio::task::yield_now().await;
+        Ok(())
+    }
+
+    #[browser_test]
+    #[expect(
+        missing_docs,
+        unused_variables,
+        reason = "the attribute splits its lints"
+    )]
+    pub async fn Expected() -> Result<(), Report> {
+        let unused = ();
+        tokio::task::yield_now().await;
+        Ok(())
+    }
+
+    // Only the struct is unused when a test is never registered.
+    #[browser_test]
+    #[expect(dead_code)]
+    async fn Unregistered() -> Result<(), Report> {
+        tokio::task::yield_now().await;
+        Ok(())
+    }
+
+    // `#[cfg_attr]`s are expanded before `#[browser_test]` sees them.
+    #[browser_test]
+    #[cfg_attr(all(), doc = "Documented conditionally.")]
+    pub async fn ConditionallyDocumented() -> Result<(), Report> {
+        tokio::task::yield_now().await;
+        Ok(())
+    }
+}
+
 #[browser_test]
-async fn r#type() -> Result<(), Report> {
+#[cfg_attr(all(), cfg(any()))]
+async fn DisabledConditionally(_context: &DoesNotExist) -> Result<(), Report> {
+    unreachable!()
+}
+
+#[browser_test]
+async fn Loop() -> Result<(), Report> {
     tokio::task::yield_now().await;
     Ok(())
 }
@@ -87,7 +135,7 @@ struct CustomError;
 type Outcome = Result<(), Report<CustomError>>;
 
 #[browser_test]
-async fn typed_error(_context: &()) -> Outcome {
+async fn TypedError(_context: &()) -> Outcome {
     tokio::task::yield_now().await;
     Err(Report::new(CustomError))
 }
@@ -95,7 +143,7 @@ async fn typed_error(_context: &()) -> Outcome {
 // A disabled test must not leave behind an impl referring to the removed struct.
 #[browser_test]
 #[cfg(any())]
-async fn disabled(_context: &DoesNotExist) -> Result<(), Report> {
+async fn Disabled(_context: &DoesNotExist) -> Result<(), Report> {
     unreachable!()
 }
 
@@ -106,7 +154,7 @@ struct Callbacks<'a> {
 
 // Lifetimes elided in `fn` pointers and `Fn` bounds stay higher-ranked.
 #[browser_test]
-async fn higher_ranked(callbacks: &Callbacks<'_>) -> Result<(), Report> {
+async fn HigherRanked(callbacks: &Callbacks<'_>) -> Result<(), Report> {
     tokio::task::yield_now().await;
     assert_that!((callbacks.on_title)("title")).is_equal_to(5);
     assert_that!((callbacks.on_click)("button")).is_equal_to(6);
@@ -132,7 +180,22 @@ mod shadowed_macros {
     }
 
     #[browser_test]
-    pub(super) async fn named_by_its_path() -> Result<(), Report> {
+    pub(super) async fn NamedByItsPath() -> Result<(), Report> {
+        tokio::task::yield_now().await;
+        Ok(())
+    }
+}
+
+/// `crate = ...` replaces the path to browser-test, e.g. in a crate re-exporting it.
+mod reexported {
+    use super::*;
+
+    mod reexports {
+        pub(super) use ::browser_test as reexported;
+    }
+
+    #[browser_test(crate = self::reexports::reexported)]
+    pub(super) async fn CratePath() -> Result<(), Report> {
         tokio::task::yield_now().await;
         Ok(())
     }
@@ -142,7 +205,7 @@ mod other {
     use super::*;
 
     #[browser_test(tags = ["smoke"])]
-    pub(super) async fn borrowed_page(_context: &()) -> Result<(), Report> {
+    pub(super) async fn BorrowedPage(_context: &()) -> Result<(), Report> {
         tokio::task::yield_now().await;
         Ok(())
     }
@@ -157,12 +220,18 @@ fn generated_tests_implement_the_trait_with_distinct_module_qualified_names() {
     accepts_borrowed(ExplicitLifetime);
     accepts_nested(NestedReference);
     accepts_higher_ranked(HigherRanked);
-    assert_that!(BorrowedPage.name()).is_equal_to("macros::borrowed_page");
-    assert_that!(Type.name()).is_equal_to("macros::type");
-    assert_that!(other::BorrowedPage.name()).is_equal_to("macros::other::borrowed_page");
-    assert_that!(shadowed_macros::NamedByItsPath.name())
-        .is_equal_to("macros::shadowed_macros::named_by_its_path");
+    assert_that!(BorrowedPage.name()).is_equal_to("macros::BorrowedPage");
+    // A test without arguments implements `BrowserTest` for every context, which calls name.
+    assert_that!(BrowserTest::<()>::name(&Loop)).is_equal_to("macros::Loop");
+    assert_that!(other::BorrowedPage.name()).is_equal_to("macros::other::BorrowedPage");
+    assert_that!(BrowserTest::<()>::name(&reexported::CratePath))
+        .is_equal_to("macros::reexported::CratePath");
+    assert_that!(BrowserTest::<()>::name(&shadowed_macros::NamedByItsPath))
+        .is_equal_to("macros::shadowed_macros::NamedByItsPath");
     let _: TestSuite<str> = TestSuite::sequential().with(RawDriver);
+    // Tests without arguments join suites of every context.
+    let _: TestSuite<str> = TestSuite::sequential().with(NoContext).with(RawDriver);
+    let _: TestSuite<Page<'_>> = TestSuite::sequential().with(NoContext).with(BorrowedPage);
     // Tests of different error types share a suite.
     let _: TestSuite = TestSuite::sequential()
         .with(TypedError)
@@ -171,9 +240,10 @@ fn generated_tests_implement_the_trait_with_distinct_module_qualified_names() {
 
 #[test]
 fn tags_select_generated_tests() {
-    assert_that!(HandlesKeyboardEvents.tags()).contains_exactly(["smoke", "keyboard"]);
-    assert_that!(NoContext.tags()).contains_exactly(["smoke"]);
-    assert_that!(FunctionAttributes.tags()).is_empty();
+    assert_that!(BrowserTest::<()>::tags(&HandlesKeyboardEvents))
+        .contains_exactly(["smoke", "keyboard"]);
+    assert_that!(BrowserTest::<()>::tags(&NoContext)).contains_exactly(["smoke"]);
+    assert_that!(BrowserTest::<()>::tags(&FunctionAttributes)).is_empty();
     let tests = TestSuite::sequential()
         .with(HandlesKeyboardEvents)
         .with(NoContext)
@@ -182,28 +252,28 @@ fn tags_select_generated_tests() {
         .filter(
             &TestFilter::new()
                 .with_tag("smoke")
-                .with_name("other::borrowed_page")
-                .with_name("no_context"),
+                .with_name("other::BorrowedPage")
+                .with_name("NoContext"),
         );
     assert_that!(format!("{tests:?}"))
-        .contains(r#"entries: ["macros::no_context", "macros::other::borrowed_page"]"#);
+        .contains(r#"entries: ["macros::NoContext", "macros::other::BorrowedPage"]"#);
 }
 
 #[test]
 fn names_and_descriptions_are_independent() {
-    let test = HandlesKeyboardEvents;
+    let test: &dyn BrowserTest = &HandlesKeyboardEvents;
     assert_that!(test.name()).is_equal_to("keyboard::events");
     assert_that!(test.description().as_deref())
         .is_equal_to(Some("Keyboard events reach their handler."));
     assert_that!(
-        TestSuite::sequential()
-            .with(test)
+        TestSuite::<()>::sequential()
+            .with(HandlesKeyboardEvents)
             .filter(&TestFilter::new().with_name("keyboard::events"))
             .is_empty()
     )
     .is_false();
     assert_that!(
-        TestSuite::sequential()
+        TestSuite::<()>::sequential()
             .with(HandlesKeyboardEvents)
             .filter(&TestFilter::new().with_name("Keyboard events reach"))
             .is_empty()
@@ -214,18 +284,22 @@ fn names_and_descriptions_are_independent() {
         "The page title matches the expected title.\n\n",
         "    Indented Markdown stays indented.",
     )));
-    assert_that!(ComputedDocumentation.description().as_deref())
+    assert_that!(BrowserTest::<()>::description(&ComputedDocumentation).as_deref())
         .is_equal_to(Some("Computed documentation."));
-    assert_that!(NoContext.description()).is_none();
+    assert_that!(BrowserTest::<()>::description(&NoContext)).is_none();
+    assert_that!(BrowserTest::<()>::description(&lints::ConditionallyDocumented).as_deref())
+        .is_equal_to(Some("Documented conditionally."));
 }
 
 #[tokio::test]
-async fn functions_keep_their_name_async_results_and_borrowed_arguments() {
+async fn functions_are_named_in_snake_case_and_keep_async_results_and_borrowed_arguments() {
     let title = String::from("title");
     let page = Page { title: &title };
     assert_that!(borrowed_page(&page).await).is_ok();
     assert_that!(explicit_lifetime(&page).await).is_ok();
     assert_that!(typed_error(&()).await).is_err();
+    // Keywords are raw identifiers.
+    assert_that!(r#loop().await).is_ok();
     let callbacks = Callbacks {
         on_title: str::len,
         on_click: &str::len,

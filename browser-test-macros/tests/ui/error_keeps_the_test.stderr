@@ -1,0 +1,19 @@
+error: expected `name = "..."`, `tags = ["..."]`, `time_limit = <Duration>` or `crate = <path>`
+ --> tests/ui/error_keeps_the_test.rs:7:16
+  |
+7 | #[browser_test(time_limt = std::time::Duration::from_secs(5))]
+  |                ^^^^^^^^^
+
+error: browser tests must be async functions
+  --> tests/ui/error_keeps_the_test.rs:14:5
+   |
+14 | pub fn NotAsync(_context: &str) -> Result<(), Report> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: mismatched types
+ --> tests/ui/error_keeps_the_test.rs:9:18
+  |
+9 |     let _: u32 = "not a number";
+  |            ---   ^^^^^^^^^^^^^^ expected `u32`, found `&str`
+  |            |
+  |            expected due to this

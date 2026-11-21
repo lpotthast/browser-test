@@ -1,0 +1,8 @@
+error: the second argument is the run's context, not the session's driver
+
+         = help: take the driver first: `(driver: &WebDriver, context: &Context)`
+
+ --> tests/ui/swapped_arguments.rs:5:34
+  |
+5 | async fn Swapped(_context: &str, _driver: &WebDriver) -> Result<(), Report> {
+  |                                  ^^^^^^^^^^^^^^^^^^^

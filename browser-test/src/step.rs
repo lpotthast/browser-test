@@ -1,7 +1,7 @@
 //! Timed steps inside browser tests.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fmt::{self, Display},
     future::Future,
     pin::Pin,
@@ -11,13 +11,16 @@ use std::{
 };
 
 use crate::{
-    failure_report::{PanicDetails, RecentSteps, StepEvent, StepLog},
+    failure_report::{PanicDetails, RecentSteps},
     report::{FormatDuration, StepStats},
 };
 
 /// Default for [`crate::ProgressWarnings`]'s slow step threshold, also used for steps outside of
 /// a runner.
 pub(crate) const DEFAULT_SLOW_STEP: Duration = Duration::from_secs(2);
+
+/// How many steps [`RecentSteps`] keeps.
+const RECENT_STEP_COUNT: usize = 8;
 
 tokio::task_local! {
     static CURRENT_TEST: Arc<StepRecorder>;
@@ -28,12 +31,29 @@ tokio::task_local! {
 pub(crate) struct StepRecorder {
     slow_step: Option<Duration>,
     steps: Mutex<BTreeMap<String, StepStats>>,
-    /// When the test started, for [`StepEvent::started`].
+    /// When the test started, for [`RecentStep::started`].
     started: Instant,
     /// The last steps, for failure reports.
     log: StepLog,
+    /// The steps that started and did not end yet, for the watchdog.
+    open: Mutex<OpenSteps>,
     /// Where the test panicked, recorded by the panic hook.
     panic: Mutex<Option<PanicDetails>>,
+}
+
+/// The steps of a test that started and did not end yet, in the order they started.
+#[derive(Debug, Default)]
+struct OpenSteps {
+    next_id: u64,
+    steps: Vec<OpenStep>,
+}
+
+#[derive(Debug)]
+struct OpenStep {
+    id: u64,
+    kind: &'static str,
+    detail: Option<String>,
+    start: Instant,
 }
 
 impl StepRecorder {
@@ -43,8 +63,49 @@ impl StepRecorder {
             steps: Mutex::new(BTreeMap::new()),
             started: Instant::now(),
             log: StepLog::default(),
+            open: Mutex::default(),
             panic: Mutex::new(None),
         })
+    }
+
+    /// Record that a step started at `start`. Returns its id, to close it with
+    /// [`Self::close_step`] when it ends.
+    fn open_step(&self, kind: &'static str, detail: Option<&str>, start: Instant) -> u64 {
+        let mut open = self.open.lock().unwrap_or_else(PoisonError::into_inner);
+        let id = open.next_id;
+        open.next_id += 1;
+        open.steps.push(OpenStep {
+            id,
+            kind,
+            detail: detail.map(str::to_owned),
+            start,
+        });
+        id
+    }
+
+    fn close_step(&self, id: u64) {
+        self.open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .steps
+            .retain(|step| step.id != id);
+    }
+
+    /// The innermost step that is still running, the one that started last, and for how long it
+    /// runs: `wait_for_text #status for 28.0s`.
+    pub(crate) fn running_step(&self) -> Option<String> {
+        let open = self.open.lock().unwrap_or_else(PoisonError::into_inner);
+        let step = open.steps.last()?;
+        let detail = step
+            .detail
+            .as_deref()
+            .map(|detail| format!(" {detail}"))
+            .unwrap_or_default();
+        Some(format!(
+            "{}{detail} for {}",
+            step.kind,
+            FormatDuration(step.start.elapsed())
+        ))
     }
 
     /// The test's last steps.
@@ -79,6 +140,74 @@ impl StepRecorder {
     }
 }
 
+/// A step of a test, as [`RecentSteps`] lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentStep {
+    pub(crate) kind: &'static str,
+    pub(crate) detail: Option<String>,
+    /// Since the test started.
+    pub(crate) started: Duration,
+    pub(crate) duration: Duration,
+    /// Whether the step's future finished, rather than being dropped before.
+    pub(crate) finished: bool,
+}
+
+impl RecentStep {
+    /// The step's kind, as given to [`StepExt::step`].
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        self.kind
+    }
+
+    /// The step's specifics, as given to [`Step::detail`].
+    #[must_use]
+    pub fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
+    }
+
+    /// When the step started, since the test started.
+    #[must_use]
+    pub const fn started(&self) -> Duration {
+        self.started
+    }
+
+    /// How long the step took, or ran until it was dropped.
+    #[must_use]
+    pub const fn duration(&self) -> Duration {
+        self.duration
+    }
+
+    /// Whether the step's future finished, rather than being dropped before (e.g. by a timeout or
+    /// a panic).
+    #[must_use]
+    pub const fn finished(&self) -> bool {
+        self.finished
+    }
+}
+
+/// A bounded log of the steps of the running test.
+#[derive(Debug, Default)]
+struct StepLog {
+    events: Mutex<(VecDeque<RecentStep>, usize)>,
+}
+
+impl StepLog {
+    fn push(&self, event: RecentStep) {
+        let mut guard = self.events.lock().unwrap_or_else(PoisonError::into_inner);
+        let (events, total) = &mut *guard;
+        if events.len() == RECENT_STEP_COUNT {
+            events.pop_front();
+        }
+        events.push_back(event);
+        *total += 1;
+    }
+
+    fn recent(&self) -> Option<RecentSteps> {
+        let guard = self.events.lock().unwrap_or_else(PoisonError::into_inner);
+        RecentSteps::new(&guard.0, guard.1)
+    }
+}
+
 /// Time futures as steps of a browser test, such as a navigation or a wait.
 ///
 /// Implemented for every future. Import it to call [`StepExt::step`].
@@ -89,7 +218,7 @@ pub trait StepExt: Future + Sized {
     /// logged at `debug` level with its duration. A step taking longer than the runner's slow
     /// step threshold (see [`crate::ProgressWarnings`], 2 seconds by default) is logged at `warn`
     /// level. Inside a test run by [`crate::BrowserTestRunner`], the step's duration is also added
-    /// to the test's [`crate::BrowserTestRecord::steps`] under `kind`, and the run summary lists
+    /// to the test's [`crate::TestRecord::steps`] under `kind`, and the run summary lists
     /// the step kinds that took the most time.
     ///
     /// A step that doesn't finish, because it is dropped (e.g. by a timeout around it) or a panic
@@ -118,6 +247,7 @@ pub trait StepExt: Future + Sized {
             kind,
             detail: None,
             start: None,
+            open: None,
             finished: false,
         }
     }
@@ -132,6 +262,8 @@ pub struct Step<F> {
     kind: &'static str,
     detail: Option<String>,
     start: Option<Instant>,
+    /// The test that the running step belongs to, and its id there, until the step ends.
+    open: Option<(Arc<StepRecorder>, u64)>,
     /// Whether the future finished. A step dropped before, e.g. by a timeout or a panic, is
     /// recorded as unfinished when dropped.
     finished: bool,
@@ -143,6 +275,29 @@ impl<F> Step<F> {
     pub fn detail(mut self, detail: impl Display) -> Self {
         self.detail = Some(detail.to_string());
         self
+    }
+
+    /// When the step started: now, on its first poll. A step of a test is open in the test's
+    /// recorder until it ends.
+    fn start(&mut self) -> Instant {
+        if let Some(start) = self.start {
+            return start;
+        }
+        let start = Instant::now();
+        self.start = Some(start);
+        self.open = CURRENT_TEST
+            .try_with(|recorder| {
+                let id = recorder.open_step(self.kind, self.detail.as_deref(), start);
+                (Arc::clone(recorder), id)
+            })
+            .ok();
+        start
+    }
+
+    fn close(&mut self) {
+        if let Some((recorder, id)) = self.open.take() {
+            recorder.close_step(id);
+        }
     }
 }
 
@@ -160,9 +315,10 @@ impl<F: Future> Future for Step<F> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
         let this = self.get_mut();
-        let start = *this.start.get_or_insert_with(Instant::now);
+        let start = this.start();
         let output = ready!(this.future.as_mut().poll(cx));
         this.finished = true;
+        this.close();
         record_step(this.kind, this.detail.as_deref(), start, true);
         Poll::Ready(output)
     }
@@ -170,6 +326,7 @@ impl<F: Future> Future for Step<F> {
 
 impl<F> Drop for Step<F> {
     fn drop(&mut self) {
+        self.close();
         if let Some(start) = self.start
             && !self.finished
         {
@@ -206,7 +363,7 @@ fn record_step(kind: &'static str, detail: Option<&str>, start: Instant, finishe
     };
     if let Some(recorder) = &recorder {
         recorder.record(kind, duration);
-        recorder.log.push(StepEvent {
+        recorder.log.push(RecentStep {
             kind,
             detail: detail.map(str::to_owned),
             started: start.saturating_duration_since(recorder.started),
@@ -317,6 +474,33 @@ mod tests {
                 string::contains(" assert ("),
             ])
             .matches(each(string::ends_with(", unfinished)")));
+    }
+
+    #[test]
+    fn the_innermost_running_step_is_named() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("current-thread runtime should build");
+        let recorder = StepRecorder::new(None);
+
+        runtime.block_on(recorder.scope(async {
+            let mut login = Box::pin(
+                async {
+                    async {}.step("goto").await;
+                    std::future::pending::<()>()
+                        .step("wait_for_text")
+                        .detail("#status")
+                        .await;
+                }
+                .step("login"),
+            );
+            assert_that!(futures_util::poll!(login.as_mut()).is_pending()).is_true();
+            let running = recorder.running_step().expect("a step runs");
+            assert_that!(running).starts_with("wait_for_text #status for ");
+
+            drop(login);
+            assert_that!(recorder.running_step()).is_none();
+        }));
     }
 
     #[test]

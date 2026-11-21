@@ -1,7 +1,7 @@
 use browser_test::browser_test;
 
 #[browser_test]
-async fn mutable_context(_context: &mut ()) -> Result<(), rootcause::Report> {
+async fn MutableContext(_context: &mut ()) -> Result<(), rootcause::Report> {
     Ok(())
 }
 

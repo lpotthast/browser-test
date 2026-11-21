@@ -11,11 +11,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Tags, which select tests independently of their names and of the suites they run in. Set them with
   `#[browser_test(tags = ["button", "keyboard"])]` or `BrowserTest::tags`, and select tests by them with
-  `TestFilter::with_tag` or `BROWSER_TEST_TAG`. `BrowserTestRecord::tags` lists a test's tags.
+  `TestFilter::with_tag` or `BROWSER_TEST_TAG`. `TestRecord::tags` lists a test's tags.
 - `BrowserTestRunner::with_filter`, the preferred way to select tests, e.g. `.with_filter(TestFilter::from_env()?)`.
   Tests in `TestSuite::unfiltered` suites always run, e.g. checks of the whole run. A run whose filter selects none of
   the other tests fails with `BrowserTestError::NoTestSelected`, so that a mistyped filter can't pass unnoticed.
 - `InvalidEnvVar::details`, e.g. why a regular expression is invalid.
+- `BrowserTestRunner::run_with_report`, which returns the run's `RunReport` along with its result, so that the report
+  no longer needs a consumer to be reached. Consumers are still called.
+- `TestRecord::failure`, the rendered failure report of a test that failed, panicked or timed out, so that a consumer
+  writing e.g. a `JUnit` or JSON report can say why a test failed.
+- `TestRecord::new`, `SuiteRecord::new` and `SessionTiming::new`, so that reports can be built outside the runner, e.g.
+  to test a `RunReportConsumer`.
+- The `serde` feature, which implements `serde::Serialize` for `RunReport` and the types it holds. Durations serialize
+  as seconds (a floating-point number), and enums in `snake_case`.
+- `BrowserTestRunner::with_version`, which pins the Chrome version, e.g. `.with_version(version)` with a `Version`
+  parsed from `"147.0.7727.56"`, or picks the latest of a channel, like `with_channel`. `Version` and `VersionRequest`
+  are re-exported.
+- `rootcause` is re-exported, like `thirtyfour`, as tests return its reports. Import it as `browser_test::rootcause`
+  instead of depending on it directly, so that tests and the runner always use the same version. Updating `rootcause`
+  or `thirtyfour` to a new breaking version is a breaking change of `browser-test`.
+- `#[browser_test(crate = path::to::browser_test)]`, which sets the path the generated code refers to `browser-test`
+  by, e.g. in a crate that uses it only through a re-export.
+- `#[browser_test]` applies the function's `#[allow]`s to the generated struct as well, and moves the `missing_docs`
+  lints of its `#[expect]`s to the struct, so that `#[expect(missing_docs)]` on a public test is fulfilled.
+- `TestSuite::with_all`, which adds a test for each item, e.g. the cases of a parameterized test.
+- `Box<T>` and `Arc<T>` implement `BrowserTest` for every test `T`, including `dyn BrowserTest`, so that a suite can
+  hold tests built at runtime.
+- `TestCodeFrames::frames` and `RecentSteps::steps` read the attachments of failure reports, e.g. to present failures
+  as annotations in CI: every `TestCodeFrame` has its `file`, `line` and `function`, every `RecentStep` its `kind`,
+  `detail` and timing.
+- The warning that a test is still running names the innermost step that is running, with its detail and for how long,
+  e.g. `Still running browser test 'login' after 30.00s, in step wait_for_text #status for 28.12s.` Before, a step that
+  hangs was only logged once the test's time limit dropped it.
+- With `DriverOutput` enabled, the report of a failed test shows chromedriver's output while it ran and its session
+  quit, without the lines of other sessions. Before, only the run's error showed the last lines of the run, which
+  mostly were the last tests' sessions quitting. The run's error still shows them if it failed otherwise, e.g. as a
+  session couldn't be created or chromedriver didn't shut down. Lines skipped because capturing fell behind are marked
+  where they were skipped, and the count of captured lines no longer includes them.
 
 ### Changed
 
@@ -25,16 +57,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `#[browser_test]`, with `#[browser_test(name = "...")]` instead of `.named("...")`. Turn a closure, or a function
   that needs state of its own, into a type implementing `BrowserTest`. Rename a hand-written test by returning the
   name from `BrowserTest::name`.
+- **Breaking:** `#[browser_test]` functions are named like the struct they define, in `PascalCase`, like e.g. Leptos
+  components: `async fn PageTitle` defines `struct PageTitle;`, so that a test is registered under the name it is
+  written with, and going to the struct's definition leads to the function. The function is renamed to `snake_case`
+  (`page_title`), which backtraces and `#[tracing::instrument]` show. Functions not named in `PascalCase` are rejected,
+  with the name to use. Test names default to the module-qualified name as written, e.g. `checkout::PageTitle` instead
+  of `checkout::page_title`, like those of hand-written tests. Keep the previous name with
+  `#[browser_test(name = "checkout::page_title")]`, or update filters matching it.
+- `#[browser_test]` reports a test that is never registered as a struct that is never constructed, instead of an unused
+  function, and moves the `dead_code` lints of its `#[expect]`s to the struct.
 - **Breaking:** `BrowserTests` became `TestSuite`, so that it no longer reads like the `BrowserTest` trait, and
-  `GroupRecord` became `SuiteRecord`. `BrowserTestRunReport::groups` became `suites`, and the run summary lists them
-  under `suites:`. `BrowserTests::filter_tests` was removed: select tests with a `TestFilter` instead.
+  `GroupRecord` became `SuiteRecord`. `BrowserTestRunReport::groups` became `RunReport::suites`, and the run summary
+  lists them under `suites:`. `BrowserTests::filter_tests` was removed: select tests with a `TestFilter` instead.
 - **Breaking:** Tags replace logical groups. `TestGroup`, `BrowserTests::with_test_group`,
   `BrowserTests::filter_groups`, `TestFilter::with_group`, `TestFilter::with_groups_from_env_var` and
-  `BROWSER_TEST_GROUP` were removed, and `BrowserTestRecord::group` became `tags`. Tag the tests of a group instead,
-  e.g. with `#[browser_test(tags = ["button"])]`, and add them to the suite with `TestSuite::with`. Replace
+  `BROWSER_TEST_GROUP` were removed, and `BrowserTestRecord::group` became `TestRecord::tags`. Tag the tests of a group
+  instead, e.g. with `#[browser_test(tags = ["button"])]`, and add them to the suite with `TestSuite::with`. Replace
   `with_group` with `with_tag`, `with_groups_from_env_var` with `with_tag_pattern_from_env_var`, `BROWSER_TEST_GROUP`
   with `BROWSER_TEST_TAG`, and `filter_groups` with a `TestFilter` selecting tags. `#[browser_test]` rejects empty and
   duplicate tags. A test wrapping another one should forward `BrowserTest::tags` as well.
+- **Breaking:** The variants of `BrowserTestError` with fields (`RunTest`, `PrepareSession`, `Panic`, `TimedOut`,
+  `RunTests` and `NoTestSelected`) are `#[non_exhaustive]`, so that they can gain fields without a breaking change.
+  Match them with `..`, e.g. `BrowserTestError::RunTests { failed_tests, .. }`. They can no longer be constructed
+  outside of `browser-test`.
+- **Breaking:** `ProgressWarnings::with_test_running`, `with_session` and `with_slow_step` take a `Duration`, like
+  the setters of `Timeouts`, and the new `without_test_running`, `without_session` and `without_slow_step` disable a
+  warning. Replace `with_session(Some(d))` with `with_session(d)`, and `with_session(None)` with `without_session()`.
+- **Breaking:** `DriverOutput::tail_lines(n)` became `DriverOutput::enabled().with_tail_lines(n)`, and
+  `DriverOutput::tail_line_count` became `tail_lines`, so that the getter is named like its setter. `enabled()` keeps
+  200 lines, like `BROWSER_TEST_DRIVER_OUTPUT=1`, and turns on capture like `Pause::enabled()` and
+  `SessionReuse::enabled()` do.
+- **Breaking:** `BrowserTestRunReport` became `RunReport` and `BrowserTestRecord` became `TestRecord`, in line with
+  `SuiteRecord`, `TestOutcome` and `RunReportConsumer`. `StepStats::count` is a `usize`, like every other count of the
+  report.
 - **Breaking:** `TestFilter::from_env` reads the name pattern from `BROWSER_TEST_NAME` instead of `BROWSER_TEST_FILTER`.
 - **Breaking:** `TestFilter` patterns are regular expressions, which match anywhere in the name or tag unless anchored:
   `smoke` also selects the tag `smoke-slow`, `^smoke$` only `smoke`. `BROWSER_TEST_NAME` and `BROWSER_TEST_TAG` hold one
@@ -47,9 +102,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `?`. Replace `impl BrowserTest<Context, E>` with `impl BrowserTest<Context>` returning `Result<(), Report>`, and
   `BrowserTests<Context, E>` with `TestSuite<Context>`. `#[browser_test]` functions can still return a non-dynamic
   `Report<E>`. A test wrapping another one gets its error as a `Report` and downcasts it to inspect a typed error.
+- **Breaking:** `BrowserTest::run` is a plain method returning the new `TestFuture<'a>`, a boxed `Send` future, instead
+  of an `#[async_trait]` method, so that the trait no longer depends on how `async-trait` expands it. The
+  `async_trait` re-export was removed. Remove `#[async_trait]` from hand-written implementations and replace
+  `async fn run(&self, driver: &WebDriver, context: &Context) -> Result<(), Report> { ... }` with
+  `fn run<'a>(&'a self, driver: &'a WebDriver, context: &'a Context) -> TestFuture<'a> { Box::pin(async move { ... }) }`.
+- **Breaking:** A `#[browser_test]` function without arguments implements `BrowserTest<Context>` for every context
+  instead of only `BrowserTest<()>`, so that it joins suites of any context. Calling its methods directly names the
+  context, e.g. `BrowserTest::<()>::name(&MyTest)`, and a suite of only such tests may need its context named where
+  nothing else infers it, e.g. `TestSuite::<()>::sequential()`.
 - **Breaking:** Updated `thirtyfour` to version `0.38`.
+- A test with an element query wait of its own (`TestSettings::with_element_query_wait`) takes a session from the pool
+  like any other test, instead of getting a session created for it when its turn comes. The runner sets every test's
+  wait in the session it gets. Such a test no longer waits for a browser to start, and with `SessionReuse`, it runs in
+  a reused session.
 - Updated `chrome-for-testing-manager` to version `0.15`.
 - Updated `assertr` to version `0.9`.
+
+### Fixed
+
+- The run summary's lists keep their durations aligned when one of them is 100 minutes or longer, as a step kind's total
+  time can be in a long run.
+- Errors created in a test no longer symbolize a backtrace right away, which blocked every running test and counted
+  against the test's time limit, also for errors the test handles itself (e.g. while retrying). The stack is still
+  captured where the error is created, but only symbolized to its `TestCodeFrames` when the report is printed. The
+  source location `rootcause` attaches to such an error is now wrapped in an attachment of browser-test's, which hides
+  it when the frames start there.
+- A panic in a dependency is no longer taken for one in the test code when the dependency's file path ends with the
+  path of the test's innermost frame, e.g. a registry crate's `src/lib.rs` in a single-package workspace. Locations are
+  compared by their full paths.
+- `TestCodeFrames` also find the test code where debug info names source files relative to the workspace (with
+  `--remap-path-prefix` or `trim-paths`) or, on Windows, with a verbatim prefix (`\\?\`) or a lower-case drive letter.
+  browser-test's own frames are also recognized by their symbols, so that remapped paths don't list the runner's
+  callers as test code. A stack without test code is logged once at `debug` level, with where its frames are.
+- Sources generated by build scripts no longer count as test code when the target directory is configured with
+  `build.target-dir` in `.cargo/config.toml`, rather than with `CARGO_TARGET_DIR`. It is found from the test
+  executable's location.
+- `TestCodeFrames` name functions whose generic arguments hold a function pointer type (`fn() -> T`) correctly, and
+  align frames whose paths aren't ASCII.
+- A dialog open in a tab other than the session's current one, when a test exceeds its time limit, is named in the
+  report like one in the current tab, instead of its page being taken for frozen and closed. A frozen page that the
+  browser still lists after closing it has its renderer crashed. A check of the pages that runs out of time still
+  names the frozen pages it found, and the report no longer claims to know why a page didn't respond.
+- A run no longer renames the directory for the Chrome profiles of its sessions while it holds an open lock file in it,
+  which Windows may refuse. A run's lock file is now next to its directory, `run-<name>.lock`. The run also locks
+  `run.lock` in its directory, which older versions of browser-test look for when they clean up after killed runs.
+- `WebDriver` errors that thirtyfour raises without an HTTP status, e.g. for a window it can't find by name, no longer
+  print `State:` within their message.
+- A test that panics while it is stopped at its time limit, e.g. in a `Drop` implementation, no longer brings down the
+  whole run. The test times out, and its report holds the panic as a child.
+- Tests waiting for a browser session get one in the order they asked for it, rather than whichever happened to be
+  polled first.
+- A spare browser session that could not be created no longer fails an unrelated test that starts later. Its failure
+  goes to a test waiting for a session, if any. Otherwise it is logged, and the spare created again, once per spare
+  since the last session that could be created. After that, it fails the next test, so that a setup that never works
+  doesn't create sessions without end.
+- With `SessionReuse`, preparing a new session for reuse may take 30 seconds, like resetting one. A session taking
+  longer runs one test only, instead of keeping its test from starting indefinitely.
+- With `FailurePolicy::FailFast`, idle spare sessions that the tests still to start (those of `TestSuite::run_always`
+  suites) don't need quit right away, instead of at the end of the run.
+- The Chrome profile of a session that didn't quit in time is removed with the run's profiles once Chrome for Testing
+  shut down, rather than right away, while its browser may still write to it.
 
 ## [0.7.0] - 2026-10-13
 

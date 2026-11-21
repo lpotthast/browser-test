@@ -5,6 +5,7 @@ use proc_macro2::Span;
 use syn::{
     FnArg, GenericParam, Generics, Lifetime, LifetimeParam, ParenthesizedGenericArguments,
     ReturnType, Safety, Signature, Type, TypeFnPtr, TypeReference,
+    spanned::Spanned as _,
     visit_mut::{self, VisitMut},
 };
 
@@ -12,12 +13,16 @@ use syn::{
 pub(super) struct TestSignature {
     /// The declared return type, e.g. `Result<(), Report>` or an alias of it.
     pub(super) result: Type,
-    /// The type behind the context reference, `()` without one. Its elided lifetimes are named.
+    /// The type behind the context reference, its elided lifetimes named. Without one, a type
+    /// parameter, so that the test joins suites of every context.
     pub(super) context: Type,
-    /// The function's lifetime parameters and those named in `context`.
+    /// The function's lifetime parameters, those named in `context`, and the type parameter of a
+    /// test without a context.
     pub(super) generics: Generics,
     /// The arguments the function takes.
     pub(super) inputs: Inputs,
+    /// The spans of the types the arguments reference, at which a mismatched argument is reported.
+    pub(super) input_spans: Vec<Span>,
 }
 
 /// The arguments a browser test function takes.
@@ -62,6 +67,7 @@ impl TestSignature {
             ),
         };
         let mut context = None;
+        let mut input_spans = Vec::new();
         for input in &signature.inputs {
             let FnArg::Typed(input) = input else {
                 bail!(input, "browser tests must be free functions");
@@ -73,34 +79,51 @@ impl TestSignature {
                     "browser test arguments must be shared references"
                 ),
             };
+            input_spans.push(reference.elem.span());
             // The last argument is the context.
             context = Some((*reference.elem).clone());
-        }
-        if let (Inputs::Context, Some(context)) = (&inputs, &context) {
-            ensure!(
-                !names_web_driver(context),
-                &signature.inputs,
-                "a single argument is the run's context, not the session's driver";
-                help = "take the driver and the context: `(driver: &WebDriver, context: &Context)`, \
-                        with `&()` for a run without context",
-            );
+            if names_web_driver(&reference.elem) {
+                match inputs {
+                    Inputs::Context => bail!(
+                        input,
+                        "a single argument is the run's context, not the session's driver";
+                        help = "take the driver and the context: \
+                                `(driver: &WebDriver, context: &Context)`, with `&()` for a run \
+                                without context",
+                    ),
+                    Inputs::DriverAndContext if input_spans.len() == 2 => bail!(
+                        input,
+                        "the second argument is the run's context, not the session's driver";
+                        help = "take the driver first: `(driver: &WebDriver, context: &Context)`",
+                    ),
+                    _ => {}
+                }
+            }
         }
         let ReturnType::Type(_, result) = &signature.output else {
             bail!(signature, "browser tests must return Result<(), Report>");
         };
 
-        let mut context = context.unwrap_or_else(|| syn::parse_quote!(()));
         let mut generics = signature.generics.clone();
-        generics.params.extend(
-            name_elided_lifetimes(&mut context)
-                .into_iter()
-                .map(GenericParam::Lifetime),
-        );
+        let context = if let Some(mut context) = context {
+            generics.params.extend(
+                name_elided_lifetimes(&mut context)
+                    .into_iter()
+                    .map(GenericParam::Lifetime),
+            );
+            context
+        } else {
+            generics.params.push(syn::parse_quote!(
+                __BrowserTestContext: ?::core::marker::Sized + ::core::marker::Sync
+            ));
+            syn::parse_quote!(__BrowserTestContext)
+        };
         Ok(Self {
             result: (**result).clone(),
             context,
             generics,
             inputs,
+            input_spans,
         })
     }
 }

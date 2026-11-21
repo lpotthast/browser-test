@@ -62,30 +62,31 @@ tests:
 ```toml
 [dev-dependencies]
 browser-test = "0.8"
-rootcause = "0.13"
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
 ```
 
-Tests return `rootcause` reports as their errors, and Tokio provides the async runtime.
-
-`browser-test` uses `thirtyfour` as its `WebDriver` client and re-exports it. Import it through the re-export, so that
-your tests and the runner always use the same version:
+Tokio provides the async runtime. `browser-test` re-exports the crates its API is built on: `thirtyfour`, its
+`WebDriver` client, and `rootcause`, whose reports tests return as their errors. Import them through the re-exports, so
+that your tests and the runner always use the same versions:
 
 ```rust
 use browser_test::{BrowserTest, BrowserTestRunner, TestSuite};
+use browser_test::rootcause::{Report, prelude::*};
 use browser_test::thirtyfour::{By, WebDriver, prelude::*};
 ```
 
-Only add `thirtyfour` as a direct dependency if you need to manage that dependency yourself.
+Only add them as direct dependencies if you need to, e.g. for `rootcause` extension crates, and then keep their
+versions in line with the ones `browser-test` uses. Updating either of them to a new breaking version (e.g. `thirtyfour`
+`0.38` to `0.39`) is a breaking change of `browser-test`.
 
 ### First Test
 
 This test opens Wikipedia and checks the page title.
 
 ```rust,no_run
+use browser_test::rootcause::{Report, report};
 use browser_test::thirtyfour::WebDriver;
 use browser_test::{BrowserTestError, BrowserTestRunner, Cancellation, TestSuite, browser_test};
-use rootcause::{Report, report};
 
 struct Context {
     base_url: String,
@@ -93,7 +94,7 @@ struct Context {
 
 /// The page title names Wikipedia.
 #[browser_test]
-async fn page_title(driver: &WebDriver, context: &Context) -> Result<(), Report> {
+async fn PageTitle(driver: &WebDriver, context: &Context) -> Result<(), Report> {
     driver.goto(&context.base_url).await?;
 
     let title = driver.title().await?;
@@ -117,10 +118,10 @@ async fn main() -> Result<(), Report<BrowserTestError>> {
 }
 ```
 
-`#[browser_test]` turns `page_title` into a unit struct named `PageTitle` that implements `BrowserTest<Context>` (see
-[Writing Tests](#writing-tests)). You add it to a `TestSuite` and pass that to the runner together with the
-context. `run` returns an error if the runner itself fails, a test returns an error, panics or times out, or the
-run is cancelled. The error is a `Report<BrowserTestError>` with the details.
+`#[browser_test]` turns `PageTitle` into a unit struct of that name that implements `BrowserTest<Context>` (see
+[Writing Tests](#writing-tests)). You add it to a `TestSuite` and pass that to the runner together with the context.
+`run` returns an error if the runner itself fails, a test returns an error, panics or times out, or the run is
+cancelled. The error is a `Report<BrowserTestError>` with the details.
 
 The runner works without further settings. [Configuring the Runner](#configuring-the-runner) shows every option, and
 each one is documented on [`BrowserTestRunner`].
@@ -145,6 +146,8 @@ A few things to keep in mind:
   provider before running tests.
 - `native-tls`: Download using the platform's native TLS implementation.
 - `component`: Enable `#[derive(Component)]` in the re-exported `thirtyfour`.
+- `serde`: Implement `serde::Serialize` for the run report (`RunReport` and the types it holds), e.g. to write it as
+  JSON. Durations serialize as seconds.
 
 The TLS features are passed on to `chrome-for-testing-manager`. Chrome for Testing is downloaded over HTTPS, so one of
 them must be enabled, or every download fails. The connection to chromedriver on localhost does not use TLS.
@@ -169,13 +172,48 @@ let _ = rustls::crypto::ring::default_provider().install_default();
 ## Writing Tests
 
 `#[browser_test]` is the easiest way to write a test. The function takes no arguments, the run's context
-(`&Context`), or the session's driver and the context (`&WebDriver, &Context`), and returns `Result<(), Report>`. The
-generated struct is named after the function in `PascalCase`. The test's name is the module-qualified function name,
-which `#[browser_test(name = "...")]` replaces, and the function's doc comments become the test's description. The
-[attribute's documentation][browser_test] lists every supported signature.
+(`&Context`), or the session's driver and the context (`&WebDriver, &Context`), and returns `Result<(), Report>`. Like
+the struct it becomes, and like e.g. Leptos components, the function is named in `PascalCase`, so that you register it
+under the name you wrote, and going to its definition leads to the function. The function itself is renamed to
+`snake_case` (`page_title`), which backtraces show. The test's name is the module-qualified name you wrote (e.g.
+`checkout::PageTitle`), which `#[browser_test(name = "...")]` replaces, and the function's doc comments become the
+test's description. The [attribute's documentation][browser_test] lists every supported signature.
 
 Implement the [`BrowserTest`] trait yourself for tests that take parameters, wrap other tests, or need their own
-timeouts or a browser no other test has used.
+timeouts or a browser no other test has used. `run` returns the test's body as a boxed future, and
+`TestSuite::with_all` adds a test for each of its parameters:
+
+```rust
+use std::borrow::Cow;
+
+use browser_test::thirtyfour::{By, WebDriver};
+use browser_test::{BrowserTest, TestFuture, TestSuite};
+
+/// The link to the Wikipedia edition in `language` is visible.
+struct EditionIsLinked {
+    language: &'static str,
+}
+
+impl BrowserTest<str> for EditionIsLinked {
+    fn name(&self) -> Cow<'_, str> {
+        format!("edition_is_linked::{}", self.language).into()
+    }
+
+    fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver.goto(base_url).await?;
+            driver.find(By::Id(format!("js-link-box-{}", self.language))).await?;
+            Ok(())
+        })
+    }
+}
+
+let tests: TestSuite<str> = TestSuite::sequential()
+    .with_all(["en", "de", "fr"].map(|language| EditionIsLinked { language }));
+```
+
+Tests built at runtime can be added as `Box<dyn BrowserTest<Context>>` or `Arc<dyn BrowserTest<Context>>`, which
+implement `BrowserTest` by forwarding to the test.
 
 ## Organizing Tests
 
@@ -197,9 +235,9 @@ unless anchored: `BROWSER_TEST_NAME='keyboard|^checkout::'` selects tests whose 
 and mark suites that must always run, e.g. checks of the whole run, `unfiltered()`:
 
 ```rust,no_run
-# use rootcause::Report;
+# use browser_test::rootcause::Report;
 # #[browser_test::browser_test]
-# async fn server_did_not_panic() -> Result<(), Report> { Ok(()) }
+# async fn ServerDidNotPanic() -> Result<(), Report> { Ok(()) }
 # fn component_tests() -> browser_test::TestSuite { browser_test::TestSuite::sequential() }
 # async fn run() -> Result<(), Report> {
 use browser_test::{BrowserTestRunner, Cancellation, TestFilter, TestSuite};
@@ -235,11 +273,13 @@ use browser_test::thirtyfour::ChromiumLikeCapabilities;
 use browser_test::{
     BrowserTestRunner, Cancellation, Channel, ChromeBinary, DriverOutput, ElementQueryWait,
     FailurePolicy, Pause, ProgressWarnings, SessionReuse, StderrSummary, TestFilter, Timeouts,
-    Visibility,
+    VersionRequest, Visibility,
 };
 
 let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals())
-    // The browser.
+    // The browser. `with_version` takes the latest of a channel or a fixed `Version`, and
+    // `with_channel(channel)` is short for its first form. The last of the two wins.
+    .with_version(VersionRequest::LatestIn(Channel::Stable))
     .with_channel(Channel::Stable)
     .with_visibility(Visibility::Headless)
     .with_headless_chrome_binary(ChromeBinary::ChromeHeadlessShell)
@@ -259,7 +299,7 @@ let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals())
     .with_time_limit(Duration::from_secs(300))
     .with_progress_warnings(ProgressWarnings::default())
     .with_pause(Pause::disabled())
-    .with_driver_output(DriverOutput::tail_lines(200))
+    .with_driver_output(DriverOutput::enabled().with_tail_lines(200))
     .with_failure_report_hooks(true)
     // Which tests run.
     .with_filter(TestFilter::new().with_tag("^smoke$"))
@@ -284,8 +324,11 @@ let runner = BrowserTestRunner::new(Cancellation::on_shutdown_signals())
 BROWSER_TEST_VISIBLE=1 BROWSER_TEST_PAUSE=1 BROWSER_TEST_DRIVER_OUTPUT=1 cargo test -- --nocapture
 ```
 
-`from_env()` returns `None` if the variable is not set, so you choose the default. A value it cannot parse, such as
-`BROWSER_TEST_VISIBLE=ture`, is an error instead of being ignored.
+The `from_env()` of `Visibility`, `Pause`, `DriverOutput`, `Parallelism` and `SessionReuse` returns `None` if its
+variable is unset or empty, so you choose the default. `TestFilter::from_env()` returns the filter itself: an unset or
+empty variable adds no pattern, so without either variable, it selects every test. A value that cannot be parsed, such
+as `BROWSER_TEST_VISIBLE=ture` or an invalid regular expression in `BROWSER_TEST_NAME`, is an `InvalidEnvVar` error
+instead of being ignored.
 
 | Variable                                | Read by                    | Effect                                        |
 |-----------------------------------------|----------------------------|-----------------------------------------------|
@@ -327,8 +370,9 @@ and uses less memory in every test.
 
 ## Timing
 
-At the end of each run, the runner passes a [`BrowserTestRunReport`] to the consumers you add with
-`BrowserTestRunner::with_report_consumer`. `StderrSummary` prints a summary like this:
+At the end of each run, the runner passes a [`RunReport`] to the consumers you add with
+`BrowserTestRunner::with_report_consumer`, and `BrowserTestRunner::run_with_report` returns it along with the run's
+result. `StderrSummary` prints a summary like this:
 
 ```text
 Browser test run: 39 test(s), 39 passed, 0 failed, in 2m 10.4s
@@ -444,7 +488,7 @@ at your option.
 [with_spare_sessions]: https://docs.rs/browser-test/latest/browser_test/struct.BrowserTestRunner.html#method.with_spare_sessions
 [`SessionReuse`]: https://docs.rs/browser-test/latest/browser_test/struct.SessionReuse.html
 [`SessionReset`]: https://docs.rs/browser-test/latest/browser_test/enum.SessionReset.html
-[`BrowserTestRunReport`]: https://docs.rs/browser-test/latest/browser_test/struct.BrowserTestRunReport.html
+[`RunReport`]: https://docs.rs/browser-test/latest/browser_test/struct.RunReport.html
 [StepExt]: https://docs.rs/browser-test/latest/browser_test/trait.StepExt.html#method.step
 [`ProgressWarnings`]: https://docs.rs/browser-test/latest/browser_test/struct.ProgressWarnings.html
 [`failure_report`]: https://docs.rs/browser-test/latest/browser_test/failure_report/index.html

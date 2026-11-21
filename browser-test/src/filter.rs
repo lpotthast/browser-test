@@ -52,12 +52,13 @@ const EXPECTED_PATTERN: &str = "a regular expression";
 /// ```no_run
 /// # use std::borrow::Cow;
 /// # use browser_test::thirtyfour::WebDriver;
-/// # use browser_test::{async_trait, BrowserTest};
+/// # use browser_test::{BrowserTest, TestFuture};
 /// # use rootcause::Report;
 /// # struct ServerDidNotPanic;
-/// # #[async_trait]
 /// # impl BrowserTest for ServerDidNotPanic {
-/// #     async fn run(&self, _driver: &WebDriver, _context: &()) -> Result<(), Report> { Ok(()) }
+/// #     fn run<'a>(&'a self, _: &'a WebDriver, _: &'a ()) -> TestFuture<'a> {
+/// #         Box::pin(async { Ok(()) })
+/// #     }
 /// # }
 /// # fn component_tests() -> browser_test::TestSuite { browser_test::TestSuite::sequential() }
 /// # async fn run() -> Result<(), Report> {
@@ -340,7 +341,7 @@ mod tests {
     #[test]
     fn environment_patterns_are_trimmed_and_empty_ones_ignored() {
         let names = EnvVarGuard::new(DEFAULT_NAME_FILTER_ENV);
-        let tags = EnvVarGuard::new_unlocked(DEFAULT_TAG_FILTER_ENV);
+        let tags = names.also(DEFAULT_TAG_FILTER_ENV);
         names.remove();
         tags.remove();
         assert_that!(TestFilter::from_env())
@@ -399,12 +400,22 @@ mod tests {
 
     #[test]
     fn invalid_patterns_are_errors() {
+        // The regex crate's wording may change between releases, so compare against it instead
+        // of spelling it out.
+        #[expect(
+            clippy::invalid_regex,
+            reason = "the test needs an invalid pattern's error"
+        )]
+        let regex_error = Regex::new("(").unwrap_err().to_string();
+        assert_that!(regex_error.as_str()).is_not_empty();
+
         assert_that!(TestFilter::new().try_with_tag("("))
             .err()
-            .has_display_value(concat!(
-                "invalid test filter pattern \"(\": ",
-                "regex parse error:\n    (\n    ^\nerror: unclosed group",
-            ));
+            .is_equal_to(InvalidPattern {
+                pattern: "(".to_owned(),
+                message: regex_error.clone(),
+            })
+            .has_display_value(format!("invalid test filter pattern \"(\": {regex_error}"));
 
         let names = EnvVarGuard::new("BROWSER_TEST_NAME_UNCLOSED");
         names.set(" ( ");
@@ -412,9 +423,15 @@ mod tests {
             TestFilter::new().with_name_pattern_from_env_var("BROWSER_TEST_NAME_UNCLOSED")
         )
         .err()
-        .has_display_value(concat!(
-            "environment variable BROWSER_TEST_NAME_UNCLOSED is set to \"(\", expected a ",
-            "regular expression: regex parse error:\n    (\n    ^\nerror: unclosed group",
+        .is_equal_to(InvalidEnvVar {
+            name: "BROWSER_TEST_NAME_UNCLOSED".to_owned(),
+            value: "(".to_owned(),
+            expected: EXPECTED_PATTERN,
+            details: Some(regex_error.clone()),
+        })
+        .has_display_value(format!(
+            "environment variable BROWSER_TEST_NAME_UNCLOSED is set to \"(\", expected a \
+             regular expression: {regex_error}"
         ));
     }
 

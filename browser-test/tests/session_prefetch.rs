@@ -7,21 +7,22 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use assertr::prelude::*;
 use browser_test::{
-    BrowserTest, BrowserTestError, BrowserTestRunReport, BrowserTestRunner, CachedData,
-    Cancellation, ElementQueryWait, FailurePolicy, Parallelism, SessionPreparation, SessionReset,
-    SessionReuse, StepExt, TestOutcome, TestSettings, TestSuite, TracingSummary, async_trait,
-    thirtyfour::{ChromiumLikeCapabilities, WebDriver},
+    BrowserTest, BrowserTestError, BrowserTestRunner, CachedData, Cancellation, ElementQueryWait,
+    FailurePolicy, Parallelism, RunReport, SessionPreparation, SessionReset, SessionReuse, StepExt,
+    TestFuture, TestOutcome, TestSettings, TestSuite, TracingSummary,
+    thirtyfour::{By, ChromiumLikeCapabilities, WebDriver, prelude::ElementQueryable as _},
 };
 use rootcause::{Report, report};
 use serial_test::serial;
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::TcpListener,
+    sync::watch,
 };
 
 const PAGE: &str = "<!doctype html><title>session prefetch fixture</title><p>fixture</p>";
@@ -70,7 +71,38 @@ fn runner() -> BrowserTestRunner {
 struct Tracker {
     started: Mutex<Vec<usize>>,
     running: AtomicUsize,
-    max_running: AtomicUsize,
+    max_running: watch::Sender<usize>,
+    /// How many of its tests must have run at once before a test runs its body.
+    overlap: usize,
+}
+
+/// How long a test waits for [`Tracker::overlap`] tests to run at once. Only reached when they
+/// never do, which the test's assertions then report.
+const OVERLAP_TIMEOUT: Duration = Duration::from_secs(30);
+
+impl Tracker {
+    /// A tracker whose tests wait until `overlap` of them have run at the same time before they
+    /// run their body. That `overlap` tests ran at once then doesn't depend on whether their
+    /// sessions happened to start within one body's duration of each other.
+    fn overlapping(overlap: usize) -> Self {
+        Self {
+            overlap,
+            ..Self::default()
+        }
+    }
+
+    fn max_running(&self) -> usize {
+        *self.max_running.borrow()
+    }
+
+    async fn await_overlap(&self) {
+        let mut max_running = self.max_running.subscribe();
+        let _ = tokio::time::timeout(
+            OVERLAP_TIMEOUT,
+            max_running.wait_for(|max| *max >= self.overlap),
+        )
+        .await;
+    }
 }
 
 /// Opens the fixture page and stays there for `body`.
@@ -79,8 +111,6 @@ struct Visit {
     body: Duration,
     fail: bool,
     fresh_session: bool,
-    /// Whether the test has an element query wait of its own, and so a session created for it.
-    dedicated: bool,
     tags: &'static [&'static str],
     tracker: Arc<Tracker>,
 }
@@ -92,14 +122,12 @@ impl Visit {
             body,
             fail: false,
             fresh_session: false,
-            dedicated: false,
             tags: &[],
             tracker: Arc::clone(tracker),
         }
     }
 }
 
-#[async_trait]
 impl BrowserTest<str> for Visit {
     fn name(&self) -> Cow<'_, str> {
         format!("visit {}", self.index).into()
@@ -110,35 +138,32 @@ impl BrowserTest<str> for Visit {
     }
 
     fn settings(&self) -> TestSettings {
-        let settings = TestSettings::new().with_fresh_session(self.fresh_session);
-        if self.dedicated {
-            settings.with_element_query_wait(ElementQueryWait::new(
-                Duration::from_secs(1),
-                Duration::from_millis(100),
-            ))
-        } else {
-            settings
-        }
+        TestSettings::new().with_fresh_session(self.fresh_session)
     }
 
-    async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
-        let tracker = &self.tracker;
-        tracker.started.lock().unwrap().push(self.index);
-        let running = tracker.running.fetch_add(1, Ordering::SeqCst) + 1;
-        tracker.max_running.fetch_max(running, Ordering::SeqCst);
+    fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
+            let tracker = &self.tracker;
+            tracker.started.lock().unwrap().push(self.index);
+            let running = tracker.running.fetch_add(1, Ordering::SeqCst) + 1;
+            tracker
+                .max_running
+                .send_modify(|max| *max = (*max).max(running));
 
-        let result = async {
-            driver.goto(base_url).step("goto").detail(base_url).await?;
-            tokio::time::sleep(self.body).await;
-            if self.fail {
-                return Err(report!("intentional failure"));
+            let result = async {
+                driver.goto(base_url).step("goto").detail(base_url).await?;
+                tracker.await_overlap().await;
+                tokio::time::sleep(self.body).await;
+                if self.fail {
+                    return Err(report!("intentional failure"));
+                }
+                Ok(())
             }
-            Ok(())
-        }
-        .await;
+            .await;
 
-        tracker.running.fetch_sub(1, Ordering::SeqCst);
-        result
+            tracker.running.fetch_sub(1, Ordering::SeqCst);
+            result
+        })
     }
 }
 
@@ -160,7 +185,7 @@ fn visits_in(
 /// The result and report of one run.
 struct Run {
     result: Result<(), Report<BrowserTestError>>,
-    report: BrowserTestRunReport,
+    report: RunReport,
 }
 
 /// Run `tests`, capturing the run's report through a report consumer.
@@ -168,7 +193,7 @@ async fn run(runner: BrowserTestRunner, base_url: &str, tests: TestSuite<str>) -
     let captured = Arc::new(Mutex::new(None));
     let consumer_capture = Arc::clone(&captured);
     let result = runner
-        .with_report_consumer(move |report: &BrowserTestRunReport| {
+        .with_report_consumer(move |report: &RunReport| {
             *consumer_capture.lock().unwrap() = Some(report.clone());
         })
         .run(base_url, tests)
@@ -199,10 +224,11 @@ fn session_timings(outcome: &Run) -> Vec<(Duration, Duration)> {
 async fn later_tests_find_their_session_ready() {
     let base_url = serve_fixture().await;
     let tracker = Arc::new(Tracker::default());
+    let body = Duration::from_secs(2);
     let consumed = Arc::new(Mutex::new(Vec::new()));
     let consumer = |name: &'static str| {
         let consumed = Arc::clone(&consumed);
-        move |report: &BrowserTestRunReport| {
+        move |report: &RunReport| {
             consumed.lock().unwrap().push((name, report.tests.len()));
         }
     };
@@ -212,7 +238,7 @@ async fn later_tests_find_their_session_ready() {
             .with_report_consumer(consumer("first"))
             .with_report_consumer(consumer("second")),
         base_url.as_str(),
-        visits(3, Duration::from_secs(2), &tracker),
+        visits(3, body, &tracker),
     )
     .await;
 
@@ -220,12 +246,16 @@ async fn later_tests_find_their_session_ready() {
     assert_that!(consumed.lock().unwrap().clone()).is_equal_to(vec![("first", 3), ("second", 3)]);
     assert_that!(outcome.report.sessions_created()).is_equal_to(3);
     for (creation, wait) in &session_timings(&outcome)[1..] {
-        // Created while the previous test ran.
+        // Created while the previous test ran, so the test waits at most for the part of the
+        // creation that outlasted the previous test's body. A session created only on the test's
+        // turn makes it wait for all of the creation. The margin of half a body (or half the
+        // creation, if that is shorter) holds however long creating a session takes.
+        let margin = (*creation).min(body) / 2;
         assert_that!(*wait)
             .with_detail_message(format!(
                 "waited {wait:?} for a session created in {creation:?}"
             ))
-            .is_less_than(*creation / 2);
+            .is_less_than(creation.saturating_sub(margin));
     }
     for test in &outcome.report.tests {
         assert_that!(test.teardown).is_some();
@@ -262,7 +292,7 @@ async fn without_spare_sessions_tests_wait_for_their_session() {
 #[serial]
 async fn parallel_tests_start_in_order_on_bounded_slots() {
     let base_url = serve_fixture().await;
-    let tracker = Arc::new(Tracker::default());
+    let tracker = Arc::new(Tracker::overlapping(2));
 
     let outcome = run(
         runner(),
@@ -282,7 +312,7 @@ async fn parallel_tests_start_in_order_on_bounded_slots() {
     let mut started = tracker.started.lock().unwrap().clone();
     started.sort_unstable();
     assert_that!(started).is_equal_to(vec![0, 1, 2, 3, 4]);
-    assert_that!(tracker.max_running.load(Ordering::SeqCst)).is_equal_to(2);
+    assert_that!(tracker.max_running()).is_equal_to(2);
     assert_that!(outcome.report.sessions_created()).is_equal_to(5);
 }
 
@@ -319,14 +349,15 @@ async fn fail_fast_does_not_start_tests_waiting_for_their_session() {
     let mut failing = Visit::new(1, Duration::ZERO, &tracker);
     failing.fail = true;
     // Its session is created when its turn comes, which takes longer than the failing test.
-    let mut waiting = Visit::new(2, Duration::ZERO, &tracker);
-    waiting.dedicated = true;
+    let waiting = Visit::new(2, Duration::ZERO, &tracker);
 
     let outcome = run(
-        runner().with_failure_policy(FailurePolicy::FailFast),
+        runner()
+            .with_failure_policy(FailurePolicy::FailFast)
+            .with_spare_sessions(1),
         base_url.as_str(),
         TestSuite::sequential()
-            // While it runs, a spare session gets ready for the failing test.
+            // While it runs, the one spare session gets ready for the failing test.
             .with(Visit::new(0, Duration::from_secs(1), &tracker))
             .with_nested(
                 TestSuite::parallel(Parallelism::parallel(2))
@@ -346,7 +377,6 @@ struct Storage {
     write: bool,
 }
 
-#[async_trait]
 impl BrowserTest<str> for Storage {
     fn name(&self) -> Cow<'_, str> {
         if self.write {
@@ -357,27 +387,29 @@ impl BrowserTest<str> for Storage {
         .into()
     }
 
-    async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
-        driver.goto(base_url).await?;
-        if self.write {
-            driver
+    fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver.goto(base_url).await?;
+            if self.write {
+                driver
+                    .execute(
+                        "localStorage.setItem('leak', '1'); document.cookie = 'leak=1';",
+                        Vec::new(),
+                    )
+                    .await?;
+                return Ok(());
+            }
+            let leaked = driver
                 .execute(
-                    "localStorage.setItem('leak', '1'); document.cookie = 'leak=1';",
+                    "return localStorage.getItem('leak') !== null || document.cookie.includes('leak');",
                     Vec::new(),
                 )
                 .await?;
-            return Ok(());
-        }
-        let leaked = driver
-            .execute(
-                "return localStorage.getItem('leak') !== null || document.cookie.includes('leak');",
-                Vec::new(),
-            )
-            .await?;
-        if leaked.convert::<bool>()? {
-            return Err(report!("state of the previous test leaked into this one"));
-        }
-        Ok(())
+            if leaked.convert::<bool>()? {
+                return Err(report!("state of the previous test leaked into this one"));
+            }
+            Ok(())
+        })
     }
 }
 
@@ -402,7 +434,7 @@ async fn every_test_gets_a_fresh_browser() {
 #[serial]
 async fn nested_suites_limit_what_runs_at_the_same_time() {
     let base_url = serve_fixture().await;
-    let all = Arc::new(Tracker::default());
+    let all = Arc::new(Tracker::overlapping(2));
     let serial = Arc::new(Tracker::default());
     let body = Duration::from_millis(700);
     let tests = TestSuite::parallel(Parallelism::parallel(3))
@@ -424,8 +456,8 @@ async fn nested_suites_limit_what_runs_at_the_same_time() {
     let outcome = run(runner(), base_url.as_str(), tests).await;
 
     assert_that!(outcome.result).is_ok();
-    assert_that!(all.max_running.load(Ordering::SeqCst)).is_equal_to(2);
-    assert_that!(serial.max_running.load(Ordering::SeqCst)).is_equal_to(1);
+    assert_that!(all.max_running()).is_equal_to(2);
+    assert_that!(serial.max_running()).is_equal_to(1);
     assert_that!(serial.started.lock().unwrap().clone()).is_equal_to(vec![2, 3]);
     let paths: Vec<Option<&str>> = outcome
         .report
@@ -537,63 +569,64 @@ struct Dirty {
     second_window: bool,
 }
 
-#[async_trait]
 impl BrowserTest<str> for Dirty {
     fn name(&self) -> Cow<'_, str> {
         "dirty".into()
     }
 
-    async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
-        driver.goto(base_url).await?;
-        *self.initial_rect.lock().unwrap() = Some(driver.get_window_rect().await?);
-        driver
-            .execute(
-                "localStorage.setItem('leak', '1'); sessionStorage.setItem('leak', '1');
-                 document.cookie = 'leak=1';",
-                Vec::new(),
-            )
-            .await?;
-        // A file in the Origin Private File System.
-        driver
-            .execute_async(
-                "const done = arguments[0];
-                 navigator.storage.getDirectory()
-                     .then(dir => dir.getFileHandle('leak', { create: true }))
-                     .then(file => file.createWritable())
-                     .then(writer => writer.write('1').then(() => writer.close()))
-                     .then(done);",
-                Vec::new(),
-            )
-            .await?;
-        driver
-            .cdp()
-            .send_raw(
-                "Browser.grantPermissions",
-                serde_json::json!({
-                    "origin": base_url,
-                    "permissions": ["clipboardReadWrite"],
-                }),
-            )
-            .await?;
-        driver
-            .cdp()
-            .send_raw(
-                "Emulation.setUserAgentOverride",
-                serde_json::json!({"userAgent": "Dirty"}),
-            )
-            .await?;
-        driver
-            .action_chain()
-            .key_down(browser_test::thirtyfour::Key::Shift)
-            .perform()
-            .await?;
-        driver.set_window_rect(0, 0, 640, 480).await?;
-        if self.second_window {
-            let second = driver.new_window().await?;
-            driver.switch_to_window(second).await?;
+    fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
             driver.goto(base_url).await?;
-        }
-        Ok(())
+            *self.initial_rect.lock().unwrap() = Some(driver.get_window_rect().await?);
+            driver
+                .execute(
+                    "localStorage.setItem('leak', '1'); sessionStorage.setItem('leak', '1');
+                     document.cookie = 'leak=1';",
+                    Vec::new(),
+                )
+                .await?;
+            // A file in the Origin Private File System.
+            driver
+                .execute_async(
+                    "const done = arguments[0];
+                     navigator.storage.getDirectory()
+                         .then(dir => dir.getFileHandle('leak', { create: true }))
+                         .then(file => file.createWritable())
+                         .then(writer => writer.write('1').then(() => writer.close()))
+                         .then(done);",
+                    Vec::new(),
+                )
+                .await?;
+            driver
+                .cdp()
+                .send_raw(
+                    "Browser.grantPermissions",
+                    serde_json::json!({
+                        "origin": base_url,
+                        "permissions": ["clipboardReadWrite"],
+                    }),
+                )
+                .await?;
+            driver
+                .cdp()
+                .send_raw(
+                    "Emulation.setUserAgentOverride",
+                    serde_json::json!({"userAgent": "Dirty"}),
+                )
+                .await?;
+            driver
+                .action_chain()
+                .key_down(browser_test::thirtyfour::Key::Shift)
+                .perform()
+                .await?;
+            driver.set_window_rect(0, 0, 640, 480).await?;
+            if self.second_window {
+                let second = driver.new_window().await?;
+                driver.switch_to_window(second).await?;
+                driver.goto(base_url).await?;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -605,74 +638,75 @@ struct Clean {
     windows: usize,
 }
 
-#[async_trait]
 impl BrowserTest<str> for Clean {
     fn name(&self) -> Cow<'_, str> {
         "clean".into()
     }
 
-    async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
-        assert_that!(driver.windows().await?).has_length(self.windows);
-        // An empty page: `about:blank` in a new user context, a `data:` URL after a manual reset.
-        let url = driver.current_url().await?.to_string();
-        assert_that!(url.as_str()).is_one_of(["about:blank", "data:text/html,"]);
-        assert_that!(Some(driver.get_window_rect().await?))
-            .is_equal_to(self.initial_rect.lock().unwrap().clone());
+    fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
+            assert_that!(driver.windows().await?).has_length(self.windows);
+            // An empty page: `about:blank` in a new user context, a `data:` URL after a manual reset.
+            let url = driver.current_url().await?.to_string();
+            assert_that!(url.as_str()).is_one_of(["about:blank", "data:text/html,"]);
+            assert_that!(Some(driver.get_window_rect().await?))
+                .is_equal_to(self.initial_rect.lock().unwrap().clone());
 
-        driver.goto(base_url).await?;
-        let state = driver
-            .execute(
-                "return [
-                     localStorage.getItem('leak'),
-                     sessionStorage.getItem('leak'),
-                     document.cookie,
-                     document.hasFocus(),
-                     navigator.userAgent.includes('Dirty'),
-                     history.length,
-                 ];",
-                Vec::new(),
-            )
-            .await?
-            .convert::<(Option<String>, Option<String>, String, bool, bool, u32)>()?;
-        // The history: the blank page the reset left, and this one.
-        assert_that!(state).is_equal_to((None, None, String::new(), true, false, 2));
-        let permission = driver
-            .execute_async(
-                "navigator.permissions.query({ name: 'clipboard-read' })
-                     .then(status => arguments[0](status.state));",
-                Vec::new(),
-            )
-            .await?
-            .convert::<String>()?;
-        assert_that!(permission).is_equal_to("prompt".to_owned());
-        let files = driver
-            .execute_async(
-                "const done = arguments[0];
-                 navigator.storage.getDirectory()
-                     .then(async dir => { const names = []; for await (const name of dir.keys()) names.push(name); return names; })
-                     .then(done);",
-                Vec::new(),
-            )
-            .await?
-            .convert::<Vec<String>>()?;
-        assert_that!(files).is_empty();
+            driver.goto(base_url).await?;
+            let state = driver
+                .execute(
+                    "return [
+                         localStorage.getItem('leak'),
+                         sessionStorage.getItem('leak'),
+                         document.cookie,
+                         document.hasFocus(),
+                         navigator.userAgent.includes('Dirty'),
+                         history.length,
+                     ];",
+                    Vec::new(),
+                )
+                .await?
+                .convert::<(Option<String>, Option<String>, String, bool, bool, u32)>()?;
+            // The history: the blank page the reset left, and this one.
+            assert_that!(state).is_equal_to((None, None, String::new(), true, false, 2));
+            let permission = driver
+                .execute_async(
+                    "navigator.permissions.query({ name: 'clipboard-read' })
+                         .then(status => arguments[0](status.state));",
+                    Vec::new(),
+                )
+                .await?
+                .convert::<String>()?;
+            assert_that!(permission).is_equal_to("prompt".to_owned());
+            let files = driver
+                .execute_async(
+                    "const done = arguments[0];
+                     navigator.storage.getDirectory()
+                         .then(async dir => { const names = []; for await (const name of dir.keys()) names.push(name); return names; })
+                         .then(done);",
+                    Vec::new(),
+                )
+                .await?
+                .convert::<Vec<String>>()?;
+            assert_that!(files).is_empty();
 
-        // Shift is no longer held: typing gives lowercase text.
-        driver
-            .execute(
-                "const input = document.createElement('input');
-                 document.body.append(input);
-                 input.focus();",
-                Vec::new(),
-            )
-            .await?;
-        driver.action_chain().send_keys("a").perform().await?;
-        let typed = driver
-            .execute("return document.querySelector('input').value;", Vec::new())
-            .await?
-            .convert::<String>()?;
-        assert_that!(typed).is_equal_to("a".to_owned());
-        Ok(())
+            // Shift is no longer held: typing gives lowercase text.
+            driver
+                .execute(
+                    "const input = document.createElement('input');
+                     document.body.append(input);
+                     input.focus();",
+                    Vec::new(),
+                )
+                .await?;
+            driver.action_chain().send_keys("a").perform().await?;
+            let typed = driver
+                .execute("return document.querySelector('input').value;", Vec::new())
+                .await?
+                .convert::<String>()?;
+            assert_that!(typed).is_equal_to("a".to_owned());
+            Ok(())
+        })
     }
 }
 
@@ -726,54 +760,56 @@ async fn manual_resets_keep_no_state_of_earlier_tests() {
 /// (the same server under another host name), so that no history lists the first.
 struct LeavesByReplacing;
 
-#[async_trait]
 impl BrowserTest<str> for LeavesByReplacing {
     fn name(&self) -> Cow<'_, str> {
         "leaves by replacing".into()
     }
 
-    async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
-        driver.goto(base_url).await?;
-        let other_origin = base_url.replace("127.0.0.1", "localhost");
-        driver
-            .execute(
-                "localStorage.setItem('leak', '1'); location.replace(arguments[0]);",
-                vec![serde_json::json!(other_origin)],
-            )
-            .await?;
-        // Wait for the replacement.
-        for _ in 0..50 {
-            if driver
-                .current_url()
-                .await?
-                .as_str()
-                .starts_with(&other_origin)
-            {
-                break;
+    fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver.goto(base_url).await?;
+            let other_origin = base_url.replace("127.0.0.1", "localhost");
+            driver
+                .execute(
+                    "localStorage.setItem('leak', '1'); location.replace(arguments[0]);",
+                    vec![serde_json::json!(other_origin)],
+                )
+                .await?;
+            // Wait for the replacement.
+            for _ in 0..50 {
+                if driver
+                    .current_url()
+                    .await?
+                    .as_str()
+                    .starts_with(&other_origin)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        Ok(())
+            Ok(())
+        })
     }
 }
 
 /// Checks that `localStorage` of the fixture's page is empty.
 struct FindsNoStorage;
 
-#[async_trait]
 impl BrowserTest<str> for FindsNoStorage {
     fn name(&self) -> Cow<'_, str> {
         "finds no storage".into()
     }
 
-    async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
-        driver.goto(base_url).await?;
-        let stored = driver
-            .execute("return localStorage.getItem('leak');", Vec::new())
-            .await?
-            .convert::<Option<String>>()?;
-        assert_that!(stored).is_none();
-        Ok(())
+    fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver.goto(base_url).await?;
+            let stored = driver
+                .execute("return localStorage.getItem('leak');", Vec::new())
+                .await?
+                .convert::<Option<String>>()?;
+            assert_that!(stored).is_none();
+            Ok(())
+        })
     }
 }
 
@@ -804,27 +840,28 @@ struct FileStorage {
     write: bool,
 }
 
-#[async_trait]
 impl BrowserTest<str> for FileStorage {
     fn name(&self) -> Cow<'_, str> {
         format!("file storage (write: {})", self.write).into()
     }
 
-    async fn run(&self, driver: &WebDriver, _base_url: &str) -> Result<(), Report> {
-        driver.goto(&self.url).await?;
-        let stored = driver
-            .execute(
-                "const stored = localStorage.getItem('leak');
-                 localStorage.setItem('leak', '1');
-                 return stored;",
-                Vec::new(),
-            )
-            .await?
-            .convert::<Option<String>>()?;
-        if !self.write {
-            assert_that!(stored).is_none();
-        }
-        Ok(())
+    fn run<'a>(&'a self, driver: &'a WebDriver, _base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver.goto(&self.url).await?;
+            let stored = driver
+                .execute(
+                    "const stored = localStorage.getItem('leak');
+                     localStorage.setItem('leak', '1');
+                     return stored;",
+                    Vec::new(),
+                )
+                .await?
+                .convert::<Option<String>>()?;
+            if !self.write {
+                assert_that!(stored).is_none();
+            }
+            Ok(())
+        })
     }
 }
 
@@ -886,22 +923,23 @@ async fn quits_of_released_sessions_are_measured() {
 /// Leaves a page load timeout behind that no navigation can meet.
 struct ImpatientPageLoads;
 
-#[async_trait]
 impl BrowserTest<str> for ImpatientPageLoads {
     fn name(&self) -> Cow<'_, str> {
         "impatient page loads".into()
     }
 
-    async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
-        driver.goto(base_url).await?;
-        driver
-            .update_timeouts(browser_test::thirtyfour::TimeoutConfiguration::new(
-                None,
-                Some(Duration::ZERO),
-                None,
-            ))
-            .await?;
-        Ok(())
+    fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver.goto(base_url).await?;
+            driver
+                .update_timeouts(browser_test::thirtyfour::TimeoutConfiguration::new(
+                    None,
+                    Some(Duration::ZERO),
+                    None,
+                ))
+                .await?;
+            Ok(())
+        })
     }
 }
 
@@ -934,29 +972,30 @@ struct UsesDefaultContext {
     new_window: bool,
 }
 
-#[async_trait]
 impl BrowserTest<str> for UsesDefaultContext {
     fn name(&self) -> Cow<'_, str> {
         format!("uses the default context (new window: {})", self.new_window).into()
     }
 
-    async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
-        let window = if self.new_window {
-            driver.new_window().await?
-        } else {
-            let current = driver.window().await?;
-            let windows = driver.windows().await?;
-            windows
-                .into_iter()
-                .find(|window| *window != current)
-                .expect("the session's first tab is open")
-        };
-        driver.switch_to_window(window).await?;
-        driver.goto(base_url).await?;
-        driver
-            .execute("localStorage.setItem('leak', '1');", Vec::new())
-            .await?;
-        Ok(())
+    fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
+            let window = if self.new_window {
+                driver.new_window().await?
+            } else {
+                let current = driver.window().await?;
+                let windows = driver.windows().await?;
+                windows
+                    .into_iter()
+                    .find(|window| *window != current)
+                    .expect("the session's first tab is open")
+            };
+            driver.switch_to_window(window).await?;
+            driver.goto(base_url).await?;
+            driver
+                .execute("localStorage.setItem('leak', '1');", Vec::new())
+                .await?;
+            Ok(())
+        })
     }
 }
 
@@ -1030,20 +1069,21 @@ async fn serve_cache_fixture() -> (String, Arc<AtomicUsize>) {
 /// Loads the cache fixture's page and waits for its script.
 struct LoadsCachedScript(usize);
 
-#[async_trait]
 impl BrowserTest<str> for LoadsCachedScript {
     fn name(&self) -> Cow<'_, str> {
         format!("loads the cached script {}", self.0).into()
     }
 
-    async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
-        driver.goto(base_url).await?;
-        let loaded = driver
-            .execute("return window.__cached === true;", Vec::new())
-            .await?
-            .convert::<bool>()?;
-        assert_that!(loaded).is_true();
-        Ok(())
+    fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver.goto(base_url).await?;
+            let loaded = driver
+                .execute("return window.__cached === true;", Vec::new())
+                .await?
+                .convert::<bool>()?;
+            assert_that!(loaded).is_true();
+            Ok(())
+        })
     }
 }
 
@@ -1077,46 +1117,33 @@ async fn only_manual_resets_keeping_it_keep_the_http_cache() {
 /// script state survived) is reported in `restored`.
 struct GoesBack {
     restored: Arc<Mutex<Option<bool>>>,
-    /// Whether the test has an element query wait of its own, and so a session created for it.
-    dedicated: bool,
 }
 
-#[async_trait]
 impl BrowserTest<str> for GoesBack {
     fn name(&self) -> Cow<'_, str> {
         "goes back".into()
     }
 
-    fn settings(&self) -> TestSettings {
-        if self.dedicated {
-            TestSettings::new().with_element_query_wait(ElementQueryWait::new(
-                Duration::from_secs(1),
-                Duration::from_millis(100),
-            ))
-        } else {
-            TestSettings::new()
-        }
-    }
-
-    async fn run(&self, driver: &WebDriver, base_url: &str) -> Result<(), Report> {
-        driver.goto(base_url).await?;
-        driver
-            .execute("window.__marker = true;", Vec::new())
-            .await?;
-        driver.goto(&format!("{base_url}/other")).await?;
-        driver.back().await?;
-        let restored = driver
-            .execute("return window.__marker === true;", Vec::new())
-            .await?
-            .convert::<bool>()?;
-        *self.restored.lock().unwrap() = Some(restored);
-        Ok(())
+    fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver.goto(base_url).await?;
+            driver
+                .execute("window.__marker = true;", Vec::new())
+                .await?;
+            driver.goto(&format!("{base_url}/other")).await?;
+            driver.back().await?;
+            let restored = driver
+                .execute("return window.__marker === true;", Vec::new())
+                .await?
+                .convert::<bool>()?;
+            *self.restored.lock().unwrap() = Some(restored);
+            Ok(())
+        })
     }
 }
 
-/// Whether a page is restored from the back/forward cache in a reused session, or in a
-/// `dedicated` one created for a test with settings of its own.
-async fn restored_from_back_forward_cache(reuse: SessionReuse, dedicated: bool) -> bool {
+/// Whether a page is restored from the back/forward cache in a reused session.
+async fn restored_from_back_forward_cache(reuse: SessionReuse) -> bool {
     let base_url = serve_fixture().await;
     let restored = Arc::new(Mutex::new(None));
     let outcome = run(
@@ -1124,7 +1151,6 @@ async fn restored_from_back_forward_cache(reuse: SessionReuse, dedicated: bool) 
         base_url.as_str(),
         TestSuite::sequential().with(GoesBack {
             restored: Arc::clone(&restored),
-            dedicated,
         }),
     )
     .await;
@@ -1136,16 +1162,10 @@ async fn restored_from_back_forward_cache(reuse: SessionReuse, dedicated: bool) 
 #[serial]
 async fn reused_sessions_have_no_back_forward_cache_unless_enabled() {
     for reset in [SessionReset::NewContext, SessionReset::manual([])] {
-        // Sessions created for tests with settings of their own are set up alike.
-        for dedicated in [false, true] {
-            let reuse = SessionReuse::enabled().with_reset(reset);
-            assert_that!(restored_from_back_forward_cache(reuse, dedicated).await).is_false();
-            assert_that!(
-                restored_from_back_forward_cache(reuse.with_back_forward_cache(true), dedicated)
-                    .await
-            )
+        let reuse = SessionReuse::enabled().with_reset(reset);
+        assert_that!(restored_from_back_forward_cache(reuse).await).is_false();
+        assert_that!(restored_from_back_forward_cache(reuse.with_back_forward_cache(true)).await)
             .is_true();
-        }
     }
 }
 
@@ -1172,6 +1192,76 @@ async fn reused_sessions_run_tests_while_more_tests_need_them() {
     assert_that!(outcome.report.sessions_created()).is_less_or_equal_to(4);
     assert_that!(outcome.report.session_resets()).is_greater_or_equal_to(4);
     assert_that!(outcome.report.to_string().as_str()).contains(", reset ");
+}
+
+/// Queries an element that doesn't exist, and reports in `waited` how long the query waited.
+struct QueriesMissing {
+    own_wait: Option<ElementQueryWait>,
+    waited: Arc<Mutex<Option<Duration>>>,
+}
+
+impl BrowserTest<str> for QueriesMissing {
+    fn name(&self) -> Cow<'_, str> {
+        format!("queries missing (own wait: {})", self.own_wait.is_some()).into()
+    }
+
+    fn settings(&self) -> TestSettings {
+        match self.own_wait {
+            Some(wait) => TestSettings::new().with_element_query_wait(wait),
+            None => TestSettings::new(),
+        }
+    }
+
+    fn run<'a>(&'a self, driver: &'a WebDriver, base_url: &'a str) -> TestFuture<'a> {
+        Box::pin(async move {
+            driver.goto(base_url).await?;
+            let start = Instant::now();
+            let missing = driver.query(By::Id("missing")).first().await;
+            *self.waited.lock().unwrap() = Some(start.elapsed());
+            if missing.is_ok() {
+                return Err(report!("found an element that doesn't exist"));
+            }
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn tests_with_an_element_query_wait_of_their_own_share_reused_sessions() {
+    let base_url = serve_fixture().await;
+    let own_waited = Arc::new(Mutex::new(None));
+    let runner_waited = Arc::new(Mutex::new(None));
+    let runner_wait = ElementQueryWait::new(Duration::from_secs(3), Duration::from_millis(100));
+
+    let outcome = run(
+        runner()
+            .with_session_reuse(SessionReuse::enabled())
+            .with_spare_sessions(0)
+            .with_element_query_wait(runner_wait),
+        base_url.as_str(),
+        TestSuite::sequential()
+            .with(QueriesMissing {
+                own_wait: Some(ElementQueryWait::new(
+                    Duration::from_millis(200),
+                    Duration::from_millis(50),
+                )),
+                waited: Arc::clone(&own_waited),
+            })
+            .with(QueriesMissing {
+                own_wait: None,
+                waited: Arc::clone(&runner_waited),
+            }),
+    )
+    .await;
+
+    assert_that!(outcome.result).is_ok();
+    // The second test ran in the session of the first, with the runner's wait.
+    assert_that!(outcome.report.sessions_created()).is_equal_to(1);
+    let own_waited = own_waited.lock().unwrap().expect("the first test ran");
+    let runner_waited = runner_waited.lock().unwrap().expect("the second test ran");
+    assert_that!(own_waited).is_less_than(Duration::from_secs(2));
+    assert_that!(runner_waited).is_greater_or_equal_to(runner_wait.timeout());
 }
 
 #[tokio::test(flavor = "multi_thread")]

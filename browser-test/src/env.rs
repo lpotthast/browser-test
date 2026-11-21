@@ -1,7 +1,9 @@
 use std::{env, num::NonZeroUsize};
 
-/// An environment variable whose value cannot be interpreted, returned by the `from_env` and
-/// `from_env_var` constructors.
+/// An environment variable whose value cannot be interpreted, returned by the methods that read the
+/// environment: the `from_env` and `from_env_var` constructors, and
+/// [`TestFilter::with_name_pattern_from_env_var`](crate::TestFilter::with_name_pattern_from_env_var)
+/// and [`TestFilter::with_tag_pattern_from_env_var`](crate::TestFilter::with_tag_pattern_from_env_var).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
     "environment variable {name} is set to {value:?}, expected {expected}{}",

@@ -1,8 +1,8 @@
+use browser_test::rootcause::{Report, report};
 use browser_test::thirtyfour::WebDriver;
 use browser_test::{
     BrowserTestError, BrowserTestRunner, Cancellation, TestSuite, Visibility, browser_test,
 };
-use rootcause::{Report, report};
 
 struct Context {
     base_url: String,
@@ -10,7 +10,7 @@ struct Context {
 
 /// The page title names Wikipedia.
 #[browser_test]
-async fn page_title(driver: &WebDriver, context: &Context) -> Result<(), Report> {
+async fn PageTitle(driver: &WebDriver, context: &Context) -> Result<(), Report> {
     driver.goto(&context.base_url).await?;
 
     let title = driver.title().await?;

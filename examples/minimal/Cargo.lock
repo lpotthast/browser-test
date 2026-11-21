@@ -92,7 +92,6 @@ dependencies = [
 name = "browser-test"
 version = "0.8.0"
 dependencies = [
- "async-trait",
  "backtrace",
  "browser-test-macros",
  "chrome-for-testing-manager",
@@ -127,7 +126,6 @@ name = "browser-test-minimal-example"
 version = "0.1.0"
 dependencies = [
  "browser-test",
- "rootcause",
  "rustls",
  "tokio",
  "tracing-subscriber",

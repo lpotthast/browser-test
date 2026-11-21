@@ -10,6 +10,9 @@
 //! - **What**: the error and its context chain. thirtyfour errors show their `WebDriver` message,
 //!   without chromedriver's native stack trace.
 //!
+//! Tools that present failures themselves, e.g. as annotations in CI, read the frames and steps
+//! from a report's attachments, downcast to [`TestCodeFrames`] and [`RecentSteps`].
+//!
 //! The runner installs the [`rootcause`] hooks behind this with the first run
 //! ([`BrowserTestRunner::with_failure_report_hooks`](crate::BrowserTestRunner::with_failure_report_hooks)).
 //! An application that installs hooks of its own adds them with [`hooks`], and the runner then
@@ -17,25 +20,35 @@
 
 use std::{
     any::Any,
+    borrow::Cow,
     collections::{HashMap, VecDeque},
     fmt,
     path::{Path, PathBuf},
     sync::{
-        Mutex, OnceLock, PoisonError,
+        Arc, Mutex, OnceLock, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
 };
 
 use rootcause::{
     ReportMut, ReportRef,
-    handlers::{ContextFormattingStyle, FormattingFunction},
-    hooks::{Hooks, context_formatter::ContextFormatterHook, report_creation::ReportCreationHook},
+    handlers::{
+        AttachmentFormattingPlacement, AttachmentFormattingStyle, AttachmentHandler,
+        ContextFormattingStyle, FormattingFunction,
+    },
+    hooks::{
+        Hooks,
+        builtin_hooks::location::{Location, LocationHandler},
+        context_formatter::ContextFormatterHook,
+        report_creation::ReportCreationHook,
+    },
     markers::{Dynamic, Local, ObjectMarkerFor, SendSync, Uncloneable},
     report_attachment::ReportAttachment,
+    report_attachments::ReportAttachments,
 };
 use thirtyfour::error::WebDriverError;
 
+pub use crate::step::RecentStep;
 use crate::{BrowserTestError, report::FormatDuration};
 
 /// browser-test's own sources, whose frames are never test code.
@@ -44,8 +57,13 @@ const OWN_SOURCES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/");
 /// The runner's source: frames from here on down called the test.
 const RUNNER_SOURCE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/execution/");
 
-/// How many steps [`RecentSteps`] keeps.
-pub(crate) const RECENT_STEP_COUNT: usize = 8;
+/// browser-test's crate, by the symbols of its frames: where their source files don't match
+/// [`OWN_SOURCES`].
+const OWN_CRATE: &str = "browser_test";
+
+/// The runner's module, by the symbols of its frames: where their source files don't match
+/// [`RUNNER_SOURCE`].
+const RUNNER_MODULE: &str = "browser_test::execution";
 
 /// `hooks` with the hooks behind failure reports added: a report creation hook attaching
 /// [`TestCodeFrames`] to the errors of running tests, a formatter printing [`WebDriverError`]s as
@@ -103,7 +121,7 @@ pub(crate) fn install(report_hooks: bool) {
     PANIC_HOOK.get_or_init(|| {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            // Capturing frames symbolizes a backtrace: only for the panics of tests.
+            // Only the panics of tests are located.
             if !crate::step::in_test() {
                 previous(info);
                 return;
@@ -117,7 +135,7 @@ pub(crate) fn install(report_hooks: bool) {
                         location.column()
                     )
                 }),
-                frames: TestCodeFrames::capture(),
+                frames: Some(TestCodeFrames::capture()),
             });
             previous(info);
         }));
@@ -153,7 +171,8 @@ fn test_root() -> &'static Path {
             .map(PathBuf::from)
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_default();
-        workspace_root(&package).unwrap_or(package)
+        let root = workspace_root(&package).unwrap_or(package);
+        normalized(&root).into_owned()
     })
 }
 
@@ -197,8 +216,13 @@ impl Dependencies {
             // Cargo resolves a relative `CARGO_TARGET_DIR` against the working directory.
             let target_dir = std::env::var_os("CARGO_TARGET_DIR")
                 .and_then(|dir| std::path::absolute(dir).ok())
+                .or_else(|| {
+                    // Also finds a `build.target-dir` configured in `.cargo/config.toml`.
+                    let exe = std::env::current_exe().ok()?;
+                    target_dir_of(&normalized(&exe))
+                })
                 .unwrap_or_else(|| test_root().join("target"));
-            Self::new(target_dir)
+            Self::new(normalized(&target_dir).into_owned())
         })
     }
 
@@ -231,67 +255,128 @@ impl Dependencies {
     }
 }
 
+/// The Cargo target directory that the executable `exe` was built into: the closest of its
+/// ancestors that Cargo marked with `CACHEDIR.TAG`, else `<target>` of
+/// `<target>/<profile>/deps/<exe>`, where Cargo puts tests.
+fn target_dir_of(exe: &Path) -> Option<PathBuf> {
+    let marked = exe
+        .ancestors()
+        .skip(1)
+        .find(|dir| dir.join("CACHEDIR.TAG").is_file());
+    let deps = || {
+        let deps = exe.parent().filter(|dir| dir.ends_with("deps"))?;
+        deps.parent()?.parent()
+    };
+    marked.or_else(deps).map(Path::to_path_buf)
+}
+
 /// The frames of the test code on the stack where an error was created or a panic happened,
 /// innermost first: `tests/ui/checkbox.rs:84 in checkbox::selected_state`.
 ///
 /// Test code is the code of the workspace whose tests run, without its dependencies, up to the
 /// frame that the runner called.
-#[derive(Clone, PartialEq, Eq)]
+///
+/// The stack is captured where the error is created, but only symbolized the first time the
+/// frames are needed, e.g. when the report is printed: symbolizing takes long, and many errors a
+/// test creates are never printed, as the test handles them itself (e.g. while retrying).
+#[derive(Clone)]
 pub struct TestCodeFrames {
-    frames: Vec<Frame>,
+    captured: Arc<CapturedFrames>,
 }
 
+/// A captured stack, until it is symbolized to the test code's frames.
+struct CapturedFrames {
+    backtrace: Mutex<Option<backtrace::Backtrace>>,
+    frames: OnceLock<Vec<TestCodeFrame>>,
+}
+
+/// A frame of the test code, as [`TestCodeFrames`] lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Frame {
+pub struct TestCodeFrame {
+    path: PathBuf,
     file: String,
     line: u32,
     function: String,
 }
 
-impl TestCodeFrames {
-    /// The test code's frames of the current stack, if any.
-    pub(crate) fn capture() -> Option<Self> {
-        let root = test_root();
-        let dependencies = Dependencies::of_test_root();
-        let backtrace = backtrace::Backtrace::new();
-        let mut frames: Vec<Frame> = Vec::new();
-        'frames: for frame in backtrace.frames() {
-            for symbol in frame.symbols() {
-                let Some(path) = symbol.filename() else {
-                    continue;
-                };
-                if path.starts_with(RUNNER_SOURCE) {
-                    // The runner called the test: everything below is not test code.
-                    break 'frames;
-                }
-                if path.starts_with(OWN_SOURCES) {
-                    // browser-test's helpers between the test's frames (steps, this hook).
-                    continue;
-                }
-                let (Ok(file), Some(line)) = (path.strip_prefix(root), symbol.lineno()) else {
-                    continue;
-                };
-                if dependencies.contains(path, root) {
-                    continue;
-                }
-                let entry = Frame {
-                    file: file.display().to_string(),
-                    line,
-                    function: symbol
-                        .name()
-                        .map(|name| function_name(&name.to_string()))
-                        .unwrap_or_default(),
-                };
-                if frames.last() != Some(&entry) {
-                    frames.push(entry);
-                }
-            }
-        }
-        (!frames.is_empty()).then_some(Self { frames })
+impl TestCodeFrame {
+    /// The absolute path of the frame's source file.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The frame's source file as the report shows it, relative to the workspace whose tests run:
+    /// `tests/ui/checkbox.rs`.
+    #[must_use]
+    pub fn file(&self) -> &str {
+        &self.file
+    }
+
+    /// The frame's line in its source file.
+    #[must_use]
+    pub const fn line(&self) -> u32 {
+        self.line
+    }
+
+    /// The frame's function, shortened to its last two path segments: `checkbox::selected_state`,
+    /// or `Page::css` for a method. Empty if the symbol is unknown.
+    #[must_use]
+    pub fn function(&self) -> &str {
+        &self.function
+    }
+
+    /// Whether the frame is at `line` of `file`, a path as rustc reports locations (in panics and
+    /// [`Location`]s): relative to the workspace root for the workspace's sources, absolute for
+    /// others, e.g. registry crates.
+    fn is_at(&self, file: &str, line: u32) -> bool {
+        self.line == line && test_root().join(file) == self.path
     }
 }
 
 impl TestCodeFrames {
+    /// The current stack, symbolized to the test code's frames when they are needed.
+    pub(crate) fn capture() -> Self {
+        Self {
+            captured: Arc::new(CapturedFrames {
+                backtrace: Mutex::new(Some(backtrace::Backtrace::new_unresolved())),
+                frames: OnceLock::new(),
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    fn from_frames(frames: Vec<TestCodeFrame>) -> Self {
+        Self {
+            captured: Arc::new(CapturedFrames {
+                backtrace: Mutex::new(None),
+                frames: OnceLock::from(frames),
+            }),
+        }
+    }
+
+    /// The frames, innermost first. The first call symbolizes the stack, which takes a while.
+    #[must_use]
+    pub fn frames(&self) -> &[TestCodeFrame] {
+        self.captured.frames.get_or_init(|| {
+            let backtrace = self
+                .captured
+                .backtrace
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            backtrace.map_or_else(Vec::new, |mut backtrace| {
+                backtrace.resolve();
+                test_code_frames(&backtrace)
+            })
+        })
+    }
+
+    /// Whether the stack holds no test code.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.frames().is_empty()
+    }
+
     /// Whether `location` (`file:line:column`, as a panic reports it) is the innermost frame: the
     /// test code itself panicked there.
     pub(crate) fn starts_at(&self, location: &str) -> bool {
@@ -300,22 +385,185 @@ impl TestCodeFrames {
         else {
             return false;
         };
-        self.frames.first().is_some_and(|frame| {
-            line.parse() == Ok(frame.line) && Path::new(file).ends_with(&frame.file)
-        })
+        line.parse()
+            .is_ok_and(|line| self.starts_at_line(file, line))
+    }
+
+    /// Whether `line` of `file` is the innermost frame.
+    fn starts_at_line(&self, file: &str, line: u32) -> bool {
+        self.frames()
+            .first()
+            .is_some_and(|frame| frame.is_at(file, line))
     }
 }
+
+/// The test code's frames of `backtrace`, a symbolized one.
+///
+/// browser-test's own frames are told apart by their source files and, where those don't match
+/// (e.g. with remapped paths), by their symbols.
+fn test_code_frames(backtrace: &backtrace::Backtrace) -> Vec<TestCodeFrame> {
+    let root = test_root();
+    let dependencies = Dependencies::of_test_root();
+    let own_sources = normalized(Path::new(OWN_SOURCES));
+    let runner_source = normalized(Path::new(RUNNER_SOURCE));
+    let mut frames: Vec<TestCodeFrame> = Vec::new();
+    // For the debug log when no frame is test code: usually the frame the runner called.
+    let mut outermost_source = None;
+    'frames: for frame in backtrace.frames() {
+        for symbol in frame.symbols() {
+            let name = symbol.name().map(|name| name.to_string());
+            let name = name.as_deref().unwrap_or_default();
+            let path = symbol.filename().map(|path| source_path(path, root));
+            if in_module(name, RUNNER_MODULE)
+                || path
+                    .as_ref()
+                    .is_some_and(|path| path.starts_with(&runner_source))
+            {
+                // The runner called the test: everything below is not test code.
+                break 'frames;
+            }
+            let Some(path) = path else {
+                continue;
+            };
+            if in_module(name, OWN_CRATE) || path.starts_with(&own_sources) {
+                // browser-test's helpers between the test's frames (steps, this hook).
+                continue;
+            }
+            outermost_source = Some(path.clone());
+            let (Ok(file), Some(line)) = (path.strip_prefix(root), symbol.lineno()) else {
+                continue;
+            };
+            if dependencies.contains(&path, root) {
+                continue;
+            }
+            let entry = TestCodeFrame {
+                file: file.display().to_string(),
+                path,
+                line,
+                function: function_name(name),
+            };
+            if frames.last() != Some(&entry) {
+                frames.push(entry);
+            }
+        }
+    }
+    if frames.is_empty() {
+        log_no_test_code(root, outermost_source.as_deref());
+    }
+    frames
+}
+
+/// Log once that a stack captured in a test held no test code, at `debug` level: the test code's
+/// source files may not be where failure reports expect them.
+fn log_no_test_code(root: &Path, outermost_source: Option<&Path>) {
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    if LOGGED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    if let Some(source) = outermost_source {
+        tracing::debug!(
+            "Found no test code on the stack of an error or panic in a test: none of its frames \
+             is in a source file below the test root {}, other than a dependency's. The outermost \
+             frame outside browser-test is in {}.",
+            root.display(),
+            source.display(),
+        );
+    } else {
+        tracing::debug!(
+            "Found no test code on the stack of an error or panic in a test: its frames outside \
+             browser-test have no source files. Is debug info missing?"
+        );
+    }
+}
+
+/// The source file `path` of a frame, as debug info names it, comparable with the test root: a
+/// relative path (from `--remap-path-prefix` or `trim-paths`) joined onto the `root` if the file
+/// is there, and [`normalized`].
+fn source_path(path: &Path, root: &Path) -> PathBuf {
+    if path.is_relative() {
+        let joined = root.join(path);
+        if joined.is_file() {
+            return joined;
+        }
+    }
+    normalized(path).into_owned()
+}
+
+/// `path` without a Windows verbatim prefix and with an upper-case drive letter (see
+/// [`normalized_windows_path`]). Other platforms keep it as it is.
+fn normalized(path: &Path) -> Cow<'_, Path> {
+    if !cfg!(windows) {
+        return Cow::Borrowed(path);
+    }
+    match path.to_str().map(normalized_windows_path) {
+        Some(Cow::Owned(normalized)) => Cow::Owned(PathBuf::from(normalized)),
+        _ => Cow::Borrowed(path),
+    }
+}
+
+/// The Windows path `path` without a verbatim prefix (`\\?\C:\x` is `C:\x`, `\\?\UNC\host\share`
+/// is `\\host\share`) and with an upper-case drive letter: debug info and Cargo may spell the same
+/// path either way.
+fn normalized_windows_path(path: &str) -> Cow<'_, str> {
+    let has_drive =
+        |path: &str| matches!(path.as_bytes(), [drive, b':', ..] if drive.is_ascii_alphabetic());
+    let path = if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        Cow::Owned(format!(r"\\{unc}"))
+    } else if let Some(local) = path.strip_prefix(r"\\?\").filter(|local| has_drive(local)) {
+        Cow::Borrowed(local)
+    } else {
+        Cow::Borrowed(path)
+    };
+    if has_drive(&path) && path.as_bytes()[0].is_ascii_lowercase() {
+        let mut path = path.into_owned();
+        path[..1].make_ascii_uppercase();
+        Cow::Owned(path)
+    } else {
+        path
+    }
+}
+
+/// Whether the demangled symbol `name` is in `module` (e.g. `browser_test::execution`) or below
+/// it. The crate may carry a hash (`browser_test[c72fec33b3453a53]::execution::run`), and a
+/// method's symbol may start with its type (`<browser_test::step::Step<F> as Future>::poll`).
+fn in_module(name: &str, module: &str) -> bool {
+    let name = name.strip_prefix('<').unwrap_or(name);
+    let (krate, below) = module.split_once("::").unwrap_or((module, ""));
+    let Some(rest) = name.strip_prefix(krate) else {
+        return false;
+    };
+    let rest = match rest.strip_prefix('[') {
+        Some(hashed) => hashed.split_once(']').map_or("", |(_hash, rest)| rest),
+        None => rest,
+    };
+    let Some(rest) = rest.strip_prefix("::") else {
+        return false;
+    };
+    below.is_empty()
+        || rest
+            .strip_prefix(below)
+            .is_some_and(|rest| rest.starts_with("::"))
+}
+
+impl PartialEq for TestCodeFrames {
+    fn eq(&self, other: &Self) -> bool {
+        self.frames() == other.frames()
+    }
+}
+
+impl Eq for TestCodeFrames {}
 
 impl fmt::Display for TestCodeFrames {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let width = self
-            .frames
+            .frames()
             .iter()
-            .map(|frame| frame.file.len() + 1 + frame.line.to_string().len())
+            // In chars, as `width$` pads.
+            .map(|frame| frame.file.chars().count() + 1 + frame.line.to_string().len())
             .max()
             .unwrap_or_default();
         write!(f, "Test code:")?;
-        for frame in &self.frames {
+        for frame in self.frames() {
             let location = format!("{}:{}", frame.file, frame.line);
             write!(f, "\n  {location:width$}  {}", frame.function)?;
         }
@@ -336,6 +584,14 @@ fn function_name(symbol: &str) -> String {
         if depth == 1 && skipping_trait_at.is_none() && rest.starts_with(" as ") {
             skipping_trait_at = Some(depth);
             rest = &rest[4..];
+            continue;
+        }
+        // The `->` of a function pointer type closes no `<`.
+        if let Some(after) = rest.strip_prefix("->") {
+            if skipping_trait_at.is_none() && depth <= usize::from(symbol.starts_with('<')) {
+                path.push_str("->");
+            }
+            rest = after;
             continue;
         }
         match c {
@@ -367,31 +623,38 @@ fn function_name(symbol: &str) -> String {
     segments[start..].join("::")
 }
 
-// Reports are printed with `Debug` too (a `main` or test returning `Err`): attachments read the same.
-impl fmt::Debug for TestCodeFrames {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, f)
-    }
+/// Implements `Debug` as `Display` for the given types, attachments of failure reports: reports
+/// are printed with `Debug` too (a `main` or test returning `Err`), and attachments read the same.
+macro_rules! debug_as_display {
+    ($($attachment:ty),+ $(,)?) => {$(
+        impl ::std::fmt::Debug for $attachment {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                ::std::fmt::Display::fmt(self, f)
+            }
+        }
+    )+};
 }
 
-impl fmt::Debug for RecentSteps {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, f)
-    }
-}
+pub(crate) use debug_as_display;
+
+debug_as_display!(TestCodeFrames, RecentSteps, PanicLocation);
 
 /// Where a test panicked, as its failure report shows it. A panic outside the test code (in a
 /// dependency, e.g. an assertion library that raises from its own code) says so, as the test
-/// code's frames show where the test called it.
+/// code's `frames` show where the test called it.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct PanicLocation {
     pub(crate) location: String,
-    pub(crate) outside_test_code: bool,
+    pub(crate) frames: Option<TestCodeFrames>,
 }
 
 impl fmt::Display for PanicLocation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.outside_test_code {
+        let outside_test_code = self
+            .frames
+            .as_ref()
+            .is_some_and(|frames| !frames.is_empty() && !frames.starts_at(&self.location));
+        if outside_test_code {
             write!(f, "Panicked outside the test code at {}", self.location)
         } else {
             write!(f, "Panicked at {}", self.location)
@@ -399,31 +662,75 @@ impl fmt::Display for PanicLocation {
     }
 }
 
-impl fmt::Debug for PanicLocation {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, f)
+/// Prints [`TestCodeFrames`] with `Display`, unless the stack holds no test code.
+pub(crate) struct TestCodeFramesHandler;
+
+impl AttachmentHandler<TestCodeFrames> for TestCodeFramesHandler {
+    fn display(value: &TestCodeFrames, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(value, formatter)
+    }
+
+    fn debug(value: &TestCodeFrames, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(value, formatter)
+    }
+
+    fn preferred_formatting_style(
+        value: &TestCodeFrames,
+        report_formatting_function: FormattingFunction,
+    ) -> AttachmentFormattingStyle {
+        let placement = if value.is_empty() {
+            AttachmentFormattingPlacement::Hidden
+        } else {
+            AttachmentFormattingPlacement::Inline
+        };
+        AttachmentFormattingStyle {
+            placement,
+            function: report_formatting_function,
+            ..Default::default()
+        }
     }
 }
 
-/// Drops the source location rootcause's default hooks attached last, if `frames` start there.
-/// A location elsewhere stays: an error created in a macro expansion has its frame in the
-/// macro's definition but its location at the macro's call site.
-fn pop_location_at<T>(report: &mut ReportMut<'_, Dynamic, T>, frames: &TestCodeFrames) {
-    let attachments = report.attachments_mut();
-    let is_innermost_frame = attachments.len().checked_sub(1).is_some_and(|last| {
-        attachments.get(last).is_some_and(|attachment| {
-            attachment
-                .downcast_inner::<rootcause::hooks::builtin_hooks::location::Location>()
-                .is_some_and(|location| {
-                    frames.frames.first().is_some_and(|frame| {
-                        frame.line == location.line
-                            && Path::new(location.file).ends_with(&frame.file)
-                    })
-                })
-        })
-    });
-    if is_innermost_frame {
-        attachments.pop();
+/// The source location rootcause's default hooks attached to a report created in a test, which
+/// the test code's frames replace if they start there. A location elsewhere stays: an error
+/// created in a macro expansion has its frame in the macro's definition but its location at the
+/// macro's call site. The frames are symbolized only when needed, so this is decided when the
+/// report is printed.
+struct TestCodeLocation {
+    location: Location,
+    frames: TestCodeFrames,
+}
+
+/// Prints a [`TestCodeLocation`] as rootcause prints a [`Location`], unless the frames start
+/// there.
+struct TestCodeLocationHandler;
+
+impl AttachmentHandler<TestCodeLocation> for TestCodeLocationHandler {
+    fn display(value: &TestCodeLocation, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        LocationHandler::display(&value.location, formatter)
+    }
+
+    fn debug(value: &TestCodeLocation, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        LocationHandler::debug(&value.location, formatter)
+    }
+
+    fn preferred_formatting_style(
+        value: &TestCodeLocation,
+        report_formatting_function: FormattingFunction,
+    ) -> AttachmentFormattingStyle {
+        let style = LocationHandler::preferred_formatting_style(
+            &value.location,
+            report_formatting_function,
+        );
+        let Location { file, line } = value.location;
+        if value.frames.starts_at_line(file, line) {
+            AttachmentFormattingStyle {
+                placement: AttachmentFormattingPlacement::Hidden,
+                ..style
+            }
+        } else {
+            style
+        }
     }
 }
 
@@ -432,18 +739,17 @@ fn pop_location_at<T>(report: &mut ReportMut<'_, Dynamic, T>, frames: &TestCodeF
 pub(crate) fn without_own_location<C: ?Sized>(
     mut report: rootcause::Report<C>,
 ) -> rootcause::Report<C> {
-    let attachments = report.attachments();
-    let is_location = attachments.len().checked_sub(1).is_some_and(|last| {
-        attachments.get(last).is_some_and(|attachment| {
-            attachment
-                .downcast_inner::<rootcause::hooks::builtin_hooks::location::Location>()
-                .is_some()
-        })
-    });
-    if is_location {
+    if last_location(report.attachments()).is_some() {
         report.attachments_mut().pop();
     }
     report
+}
+
+/// The source location rootcause's default hooks attached to a report, if it is the report's last
+/// attachment.
+fn last_location<T>(attachments: &ReportAttachments<T>) -> Option<Location> {
+    let last = attachments.len().checked_sub(1)?;
+    attachments.get(last)?.downcast_inner::<Location>().copied()
 }
 
 /// Attaches [`TestCodeFrames`] to every report created in a running test that has no children:
@@ -467,50 +773,58 @@ impl ReportCreationHook for TestCodeFramesHook {
 fn attach_test_code_frames<T>(mut report: ReportMut<'_, Dynamic, T>)
 where
     TestCodeFrames: ObjectMarkerFor<T>,
+    TestCodeLocation: ObjectMarkerFor<T>,
 {
-    if report.children().is_empty()
-        && crate::step::in_test()
-        && let Some(frames) = TestCodeFrames::capture()
-    {
+    if !report.children().is_empty() || !crate::step::in_test() {
+        return;
+    }
+    let frames = TestCodeFrames::capture();
+    let attachments = report.attachments_mut();
+    if let Some(location) = last_location(attachments) {
         // Frames that start where the location points replace it.
-        pop_location_at(&mut report, &frames);
-        report.attachments_mut().push(
-            ReportAttachment::<_, T>::new_custom::<rootcause::handlers::Display>(frames)
-                .into_dynamic(),
+        attachments.pop();
+        attachments.push(
+            ReportAttachment::<_, T>::new_custom::<TestCodeLocationHandler>(TestCodeLocation {
+                location,
+                frames: frames.clone(),
+            })
+            .into_dynamic(),
         );
     }
-}
-
-/// A step of a test, as [`RecentSteps`] lists it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StepEvent {
-    pub(crate) kind: &'static str,
-    pub(crate) detail: Option<String>,
-    /// Since the test started.
-    pub(crate) started: Duration,
-    pub(crate) duration: Duration,
-    /// Whether the step's future finished, rather than being dropped before.
-    pub(crate) finished: bool,
+    attachments
+        .push(ReportAttachment::<_, T>::new_custom::<TestCodeFramesHandler>(frames).into_dynamic());
 }
 
 /// The last steps of a failed test, oldest first: what it did right before it failed, when and for
 /// how long.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RecentSteps {
-    steps: Vec<StepEvent>,
+    steps: Vec<RecentStep>,
     omitted: usize,
 }
 
 impl RecentSteps {
     /// The last `steps` of `total`, recorded as they ended, listed as they started: a step
     /// enclosing others ends after them, but is listed before them.
-    pub(crate) fn new(steps: &VecDeque<StepEvent>, total: usize) -> Option<Self> {
+    pub(crate) fn new(steps: &VecDeque<RecentStep>, total: usize) -> Option<Self> {
         let mut listed: Vec<_> = steps.iter().cloned().collect();
         listed.sort_by_key(|step| step.started);
         (!listed.is_empty()).then(|| Self {
             steps: listed,
             omitted: total.saturating_sub(steps.len()),
         })
+    }
+
+    /// The steps, as they started.
+    #[must_use]
+    pub fn steps(&self) -> &[RecentStep] {
+        &self.steps
+    }
+
+    /// How many earlier steps the test took, which aren't listed.
+    #[must_use]
+    pub const fn omitted(&self) -> usize {
+        self.omitted
     }
 }
 
@@ -539,29 +853,6 @@ impl fmt::Display for RecentSteps {
     }
 }
 
-/// A bounded log of the steps of the running test.
-#[derive(Debug, Default)]
-pub(crate) struct StepLog {
-    events: Mutex<(VecDeque<StepEvent>, usize)>,
-}
-
-impl StepLog {
-    pub(crate) fn push(&self, event: StepEvent) {
-        let mut guard = self.events.lock().unwrap_or_else(PoisonError::into_inner);
-        let (events, total) = &mut *guard;
-        if events.len() == RECENT_STEP_COUNT {
-            events.pop_front();
-        }
-        events.push_back(event);
-        *total += 1;
-    }
-
-    pub(crate) fn recent(&self) -> Option<RecentSteps> {
-        let guard = self.events.lock().unwrap_or_else(PoisonError::into_inner);
-        RecentSteps::new(&guard.0, guard.1)
-    }
-}
-
 /// Prints a thirtyfour error as its `WebDriver` message, without chromedriver's native stack trace
 /// and session info.
 #[derive(Debug, Clone, Copy)]
@@ -573,26 +864,8 @@ impl ContextFormatterHook<WebDriverError> for WebDriverErrorFormatter {
         report: ReportRef<'_, WebDriverError, Uncloneable, Local>,
         formatter: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
-        let full = report.current_context().to_string();
-        let mut parts: Vec<&str> = Vec::new();
-        for line in full
-            .lines()
-            .take_while(|line| !line.trim_start().starts_with("Stacktrace:"))
-            .map(str::trim)
-        {
-            let line = line.strip_prefix("Error: ").unwrap_or(line);
-            let line = line.strip_prefix("State: ").unwrap_or(line);
-            if line.is_empty()
-                || line.starts_with("(Session info:")
-                || line.starts_with("Status:")
-                || line.starts_with("Additional info:")
-                || parts.iter().any(|part| part.contains(line))
-            {
-                continue;
-            }
-            parts.push(line);
-        }
-        write!(formatter, "WebDriver: {}", parts.join(" "))
+        let error = report.current_context().to_string();
+        write!(formatter, "WebDriver: {}", webdriver_message(&error))
     }
 
     fn preferred_context_formatting_style(
@@ -605,6 +878,37 @@ impl ContextFormatterHook<WebDriverError> for WebDriverErrorFormatter {
             ..Default::default()
         }
     }
+}
+
+/// The message of a thirtyfour `error` (as `Display` prints it) on one line: without
+/// chromedriver's native stack trace, its session info, the HTTP status, and lines repeating
+/// earlier ones.
+fn webdriver_message(error: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for line in error
+        .lines()
+        .take_while(|line| !line.trim_start().starts_with("Stacktrace:"))
+        // Without an HTTP status, the indented state follows the error's kind on its line.
+        .flat_map(|line| match line.split_once("    State: ") {
+            Some((kind, state)) => [kind, state].map(Some),
+            None => [Some(line), None],
+        })
+        .flatten()
+        .map(str::trim)
+    {
+        let line = line.strip_prefix("Error: ").unwrap_or(line);
+        let line = line.strip_prefix("State: ").unwrap_or(line);
+        if line.is_empty()
+            || line.starts_with("(Session info:")
+            || line.starts_with("Status:")
+            || line.starts_with("Additional info:")
+            || parts.iter().any(|part| part.contains(line))
+        {
+            continue;
+        }
+        parts.push(line);
+    }
+    parts.join(" ")
 }
 
 /// Prints a context with `Display` also where a report is printed with `Debug` (as a `main` or
@@ -627,33 +931,126 @@ impl<C: fmt::Display + 'static> ContextFormatterHook<C> for DisplayFormatter {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use assertr::prelude::*;
+    use serde_json::json;
 
     use super::*;
 
+    /// A frame of `file`, relative to the test root.
+    fn frame(file: &str, line: u32, function: &str) -> TestCodeFrame {
+        TestCodeFrame {
+            path: test_root().join(file),
+            file: file.to_owned(),
+            line,
+            function: function.to_owned(),
+        }
+    }
+
     #[test]
     fn a_panic_location_is_test_code_when_it_is_the_innermost_frame() {
-        let frames = TestCodeFrames {
-            frames: vec![
-                Frame {
-                    file: "tests/ui/checkbox.rs".to_owned(),
-                    line: 84,
-                    function: "checkbox::selected_state".to_owned(),
-                },
-                Frame {
-                    file: "tests/main.rs".to_owned(),
-                    line: 12,
-                    function: "main".to_owned(),
-                },
-            ],
-        };
-        assert_that!(frames.starts_at("tests/ui/checkbox.rs:84:9")).is_true();
+        let frames = TestCodeFrames::from_frames(vec![
+            frame(
+                "my_crate/tests/ui/checkbox.rs",
+                84,
+                "checkbox::selected_state",
+            ),
+            frame("my_crate/tests/main.rs", 12, "main"),
+        ]);
+        let absolute = test_root().join("my_crate/tests/ui/checkbox.rs:84:9");
         assert_that!(frames.starts_at("my_crate/tests/ui/checkbox.rs:84:9")).is_true();
-        assert_that!(frames.starts_at("tests/ui/checkbox.rs:85:9")).is_false();
-        assert_that!(frames.starts_at("tests/main.rs:12:5")).is_false();
-        assert_that!(frames.starts_at("/home/me/.cargo/registry/src/assertr/src/lib.rs:84:9"))
-            .is_false();
+        assert_that!(frames.starts_at(&absolute.display().to_string())).is_true();
+        assert_that!(frames.starts_at("tests/ui/checkbox.rs:84:9")).is_false();
+        assert_that!(frames.starts_at("my_crate/tests/ui/checkbox.rs:85:9")).is_false();
+        assert_that!(frames.starts_at("my_crate/tests/main.rs:12:5")).is_false();
         assert_that!(frames.starts_at("no location")).is_false();
+    }
+
+    #[test]
+    fn a_location_in_a_dependency_is_no_test_code_even_where_the_paths_overlap() {
+        // A single-package workspace, whose `src/lib.rs` ends the path of a registry crate's.
+        let frames = TestCodeFrames::from_frames(vec![frame("src/lib.rs", 84, "lib::check")]);
+        assert_that!(frames.starts_at("src/lib.rs:84:9")).is_true();
+        assert_that!(frames.starts_at(
+            "/home/me/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/assertr-0.9.0/src/lib.rs:84:9"
+        ))
+        .is_false();
+        assert_that!(frames.starts_at_line("/home/me/.cargo/git/checkouts/x/src/lib.rs", 84))
+            .is_false();
+    }
+
+    #[test]
+    fn windows_paths_lose_verbatim_prefixes_and_get_upper_case_drives() {
+        for (path, normalized) in [
+            (r"\\?\C:\work\app\tests\ui.rs", r"C:\work\app\tests\ui.rs"),
+            (r"c:\work\app\tests\ui.rs", r"C:\work\app\tests\ui.rs"),
+            (r"\\?\d:\work\app", r"D:\work\app"),
+            (r"\\?\UNC\host\share\app", r"\\host\share\app"),
+            (r"C:\work\app", r"C:\work\app"),
+            (r"\\host\share\app", r"\\host\share\app"),
+            ("/home/me/app", "/home/me/app"),
+        ] {
+            assert_that!(normalized_windows_path(path).into_owned()).is_equal_to(normalized);
+        }
+    }
+
+    #[test]
+    fn relative_source_paths_are_joined_onto_the_root_if_the_file_is_there() {
+        let tree = TempTree::new("relative-sources", &["app/tests/ui.rs"]);
+        let root = &tree.0;
+        assert_that!(source_path(Path::new("app/tests/ui.rs"), root))
+            .is_equal_to(root.join("app/tests/ui.rs"));
+        // A remapped dependency, as `trim-paths` names it.
+        assert_that!(source_path(Path::new("thirtyfour-0.38.1/src/lib.rs"), root))
+            .is_equal_to(PathBuf::from("thirtyfour-0.38.1/src/lib.rs"));
+        assert_that!(source_path(&root.join("app/tests/ui.rs"), root))
+            .is_equal_to(root.join("app/tests/ui.rs"));
+    }
+
+    #[test]
+    fn own_frames_are_recognized_by_their_symbols() {
+        for name in [
+            "browser_test::execution::test_run::run_body::{{closure}}",
+            "browser_test[c72fec33b3453a53]::execution::test_run::run_body",
+            "<browser_test::execution::Foo as core::future::Future>::poll",
+        ] {
+            assert_that!(in_module(name, RUNNER_MODULE)).is_true();
+        }
+        assert_that!(in_module(
+            "<browser_test::step::Step<F> as core::future::Future>::poll",
+            OWN_CRATE
+        ))
+        .is_true();
+        for name in [
+            "browser_test::step::record_step",
+            "browser_test::executions::run",
+            "browser_test_helpers::execution::run",
+            "<browser_runner::MissingElementTest as browser_test::test_case::BrowserTest<()>>::run",
+            "",
+        ] {
+            assert_that!(in_module(name, RUNNER_MODULE)).is_false();
+        }
+        assert_that!(in_module("browser_test_helpers::find", OWN_CRATE)).is_false();
+    }
+
+    #[test]
+    fn frames_are_symbolized_when_first_needed() {
+        let frames = TestCodeFrames::capture();
+        assert_that!(frames.captured.frames.get()).is_none();
+
+        // This crate's own frames are no test code.
+        assert_that!(frames.is_empty()).is_true();
+        assert_that!(frames.captured.frames.get()).is_some();
+        assert_that!(
+            frames
+                .captured
+                .backtrace
+                .lock()
+                .expect("not poisoned")
+                .is_none()
+        )
+        .is_true();
     }
 
     /// A directory tree for one test, removed when dropped.
@@ -716,8 +1113,29 @@ mod tests {
     }
 
     #[test]
+    fn the_target_dir_is_found_from_the_executable() {
+        let tree = TempTree::new(
+            "target-dir",
+            &[
+                "build/CACHEDIR.TAG",
+                "build/debug/deps/ui-0123",
+                "build/debug/examples/demo",
+                "unmarked/release/deps/ui-0123",
+                "bin/tool",
+            ],
+        );
+        let root = &tree.0;
+        for exe in ["build/debug/deps/ui-0123", "build/debug/examples/demo"] {
+            assert_that!(target_dir_of(&root.join(exe))).is_equal_to(Some(root.join("build")));
+        }
+        assert_that!(target_dir_of(&root.join("unmarked/release/deps/ui-0123")))
+            .is_equal_to(Some(root.join("unmarked")));
+        assert_that!(target_dir_of(&root.join("bin/tool"))).is_none();
+    }
+
+    #[test]
     fn recent_steps_are_listed_as_they_started() {
-        let step = |kind, started| StepEvent {
+        let step = |kind, started| RecentStep {
             kind,
             detail: None,
             started: Duration::from_millis(started),
@@ -749,6 +1167,84 @@ mod tests {
             "my_tests::pages::Actions::eval::<()>::{{closure}}"
         ))
         .is_equal_to("Actions::eval");
+    }
+
+    #[test]
+    fn function_names_skip_function_pointer_types_in_generic_arguments() {
+        assert_that!(function_name(
+            "my_tests::retry::<fn() -> core::result::Result<(), my_tests::Error>>::{{closure}}"
+        ))
+        .is_equal_to("my_tests::retry");
+        assert_that!(function_name(
+            "<my_tests::Retry<fn(u32) -> u32> as my_tests::Policy>::next::h0123456789abcdef"
+        ))
+        .is_equal_to("Retry::next");
+    }
+
+    #[test]
+    fn frame_locations_are_aligned_by_chars() {
+        let frames = TestCodeFrames::from_frames(vec![
+            frame("tests/größe.rs", 7, "größe::check"),
+            frame("tests/sizes.rs", 12, "sizes::check"),
+        ]);
+        assert_that!(frames.to_string()).is_equal_to(
+            "Test code:\n  tests/größe.rs:7   größe::check\n  tests/sizes.rs:12  sizes::check"
+                .to_owned(),
+        );
+    }
+
+    /// A chromedriver error response, with its native stack trace.
+    fn chromedriver_error(status: u16, error: &str, message: &str) -> WebDriverError {
+        let body = json!({
+            "value": {
+                "error": error,
+                "message": format!("{message}\n  (Session info: chrome=131.0.6778.85)"),
+                "stacktrace": "0   chromedriver                        0x0000000100d6e5b8 \
+                               cxxbridge1$str$ptr + 3651580\n1   chromedriver                        \
+                               0x0000000100d66e1c cxxbridge1$str$ptr + 3620960\n2   \
+                               libsystem_pthread.dylib             0x000000018b6a72e4 _pthread_start + 136",
+            }
+        });
+        WebDriverError::parse(status, body.to_string())
+    }
+
+    #[test]
+    fn webdriver_errors_print_their_message_on_one_line() {
+        let missing = chromedriver_error(
+            404,
+            "no such element",
+            r##"no such element: Unable to locate element: {"method":"css selector","selector":"#missing"}"##,
+        );
+        assert_that!(webdriver_message(&missing.to_string())).is_equal_to(
+            r##"Element not found: no such element: Unable to locate element: {"method":"css selector","selector":"#missing"}"##
+                .to_owned(),
+        );
+
+        let script = chromedriver_error(
+            500,
+            "javascript error",
+            "javascript error: boom is not defined",
+        );
+        assert_that!(webdriver_message(&script.to_string())).is_equal_to(
+            "The Javascript code returned an error: javascript error: boom is not defined"
+                .to_owned(),
+        );
+
+        // Raised by thirtyfour itself, with the message as its state as well.
+        let query = thirtyfour::error::no_such_element(
+            "no such element: element(s) not found using selectors: [CSS(#missing)]".to_owned(),
+        );
+        assert_that!(webdriver_message(&query.to_string())).is_equal_to(
+            "Element not found: no such element: element(s) not found using selectors: \
+             [CSS(#missing)]"
+                .to_owned(),
+        );
+        // Without a status, the state follows on the first line.
+        let window = WebDriverError::NoSuchWindow(thirtyfour::error::WebDriverErrorInfo::new(
+            "unable to find named window: popup".to_owned(),
+        ));
+        assert_that!(webdriver_message(&window.to_string()))
+            .is_equal_to("Window not found: unable to find named window: popup".to_owned());
     }
 
     #[test]

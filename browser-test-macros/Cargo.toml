@@ -5,8 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
+readme = "README.md"
 repository.workspace = true
 description = "Attribute macros for browser-test."
+categories = ["development-tools::testing", "web-programming"]
+keywords = ["browser", "webdriver", "chrome", "testing", "automation"]
 
 [lib]
 proc-macro = true
@@ -25,6 +28,8 @@ assertr.workspace = true
 # dependency is left out when publishing.
 browser-test = { path = "../browser-test" }
 rootcause.workspace = true
+# The unit tests render syn types in assertion messages, which needs their Debug impls.
+syn = { version = "3", features = ["extra-traits"] }
 trybuild = "1.0.114"
 
 [lints]

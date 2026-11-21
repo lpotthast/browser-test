@@ -4,8 +4,8 @@
 use std::{borrow::Cow, collections::BTreeMap, panic::AssertUnwindSafe, time::Duration};
 
 use crate::{
-    BrowserTest, BrowserTestRecord, ElementQueryWait, Parallelism, SessionTiming, TestOutcome,
-    TestSuite, Timeouts, failure_report::panic_payload_message, test_case::SuiteEntry,
+    BrowserTest, ElementQueryWait, Parallelism, SessionTiming, TestOutcome, TestRecord, TestSuite,
+    Timeouts, failure_report::panic_payload_message, test_case::SuiteEntry,
     test_settings::TestDefaults,
 };
 
@@ -18,12 +18,28 @@ pub(super) struct Placement {
     pub(super) run_always: bool,
 }
 
+/// The number of a test of the run, in definition order: its index in the run's tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct TestIndex(usize);
+
+impl TestIndex {
+    /// The index as a number, e.g. into the run's tests.
+    pub(crate) const fn get(self) -> usize {
+        self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn new(index: usize) -> Self {
+        Self(index)
+    }
+}
+
 /// A test of the run, numbered in definition order, with its metadata.
 pub(super) struct QueuedTest<Context>
 where
     Context: Sync + ?Sized,
 {
-    pub(super) index: usize,
+    pub(super) index: TestIndex,
     /// The test's name, or a placeholder if reading it panicked.
     pub(super) name: String,
     pub(super) placement: Placement,
@@ -52,11 +68,12 @@ where
         outcome: TestOutcome,
         session: Option<SessionTiming>,
         body: Option<Duration>,
-    ) -> BrowserTestRecord {
-        BrowserTestRecord {
-            index: self.index,
+    ) -> TestRecord {
+        TestRecord {
+            index: self.index.0,
             name: self.name.clone(),
             outcome,
+            failure: None,
             path: self.placement.path.clone(),
             tags: self.tags.clone(),
             session,
@@ -74,6 +91,7 @@ where
 {
     /// The test's timeouts, completed with the runner's.
     pub(super) timeouts: Timeouts,
+    /// The test's element query wait, else the runner's.
     pub(super) element_query_wait: Option<ElementQueryWait>,
     /// Whether the test needs a session no test ran in (see
     /// [`TestSettings::fresh_session`](crate::TestSettings::fresh_session)).
@@ -81,17 +99,6 @@ where
     /// How long its body may run: its own time limit, else the runner's.
     pub(super) time_limit: Duration,
     pub(super) test: Box<dyn BrowserTest<Context>>,
-}
-
-impl<Context> PreparedTest<Context>
-where
-    Context: Sync + ?Sized,
-{
-    /// Whether the test takes its session from the pool, rather than getting one created with
-    /// its own settings.
-    pub(super) fn uses_pool(&self, default_wait: Option<ElementQueryWait>) -> bool {
-        self.element_query_wait == default_wait
-    }
 }
 
 /// A suite of the test tree, with its tests referenced by index.
@@ -105,7 +112,7 @@ pub(super) struct Suite {
 }
 
 pub(super) enum Node {
-    Test(usize),
+    Test(TestIndex),
     Suite(Suite),
 }
 
@@ -178,7 +185,7 @@ where
     for entry in entries {
         match entry {
             SuiteEntry::Test(test) => {
-                let index = tests.len();
+                let index = TestIndex(tests.len());
                 tests.push(plan_test(index, test, placement.clone(), defaults));
                 children.push(Node::Test(index));
             }
@@ -197,7 +204,7 @@ where
 
 /// Read the metadata of `test`, the test at `index`, and complete its settings with `defaults`.
 fn plan_test<Context>(
-    index: usize,
+    index: TestIndex,
     test: Box<dyn BrowserTest<Context>>,
     placement: Placement,
     defaults: TestDefaults,
@@ -206,7 +213,7 @@ where
     Context: Sync + ?Sized,
 {
     // What was read before a metadata method panicked is kept, with a fallback for the name.
-    let mut name = format!("unnamed test at index {index}");
+    let mut name = format!("unnamed test at index {}", index.0);
     let mut tags = Vec::new();
     let settings = std::panic::catch_unwind(AssertUnwindSafe(|| {
         name = test.name().into_owned();
@@ -269,15 +276,15 @@ mod tests {
             })
             .collect();
         assert_that!(metadata).contains_exactly([
-            (0, "a", Some("ui"), vec!["one".to_owned()], true),
+            (TestIndex(0), "a", Some("ui"), vec!["one".to_owned()], true),
             (
-                1,
+                TestIndex(1),
                 "b",
                 Some("ui"),
                 vec!["one".to_owned(), "two".to_owned()],
                 true,
             ),
-            (2, "c", Some("ui"), Vec::new(), true),
+            (TestIndex(2), "c", Some("ui"), Vec::new(), true),
         ]);
     }
 
@@ -349,12 +356,58 @@ mod tests {
         ]);
     }
 
+    mod max_concurrency {
+        use super::*;
+
+        fn suite(parallelism: usize, tests: usize) -> TestSuite<()> {
+            (0..tests).fold(
+                TestSuite::parallel(Parallelism::parallel(parallelism)),
+                |suite, _| suite.with(StubTest::new("test")),
+            )
+        }
+
+        fn max_concurrency(tests: TestSuite<()>) -> usize {
+            plan(tests, TestDefaults::new()).0.max_concurrency()
+        }
+
+        #[test]
+        fn is_bounded_by_the_parallelism() {
+            assert_that!(max_concurrency(suite(2, 3))).is_equal_to(2);
+            assert_that!(max_concurrency(suite(4, 3))).is_equal_to(3);
+            assert_that!(max_concurrency(TestSuite::sequential())).is_equal_to(1);
+        }
+
+        #[test]
+        fn sums_the_widest_children_that_run_at_the_same_time() {
+            // Two sequential suites and a test, all at once.
+            let tests = TestSuite::parallel(Parallelism::parallel(4))
+                .with_nested(suite(1, 3))
+                .with_nested(suite(1, 2))
+                .with(StubTest::new("test"));
+            assert_that!(max_concurrency(tests)).is_equal_to(3);
+
+            // Two at a time: the parallel suite of three, and a test.
+            let tests = TestSuite::parallel(Parallelism::parallel(2))
+                .with(StubTest::new("test"))
+                .with_nested(suite(3, 3))
+                .with(StubTest::new("test"));
+            assert_that!(max_concurrency(tests)).is_equal_to(4);
+
+            // A sequential suite runs one child at a time, however wide.
+            let tests = TestSuite::sequential()
+                .with_nested(suite(3, 3))
+                .with(StubTest::new("test"));
+            assert_that!(max_concurrency(tests)).is_equal_to(3);
+        }
+    }
+
     mod plan_test {
         use super::*;
 
         fn prepared(test: TestSettings, runner: TestDefaults) -> PreparedTest<()> {
             let test = StubTest::new("test").with_settings(test);
-            let Ok(prepared) = plan_test(0, Box::new(test), Placement::default(), runner).prepared
+            let Ok(prepared) =
+                plan_test(TestIndex(0), Box::new(test), Placement::default(), runner).prepared
             else {
                 panic!("the settings are readable")
             };
@@ -397,11 +450,9 @@ mod tests {
                 runner,
             );
             assert_that!(overriding.element_query_wait).is_equal_to(Some(test_wait));
-            assert_that!(overriding.uses_pool(Some(runner_wait))).is_false();
 
             let inheriting = prepared(TestSettings::new(), runner);
             assert_that!(inheriting.element_query_wait).is_equal_to(Some(runner_wait));
-            assert_that!(inheriting.uses_pool(Some(runner_wait))).is_true();
 
             assert_that!(prepared(TestSettings::new(), TestDefaults::new()).element_query_wait)
                 .is_none();

@@ -3,25 +3,24 @@
 //! Suites run recursively: a suite starts its entries in order, at most its parallelism at once.
 //! Every test runs in a browser session taken from the [`SessionPool`], which keeps spare
 //! sessions ready so that a starting test rarely waits for a browser to start. A session's
-//! lifetime is bound to `chrome-for-testing-manager`'s scoped session API, so each session is
-//! owned by a worker future that creates it, offers it to the pool, runs the test it is assigned,
-//! and quits it. With [`SessionReuse`] enabled, a worker resets its session after the test and
-//! offers it to the pool again instead, as long as upcoming tests need sessions. Worker futures are
+//! lifetime is bound to a scoped session API ([`SessionFactory::run_session`], that of
+//! `chrome-for-testing-manager` in a real run), so each session is owned by a worker future that
+//! creates it, offers it to the pool, runs the test it is assigned, and quits it. With
+//! [`SessionReuse`] enabled, a worker resets its session after the test and offers it to the pool
+//! again instead, as long as upcoming tests need sessions. Worker futures are
 //! driven by [`drive_workers`]. Everything crossing between them and the executor is plain data
 //! (test indices, channels), never a borrow of the run's state.
 //!
 //! - [`plan`] numbers the tests and completes their settings with the runner's.
 //! - [`session_pool`] decides when sessions are created, reset, or quit.
+//! - [`sessions`] creates sessions and acts on them, with Chrome for Testing or, in tests, fakes.
 //! - [`worker`] owns each session, and [`test_run`] runs a test in it, within the test's time
 //!   limit, and turns what happened into its record and report.
 
 use std::{
     future::Future,
     pin::{Pin, pin},
-    sync::{
-        Arc, Mutex, PoisonError,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::{Duration, Instant},
 };
 
@@ -31,25 +30,33 @@ use rootcause::Report;
 use thirtyfour::{ChromeCapabilities, error::WebDriverResult};
 use tokio::sync::{mpsc, oneshot};
 
+mod failures;
+#[cfg(test)]
+mod fake_sessions;
 mod plan;
 mod session_pool;
+mod sessions;
 mod test_run;
 mod worker;
 
+pub(crate) use self::{plan::TestIndex, session_pool::SessionNumber};
+
 use self::{
+    failures::BrowserTestFailures,
     plan::{Node, QueuedTest, Suite, plan},
-    session_pool::{CreationFailure, Delivery, SessionPool, Upcoming},
+    session_pool::{CreationFailure, SessionPool, Upcoming},
+    sessions::{ChromeSessions, SessionFactory},
     worker::{Job, drive_workers},
 };
 use crate::{
     BrowserTestError, FailurePolicy, ProgressWarnings, SessionReuse, TestSuite,
+    driver_output::DriverOutputCapture,
     profile::RunProfiles,
     progress::{Activity, ProgressBoard},
     report::{
-        BrowserTestRecord, FormatDuration, SessionPreparation, SessionTiming, SuiteRecord,
-        TestOutcome, timing_breakdown,
+        FormatDuration, SessionPreparation, SessionTiming, SuiteRecord, TestOutcome, TestRecord,
+        timing_breakdown,
     },
-    scheduler::BrowserTestFailures,
     test_settings::TestDefaults,
 };
 
@@ -72,12 +79,15 @@ pub(crate) struct ExecutionConfig<'a> {
     /// Spare sessions kept ready. `None`: [`default_spare_sessions`].
     pub(crate) spare_sessions: Option<usize>,
     pub(crate) session_reuse: SessionReuse,
+    /// The capture of the driver's output, whose lines of a failed test's session its report
+    /// shows.
+    pub(crate) driver_output: Option<&'a DriverOutputCapture>,
 }
 
 /// What executing a test tree produced.
 pub(crate) struct Execution {
     /// A record per started test, in test order.
-    pub(crate) records: Vec<BrowserTestRecord>,
+    pub(crate) records: Vec<TestRecord>,
     /// The timing of every named suite, in definition order.
     pub(crate) suites: Vec<SuiteRecord>,
     /// Time spent quitting sessions without a test.
@@ -96,38 +106,77 @@ pub(crate) async fn execute_tests<Context>(
 where
     Context: Sync + ?Sized,
 {
+    let sessions = ChromeSessions {
+        chrome: config.chrome,
+        visible: config.visible,
+        chrome_capabilities_setups: config.chrome_capabilities_setups,
+        profiles: config.profiles,
+        session_reuse: config.session_reuse,
+        cancellation: config.cancellation,
+    };
+    let settings = RunSettings {
+        test_defaults: config.test_defaults,
+        cancellation: config.cancellation,
+        failure_policy: config.failure_policy,
+        progress_warnings: config.progress_warnings,
+        spare_sessions: config.spare_sessions,
+        session_reuse: config.session_reuse,
+        driver_output: config.driver_output,
+    };
+    execute(&sessions, settings, context, tests).await
+}
+
+/// The settings of [`ExecutionConfig`] that don't concern how sessions are created.
+#[derive(Clone, Copy)]
+struct RunSettings<'a> {
+    test_defaults: TestDefaults,
+    cancellation: &'a CancellationToken,
+    failure_policy: FailurePolicy,
+    progress_warnings: ProgressWarnings,
+    spare_sessions: Option<usize>,
+    session_reuse: SessionReuse,
+    /// The capture of the driver's output, whose lines of a failed test's session its report
+    /// shows.
+    driver_output: Option<&'a DriverOutputCapture>,
+}
+
+/// Run every test of `tests` in sessions of `sessions`.
+async fn execute<Context, S>(
+    sessions: &S,
+    config: RunSettings<'_>,
+    context: &Context,
+    tests: TestSuite<Context>,
+) -> Execution
+where
+    Context: Sync + ?Sized,
+    S: SessionFactory,
+{
     let (root, prepared) = plan(tests, config.test_defaults);
     let max_concurrency = root.max_concurrency();
-    let default_wait = config.test_defaults.element_query_wait;
-    let pooled = |fresh: bool, only_run_always: bool| {
+    let count = |fresh: bool, only_run_always: bool| {
         prepared
             .iter()
             .filter(|test| {
                 matches!(&test.prepared, Ok(prepared)
-                    if prepared.uses_pool(default_wait)
-                        && prepared.fresh_session == fresh
+                    if prepared.fresh_session == fresh
                         && (test.placement.run_always || !only_run_always))
             })
             .count()
     };
     let upcoming = Upcoming {
-        any: pooled(false, false),
-        fresh: pooled(true, false),
+        any: count(false, false),
+        fresh: count(true, false),
     };
     let upcoming_always = Upcoming {
-        any: pooled(false, true),
-        fresh: pooled(true, true),
+        any: count(false, true),
+        fresh: count(true, true),
     };
     let (requests_tx, requests_rx) = mpsc::unbounded_channel();
     let env = Env {
         config,
         context,
         tests: prepared,
-        keep_starting: AtomicBool::new(true),
-        failures: Mutex::default(),
-        records: Mutex::default(),
-        suites: Mutex::default(),
-        released_session_teardown: Mutex::default(),
+        results: Mutex::default(),
         board: ProgressBoard::default(),
         pool: SessionPool::new(
             max_concurrency,
@@ -136,47 +185,38 @@ where
                 .unwrap_or_else(|| default_spare_sessions(max_concurrency, config.session_reuse)),
             upcoming,
             upcoming_always,
-            default_wait,
             requests_tx,
             config.cancellation.clone(),
         ),
     };
 
-    env.pool.replenish(true);
+    env.pool.replenish();
     let execution = async {
         run_suite(&env, &root).await;
         env.pool.close();
     };
-    let run = futures_util::future::join(execution, drive_workers(&env, requests_rx));
+    let run = futures_util::future::join(execution, drive_workers(&env, sessions, requests_rx));
     // The watchdog never finishes on its own. It is dropped once the run is done.
     let watchdog = env.board.watch(config.progress_warnings);
     futures_util::future::select(pin!(run), pin!(watchdog)).await;
+    env.pool.debug_assert_settled();
 
-    let Env {
-        tests,
+    let Env { tests, results, .. } = env;
+    let Results {
         failures,
-        records,
-        suites,
+        mut records,
+        mut suites,
         released_session_teardown,
-        ..
-    } = env;
-    let mut records = records.into_inner().unwrap_or_else(PoisonError::into_inner);
+    } = results.into_inner().unwrap_or_else(PoisonError::into_inner);
     let not_started = tests.len() - records.len();
     records.sort_by_key(|record| record.index);
-    let mut suites = suites.into_inner().unwrap_or_else(PoisonError::into_inner);
     suites.sort_by_key(|(id, _)| *id);
-    let failures = failures
-        .into_inner()
-        .unwrap_or_else(PoisonError::into_inner);
-    let result = failures.into_result();
     Execution {
         records,
         suites: suites.into_iter().map(|(_, suite)| suite).collect(),
-        released_session_teardown: released_session_teardown
-            .into_inner()
-            .unwrap_or_else(PoisonError::into_inner),
+        released_session_teardown,
         not_started,
-        result,
+        result: failures.into_result(),
     }
 }
 
@@ -197,53 +237,45 @@ struct Env<'c, Context>
 where
     Context: Sync + ?Sized,
 {
-    config: &'c ExecutionConfig<'c>,
+    config: RunSettings<'c>,
     context: &'c Context,
     tests: Vec<QueuedTest<Context>>,
-    keep_starting: AtomicBool,
-    failures: Mutex<BrowserTestFailures>,
-    records: Mutex<Vec<BrowserTestRecord>>,
-    suites: Mutex<Vec<(usize, SuiteRecord)>>,
-    /// Time spent quitting sessions without a test.
-    released_session_teardown: Mutex<Duration>,
+    results: Mutex<Results>,
     board: ProgressBoard,
     pool: SessionPool,
+}
+
+/// What a run's tests produced so far.
+#[derive(Default)]
+struct Results {
+    failures: BrowserTestFailures,
+    /// A record per finished test, in the order they finished.
+    records: Vec<TestRecord>,
+    /// The timing of every finished named suite, with its id.
+    suites: Vec<(usize, SuiteRecord)>,
+    /// Time spent quitting sessions without a test.
+    released_session_teardown: Duration,
 }
 
 impl<Context> Env<'_, Context>
 where
     Context: Sync + ?Sized,
 {
-    /// The test at `index`, which a session was assigned. Only ready tests are.
-    fn assigned_test(&self, index: usize) -> &QueuedTest<Context> {
-        &self.tests[index]
-    }
-
-    /// Whether further tests start: the run neither stopped on a failure nor was cancelled.
-    fn keep_starting(&self) -> bool {
-        self.keep_starting.load(Ordering::SeqCst) && !self.is_cancelled()
-    }
-
-    fn is_cancelled(&self) -> bool {
-        self.config.cancellation.is_cancelled()
-    }
-
-    /// Whether a test starts: unless the run stopped on a failure, or, also for tests that run
-    /// always, was cancelled.
-    fn may_start(&self, run_always: bool) -> bool {
-        self.keep_starting() || (run_always && !self.is_cancelled())
+    /// The test at `index`.
+    fn test(&self, index: TestIndex) -> &QueuedTest<Context> {
+        &self.tests[index.get()]
     }
 
     /// With [`FailurePolicy::FailFast`], start no further tests (after a failure).
     fn stop_starting_on_fail_fast(&self) {
         if self.config.failure_policy == FailurePolicy::FailFast {
-            self.keep_starting.store(false, Ordering::SeqCst);
-            self.pool.stopped();
+            self.pool.stop();
         }
     }
 
     /// Record a finished test.
-    fn finish(&self, record: BrowserTestRecord, result: Result<(), Report<BrowserTestError>>) {
+    fn finish(&self, mut record: TestRecord, result: Result<(), Report<BrowserTestError>>) {
+        record.failure = result.as_ref().err().map(ToString::to_string);
         let total = FormatDuration(record.total());
         let breakdown = timing_breakdown(&record);
         match record.outcome {
@@ -272,26 +304,27 @@ where
                 record.name,
             ),
         }
-        if let Err(report) = result {
+        if result.is_err() {
             self.stop_starting_on_fail_fast();
-            self.failures
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(record.index, report);
         }
-        self.records
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(record);
+        let mut results = self.results();
+        if let Err(report) = result {
+            results.failures.push(record.index, report);
+        }
+        results.records.push(record);
     }
 
-    /// Tell the test waiting for the session of `delivery` that it could not be created.
-    fn fail_creation(&self, delivery: Delivery, report: Report, creation_start: Instant) {
+    fn results(&self) -> MutexGuard<'_, Results> {
+        self.results.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Tell the pool that a session could not be created.
+    fn fail_creation(&self, report: Report, creation_start: Instant) {
         let failure = CreationFailure {
             report,
             preparation: SessionPreparation::Created(creation_start.elapsed()),
         };
-        self.pool.deliver(delivery, Err(failure));
+        self.pool.deliver(Err(failure));
     }
 
     fn warn_if_slow_session(&self, what: &str, duration: Duration) {
@@ -306,6 +339,11 @@ where
         }
     }
 }
+
+/// The session a test was given ended before the test could start in it.
+#[derive(Debug, thiserror::Error)]
+#[error("the browser session ended before the test started")]
+struct SessionEnded;
 
 /// Run `suite`, recording its wall time if it is named.
 fn run_suite<'r, Context>(
@@ -328,16 +366,13 @@ where
             .collect::<()>()
             .await;
         if let Some(name) = &suite.name {
-            env.suites
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push((
-                    suite.id,
-                    SuiteRecord {
-                        name: name.clone(),
-                        duration: start.elapsed(),
-                    },
-                ));
+            env.results().suites.push((
+                suite.id,
+                SuiteRecord {
+                    name: name.clone(),
+                    duration: start.elapsed(),
+                },
+            ));
         }
     })
 }
@@ -348,7 +383,7 @@ where
 {
     match node {
         // Tests not started because of fail-fast or a cancellation are not recorded.
-        Node::Test(index) if env.may_start(env.tests[*index].placement.run_always) => {
+        Node::Test(index) if env.pool.may_start(env.test(*index).placement.run_always) => {
             run_test(env, *index).await;
         }
         Node::Test(_) => {}
@@ -356,13 +391,12 @@ where
     }
 }
 
-/// Run the test at `index` in a session of the pool (or one created for it) and return once its
-/// body finished. Its session quits or is reset, and its record is completed, in the background.
-async fn run_test<Context>(env: &Env<'_, Context>, index: usize)
+/// Run the test at `index` in a session of the pool and return once its body finished. Its session quits or is reset, and its record is completed, in the background.
+async fn run_test<Context>(env: &Env<'_, Context>, index: TestIndex)
 where
     Context: Sync + ?Sized,
 {
-    let test = &env.tests[index];
+    let test = env.test(index);
     let prepared = match &test.prepared {
         Ok(prepared) => prepared,
         Err(panic_message) => {
@@ -377,30 +411,20 @@ where
 
     let run_always = test.placement.run_always;
     let requested = Instant::now();
-    let pooled = prepared.uses_pool(env.pool.default_wait);
-    let ticket = if pooled {
-        // Tests not started because of fail-fast or a cancellation are not recorded.
-        let Some(ticket) = env
-            .pool
-            .take(prepared.fresh_session, run_always, || env.keep_starting())
-            .await
-        else {
-            return;
-        };
-        ticket
-    } else {
-        env.pool.dedicated(prepared.element_query_wait).await
+    // Tests not started because of fail-fast or a cancellation are not recorded.
+    let Some(ticket) = env.pool.take(prepared.fresh_session, run_always).await else {
+        return;
     };
     let wait = requested.elapsed();
-    if !env.may_start(run_always) {
+    if !env.pool.may_start(run_always) {
         // A test failed, or the run was cancelled, while this one waited for its session: it
         // doesn't start, like the tests after it. Its session quits.
-        if pooled && ticket.is_ok() {
+        if ticket.is_ok() {
             env.pool.test_finished();
         }
         return;
     }
-    let failure = match ticket {
+    let (report, preparation) = match ticket {
         Ok(ticket) => {
             let (body_done_tx, body_done_rx) = oneshot::channel();
             let job = Job {
@@ -415,9 +439,7 @@ where
                     // The worker ended without finishing the test, which only a cancelled run
                     // does: it drops its workers, before they take the test off the board.
                     env.board.clear(Activity::Test(index));
-                    if pooled {
-                        env.pool.test_finished();
-                    }
+                    env.pool.test_finished();
                     let record = test.record(
                         TestOutcome::Cancelled,
                         Some(SessionTiming { preparation, wait }),
@@ -427,23 +449,18 @@ where
                 }
                 return;
             }
-            if pooled {
-                env.pool.test_finished();
-            }
-            CreationFailure {
-                report: rootcause::report!("the browser session ended before the test started"),
+            env.pool.test_finished();
+            (
+                Report::<SessionEnded>::new(SessionEnded).into_dynamic(),
                 preparation,
-            }
+            )
         }
-        Err(failure) => failure,
+        Err(failure) => (failure.report, failure.preparation),
     };
 
-    let session = SessionTiming {
-        preparation: failure.preparation,
-        wait,
-    };
+    let session = SessionTiming { preparation, wait };
     let record = test.record(TestOutcome::Failed, Some(session), None);
-    let report = failure.report.context(BrowserTestError::PrepareSession {
+    let report = report.context(BrowserTestError::PrepareSession {
         test_name: test.name.clone(),
     });
     env.finish(record, Err(report));
@@ -464,6 +481,268 @@ mod tests {
             assert_that!(default_spare_sessions(8, SessionReuse::enabled())).is_equal_to(1);
             assert_that!(default_spare_sessions(9, SessionReuse::enabled())).is_equal_to(2);
             assert_that!(default_spare_sessions(1, SessionReuse::enabled())).is_equal_to(1);
+        }
+    }
+
+    /// A run's future can be spawned.
+    #[test]
+    fn execute_tests_is_send() {
+        fn send<'a>(
+            config: &'a ExecutionConfig<'a>,
+            tests: TestSuite<()>,
+        ) -> impl Future<Output = Execution> + Send + 'a {
+            execute_tests(config, &(), tests)
+        }
+        let _ = send;
+    }
+
+    /// Runs with fake sessions. Time is paused, so that sleeps end once nothing else can happen.
+    /// Every run ends with the pool's counts back at zero ([`SessionPool::debug_assert_settled`]).
+    mod execute {
+        use std::time::Duration;
+
+        use super::*;
+        use crate::{
+            ElementQueryWait, Parallelism, TestSettings,
+            execution::fake_sessions::{FakeReset, FakeSessions, FakeTest},
+            test_support::StubTest,
+        };
+
+        fn settings(cancellation: &CancellationToken) -> RunSettings<'_> {
+            RunSettings {
+                test_defaults: TestDefaults::new(),
+                cancellation,
+                failure_policy: FailurePolicy::RunAll,
+                progress_warnings: ProgressWarnings::disabled(),
+                spare_sessions: Some(0),
+                session_reuse: SessionReuse::disabled(),
+                driver_output: None,
+            }
+        }
+
+        /// [`execute`], failing rather than hanging if the run never ends.
+        async fn run(
+            sessions: &FakeSessions,
+            config: RunSettings<'_>,
+            tests: TestSuite<()>,
+        ) -> Execution {
+            let run = execute(sessions, config, &(), tests);
+            tokio::time::timeout(Duration::from_secs(3600), run)
+                .await
+                .expect("the run should end")
+        }
+
+        fn outcomes(execution: &Execution) -> Vec<(&str, TestOutcome)> {
+            execution
+                .records
+                .iter()
+                .map(|record| (record.name.as_str(), record.outcome))
+                .collect()
+        }
+
+        fn sequential(names: &[&'static str]) -> TestSuite<()> {
+            names.iter().fold(TestSuite::sequential(), |suite, name| {
+                suite.with(StubTest::new(name))
+            })
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_spare_that_could_not_be_created_fails_no_test() {
+            let cancellation = CancellationToken::new();
+            // Session 0 is the first spare, which the first test takes. Session 1, the next spare,
+            // can't be created while that test runs: it is created again.
+            let sessions = FakeSessions::new(&cancellation).failing_creation(1);
+            let config = RunSettings {
+                spare_sessions: Some(1),
+                ..settings(&cancellation)
+            };
+
+            let execution = run(&sessions, config, sequential(&["a", "b", "c"])).await;
+
+            assert_that!(execution.result).is_ok();
+            assert_that!(outcomes(&execution)).contains_exactly([
+                ("a", TestOutcome::Passed),
+                ("b", TestOutcome::Passed),
+                ("c", TestOutcome::Passed),
+            ]);
+            assert_that!(sessions.events()).contains("fail 1".to_owned());
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_test_fails_when_its_session_could_not_be_created() {
+            let cancellation = CancellationToken::new();
+            let sessions = FakeSessions::new(&cancellation).failing_creation(0);
+
+            let execution = run(&sessions, settings(&cancellation), sequential(&["a", "b"])).await;
+
+            assert_that!(outcomes(&execution))
+                .contains_exactly([("a", TestOutcome::Failed), ("b", TestOutcome::Passed)]);
+            let error = execution.result.expect_err("a fails");
+            assert_that!(format!("{error:?}"))
+                .contains("PrepareSession { test_name: \"a\" }")
+                .contains("session 0 could not be created");
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_failure_to_quit_its_session_fails_a_passing_test() {
+            let cancellation = CancellationToken::new();
+            let sessions = FakeSessions::new(&cancellation).failing_quit(0);
+
+            let execution = run(&sessions, settings(&cancellation), sequential(&["a"])).await;
+
+            assert_that!(outcomes(&execution)).contains_exactly([("a", TestOutcome::Failed)]);
+            let error = execution.result.expect_err("quitting fails");
+            assert_that!(format!("{error:?}"))
+                .contains("RunTest { test_name: \"a\" }")
+                .contains("session 0 could not be quit");
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_session_whose_reset_takes_too_long_quits() {
+            let cancellation = CancellationToken::new();
+            let sessions = FakeSessions::new(&cancellation).with_reset(FakeReset::Hang);
+            let config = RunSettings {
+                session_reuse: SessionReuse::enabled(),
+                ..settings(&cancellation)
+            };
+
+            let execution = run(&sessions, config, sequential(&["a", "b"])).await;
+
+            assert_that!(outcomes(&execution))
+                .contains_exactly([("a", TestOutcome::Passed), ("b", TestOutcome::Passed)]);
+            // The next test waited for the reset, and got a new session once it timed out.
+            assert_that!(sessions.events()).contains_exactly([
+                "create 0", "start a", "end a", "reset 0", "quit 0", "create 1", "start b",
+                "end b", "quit 1",
+            ]);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_reset_session_runs_the_next_test() {
+            let cancellation = CancellationToken::new();
+            let sessions = FakeSessions::new(&cancellation);
+            let config = RunSettings {
+                session_reuse: SessionReuse::enabled(),
+                ..settings(&cancellation)
+            };
+
+            let execution = run(&sessions, config, sequential(&["a", "b"])).await;
+
+            assert_that!(execution.result).is_ok();
+            assert_that!(sessions.events()).contains_exactly([
+                "create 0", "start a", "end a", "reset 0", "start b", "end b", "quit 0",
+            ]);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn cancelling_the_run_during_a_reset_ends_it() {
+            let cancellation = CancellationToken::new();
+            let sessions = FakeSessions::new(&cancellation).with_reset(FakeReset::Cancel);
+            let config = RunSettings {
+                session_reuse: SessionReuse::enabled(),
+                ..settings(&cancellation)
+            };
+
+            let execution = run(&sessions, config, sequential(&["a", "b"])).await;
+
+            assert_that!(outcomes(&execution)).contains_exactly([("a", TestOutcome::Passed)]);
+            assert_that!(execution.not_started).is_equal_to(1);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn cancelling_the_run_ends_the_wait_for_a_session() {
+            let cancellation = CancellationToken::new();
+            // The session of "cancel" is created first, the one of "a" takes long.
+            let sessions = FakeSessions::new(&cancellation)
+                .with_creation_time(1, Duration::from_secs(60))
+                .with_test("cancel", FakeTest::Cancel(Duration::from_secs(1)));
+            let tests = TestSuite::parallel(Parallelism::parallel(2))
+                .with(StubTest::new("cancel"))
+                .with(StubTest::new("a"));
+
+            let execution = run(&sessions, settings(&cancellation), tests).await;
+
+            assert_that!(outcomes(&execution))
+                .contains_exactly([("cancel", TestOutcome::Cancelled)]);
+            assert_that!(execution.not_started).is_equal_to(1);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_failure_ends_the_wait_for_a_session_with_fail_fast() {
+            let cancellation = CancellationToken::new();
+            // The session of "fail" is created first, the one of "a" takes long.
+            let sessions = FakeSessions::new(&cancellation)
+                .with_creation_time(1, Duration::from_secs(60))
+                .with_test("fail", FakeTest::Fail);
+            let tests = TestSuite::parallel(Parallelism::parallel(2))
+                .with(StubTest::new("fail"))
+                .with(StubTest::new("a"));
+            let config = RunSettings {
+                failure_policy: FailurePolicy::FailFast,
+                ..settings(&cancellation)
+            };
+
+            let execution = run(&sessions, config, tests).await;
+
+            assert_that!(outcomes(&execution)).contains_exactly([("fail", TestOutcome::Failed)]);
+            assert_that!(execution.not_started).is_equal_to(1);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn every_test_sets_its_element_query_wait_in_the_session_it_gets() {
+            let cancellation = CancellationToken::new();
+            let sessions = FakeSessions::new(&cancellation);
+            let runner_wait =
+                ElementQueryWait::new(Duration::from_secs(10), Duration::from_millis(500));
+            let own_wait =
+                ElementQueryWait::new(Duration::from_secs(1), Duration::from_millis(100));
+            let config = RunSettings {
+                test_defaults: TestDefaults {
+                    element_query_wait: Some(runner_wait),
+                    ..TestDefaults::new()
+                },
+                session_reuse: SessionReuse::enabled(),
+                ..settings(&cancellation)
+            };
+            let tests = TestSuite::sequential()
+                .with(
+                    StubTest::new("a")
+                        .with_settings(TestSettings::new().with_element_query_wait(own_wait)),
+                )
+                .with(StubTest::new("b"));
+
+            let execution = run(&sessions, config, tests).await;
+
+            assert_that!(execution.result).is_ok();
+            // A test with a wait of its own takes a session like any other, which the next test
+            // reuses with the runner's wait.
+            assert_that!(sessions.events()).contains_exactly([
+                "create 0", "start a", "end a", "reset 0", "start b", "end b", "quit 0",
+            ]);
+            assert_that!(sessions.element_query_waits())
+                .contains_exactly([(0, Some(own_wait)), (0, Some(runner_wait))]);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn tests_start_in_order_when_their_sessions_arrive_out_of_order() {
+            let cancellation = CancellationToken::new();
+            // The session created for "a" takes longer than the one created for "b".
+            let sessions = FakeSessions::new(&cancellation)
+                .with_creation_time(0, Duration::from_secs(5))
+                .with_test("a", FakeTest::Pass(Duration::from_secs(10)));
+            let tests = TestSuite::parallel(Parallelism::parallel(2))
+                .with(StubTest::new("a"))
+                .with(StubTest::new("b"));
+
+            let execution = run(&sessions, settings(&cancellation), tests).await;
+
+            assert_that!(execution.result).is_ok();
+            let starts: Vec<_> = sessions
+                .events()
+                .into_iter()
+                .filter(|event| event.starts_with("start"))
+                .collect();
+            assert_that!(starts).contains_exactly(["start a", "start b"]);
         }
     }
 }

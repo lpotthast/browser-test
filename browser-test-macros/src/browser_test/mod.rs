@@ -5,13 +5,16 @@ mod arguments;
 mod description;
 mod signature;
 
-pub(crate) use arguments::Arguments;
-use heck::ToUpperCamelCase;
-use manyhow::{ErrorMessage, bail, ensure, error_message};
-use proc_macro2::{Ident, TokenStream};
-use quote::{format_ident, quote, quote_spanned};
+use arguments::Arguments;
+use heck::{ToSnakeCase as _, ToUpperCamelCase as _};
+use manyhow::{ErrorMessage, bail, ensure};
+use proc_macro2::{Group, Ident, Span, TokenStream, TokenTree};
+use quote::{ToTokens as _, format_ident, quote, quote_spanned};
 use signature::{Inputs, TestSignature};
-use syn::{ItemFn, Visibility, ext::IdentExt, spanned::Spanned as _};
+use syn::{
+    Attribute, ItemFn, Meta, Token, Visibility, ext::IdentExt, punctuated::Punctuated,
+    spanned::Spanned as _,
+};
 
 /// Struct names that would shadow a name of the standard prelude (Rust 2024) in the test's module:
 /// its types and traits, and the `Option` and `Result` variants, as a unit struct also defines a
@@ -62,16 +65,52 @@ const RESERVED_NAMES: &[&str] = &[
     "Vec",
 ];
 
-pub(crate) fn expand(args: Arguments, mut function: ItemFn) -> manyhow::Result<TokenStream> {
+/// The expansion of `#[browser_test]` on `item`, with `args`. On an error, `dummy` holds the
+/// function and its struct, so that neither the struct's uses nor the function's body report
+/// errors of their own.
+pub(crate) fn expand(
+    args: TokenStream,
+    item: TokenStream,
+    dummy: &mut TokenStream,
+) -> manyhow::Result<TokenStream> {
+    let function = match syn::parse2::<ItemFn>(item.clone()) {
+        Ok(function) => function,
+        Err(error) => {
+            *dummy = item;
+            bail!(
+                error.span(),
+                "`#[browser_test]` must be applied to an `async fn`"
+            );
+        }
+    };
+    let args = syn::parse2::<Arguments>(args);
+    let crate_path = match &args {
+        Ok(Arguments {
+            crate_path: Some(path),
+            ..
+        }) => Ok(path.to_token_stream()),
+        _ => crate_path(),
+    };
+    *dummy = expand_dummy(function.clone(), crate_path.as_ref().ok());
+    expand_test(args?, &crate_path?, function)
+}
+
+/// The test of `function`, with `args`.
+fn expand_test(
+    args: Arguments,
+    crate_path: &TokenStream,
+    mut function: ItemFn,
+) -> manyhow::Result<TokenStream> {
     let TestSignature {
         result,
         context,
         generics,
         inputs,
+        input_spans,
     } = TestSignature::parse(&function.sig)?;
-    let crate_path = crate_path()?;
-    let function_name = function.sig.ident.unraw().to_string();
-    let name = struct_name(&function.sig.ident, &function_name)?;
+    let (name, function_name) = test_names(&function.sig.ident)?;
+    function.sig.ident = function_name;
+    let struct_name = name.unraw().to_string();
     // Only a test with tags has tags of its own.
     let tags = args.tags.filter(|tags| !tags.is_empty()).map(|tags| {
         quote! {
@@ -84,7 +123,8 @@ pub(crate) fn expand(args: Arguments, mut function: ItemFn) -> manyhow::Result<T
     // of another type is reported.
     let settings = args.time_limit.map(|limit| {
         let settings = quote_spanned! {limit.span()=>
-            #crate_path::TestSettings::new().with_time_limit(#limit)
+            let limit: ::core::time::Duration = #limit;
+            #crate_path::TestSettings::new().with_time_limit(limit)
         };
         quote! {
             fn settings(&self) -> #crate_path::TestSettings {
@@ -94,35 +134,34 @@ pub(crate) fn expand(args: Arguments, mut function: ItemFn) -> manyhow::Result<T
     });
     let test_name = args.name.map_or_else(
         // Qualified, as the caller's module may define macros of these names.
-        || quote!(::core::concat!(::core::module_path!(), "::", #function_name)),
+        || quote!(::core::concat!(::core::module_path!(), "::", #struct_name)),
         |name| quote!(#name),
     );
-    // The struct documents the test. The body keeps every other attribute: one meant for the
-    // function, e.g. `#[expect(...)]` or `#[tracing::instrument]`, could fail on the struct.
-    let docs: Vec<_> = function
-        .attrs
-        .extract_if(.., |attr| attr.path().is_ident("doc"))
-        .collect();
-    let description = description::expand(&docs);
-    // Conditional compilation must guard every generated item, including the implementation.
-    let cfgs: Vec<_> = function
-        .attrs
-        .iter()
-        .filter(|attr| attr.path().is_ident("cfg"))
-        .cloned()
-        .collect();
-    // The function keeps its name, which failure reports and `#[tracing::instrument]` show, and
-    // the struct gets its visibility.
-    let visibility = std::mem::replace(&mut function.vis, Visibility::Inherited);
+    let attributes = StructAttributes::take(&mut function);
+    let description = description::expand(&attributes.docs);
+    let cfgs = &attributes.cfgs;
+    let test_struct = attributes.test_struct(&name);
     let body = &function.sig.ident;
-    let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
-    // `async_trait` names every lifetime elided in `run`'s arguments, including the higher-ranked
-    // ones in `fn(&str)` or `Fn(&str)`. The alias hides them.
-    let context_alias = format_ident!("__{name}Context");
+    let (impl_generics, _, where_clause) = generics.split_for_impl();
     let call_args = match inputs {
-        Inputs::None => quote!(),
-        Inputs::Context => quote!(__browser_test_context),
-        Inputs::DriverAndContext => quote!(__browser_test_driver, __browser_test_context),
+        Inputs::None => &[][..],
+        Inputs::Context => &["__browser_test_context"][..],
+        Inputs::DriverAndContext => &["__browser_test_driver", "__browser_test_context"][..],
+    };
+    // Spanned at the arguments' types, where an argument of another type is reported.
+    let call_args = call_args
+        .iter()
+        .zip(input_spans)
+        .map(|(arg, span)| Ident::new(arg, span));
+    // Spanned at the context, where one that is not `Sync` is reported. The path's first token
+    // decides. A path set with `crate = ...` keeps its span, where it is reported if it is wrong.
+    let crate_path_at_context = if args.crate_path.is_some() {
+        crate_path.clone()
+    } else {
+        respan(crate_path.clone(), context.span())
+    };
+    let browser_test = quote_spanned! {context.span()=>
+        #crate_path_at_context::BrowserTest<#context>
     };
     // Spanned at the return type, where a wrong one is reported.
     let into_dynamic = quote_spanned! {result.span()=>
@@ -130,31 +169,20 @@ pub(crate) fn expand(args: Arguments, mut function: ItemFn) -> manyhow::Result<T
     };
     // Spanned at the function's name, where a future that is not `Send` is reported.
     let boxed_body = quote_spanned! {body.span()=>
-        ::std::boxed::Box::pin(#crate_path::__private::run_body(#body(#call_args), #into_dynamic))
+        ::std::boxed::Box::pin(#crate_path::__private::run_body(#body(#(#call_args),*), #into_dynamic))
     };
     Ok(quote! {
-        #(#docs)*
-        #(#cfgs)*
-        #[derive(
-            ::std::fmt::Debug,
-            ::std::clone::Clone,
-            ::std::marker::Copy,
-            ::std::default::Default,
-        )]
-        #visibility struct #name;
+        #test_struct
 
+        // Only the struct, which runs the function, warns of a test that is never registered.
+        #[allow(dead_code)]
         #function
 
+        // `run` returns the function's future without an `async` block of its own, only wrapped in
+        // browser-test's `run_body`, so that no frame of generated code is on the stack while the
+        // test runs, and failure reports show the function as the test's outermost frame.
         #(#cfgs)*
-        #[doc(hidden)]
-        type #context_alias #type_generics = #context;
-
-        // `run` returns the function's future without an `async` block of its own (as
-        // `async_trait` would add one), only wrapped in browser-test's `run_body`, so that no frame
-        // of generated code is on the stack while the test runs, and failure reports show the
-        // function as the test's outermost frame.
-        #(#cfgs)*
-        impl #impl_generics #crate_path::BrowserTest<#context> for #name #where_clause {
+        impl #impl_generics #browser_test for #name #where_clause {
             fn name(&self) -> ::std::borrow::Cow<'_, str> {
                 ::std::borrow::Cow::Borrowed(#test_name)
             }
@@ -167,25 +195,199 @@ pub(crate) fn expand(args: Arguments, mut function: ItemFn) -> manyhow::Result<T
 
             #settings
 
-            fn run<'__self, '__driver, '__context, '__future>(
-                &'__self self,
-                __browser_test_driver: &'__driver #crate_path::thirtyfour::WebDriver,
-                __browser_test_context: &'__context #context_alias #type_generics,
-            ) -> ::std::pin::Pin<::std::boxed::Box<
-                dyn ::std::future::Future<Output = #crate_path::__private::DynamicResult>
-                    + ::std::marker::Send
-                    + '__future
-            >>
-            where
-                '__self: '__future,
-                '__driver: '__future,
-                '__context: '__future,
-                Self: '__future,
-            {
+            fn run<'__browser_test>(
+                &'__browser_test self,
+                __browser_test_driver: &'__browser_test #crate_path::thirtyfour::WebDriver,
+                __browser_test_context: &'__browser_test #context,
+            ) -> #crate_path::TestFuture<'__browser_test> {
                 #boxed_body
             }
         }
     })
+}
+
+/// What the attribute expands to besides an error: `function` and its struct, implementing
+/// `BrowserTest` for every context if `crate_path` is known.
+fn expand_dummy(mut function: ItemFn, crate_path: Option<&TokenStream>) -> TokenStream {
+    // A function with a receiver is a method (a free one doesn't parse), where a struct can't be.
+    if function.sig.receiver().is_some() {
+        return function.into_token_stream();
+    }
+    // A function not named in `PascalCase` keeps its name, and gets the struct the error suggests,
+    // so that registering it reports no error of its own.
+    let name = match test_names(&function.sig.ident) {
+        Ok((name, function_name)) => {
+            function.sig.ident = function_name;
+            Some(name)
+        }
+        Err(_) => pascal_case(&function.sig.ident).filter(|name| *name != function.sig.ident),
+    };
+    let attributes = StructAttributes::take(&mut function);
+    let function = quote! {
+        #[allow(dead_code, non_snake_case)]
+        #function
+    };
+    let Some(name) = name else {
+        return function;
+    };
+    let test_struct = attributes.test_struct(&name);
+    let cfgs = &attributes.cfgs;
+    let implementation = crate_path.map(|crate_path| {
+        quote! {
+            #(#cfgs)*
+            impl<__BrowserTestContext> #crate_path::BrowserTest<__BrowserTestContext> for #name
+            where
+                __BrowserTestContext: ?::core::marker::Sized + ::core::marker::Sync,
+            {
+                fn run<'__browser_test>(
+                    &'__browser_test self,
+                    _: &'__browser_test #crate_path::thirtyfour::WebDriver,
+                    _: &'__browser_test __BrowserTestContext,
+                ) -> #crate_path::TestFuture<'__browser_test> {
+                    ::core::unreachable!()
+                }
+            }
+        }
+    });
+    quote! {
+        #[allow(dead_code)]
+        #test_struct
+
+        #function
+
+        #implementation
+    }
+}
+
+/// The attributes of a test's function that belong to its struct.
+struct StructAttributes {
+    /// The doc comments, which document the test.
+    docs: Vec<Attribute>,
+    /// The `#[cfg]`s, which must guard every generated item, including the implementation.
+    cfgs: Vec<Attribute>,
+    /// The lint attributes meant for the struct (see [`take_lints`]).
+    lints: Vec<Attribute>,
+    /// The function's visibility.
+    visibility: Visibility,
+}
+
+impl StructAttributes {
+    /// Takes the struct's attributes from `function`. The function keeps every other attribute:
+    /// one meant for the function, e.g. `#[expect(...)]` or `#[tracing::instrument]`, could fail on
+    /// the struct. It keeps its name, which failure reports and `#[tracing::instrument]` show, and
+    /// the struct gets its visibility.
+    fn take(function: &mut ItemFn) -> Self {
+        let docs = function
+            .attrs
+            .extract_if(.., |attr| attr.path().is_ident("doc"))
+            .collect();
+        let cfgs = function
+            .attrs
+            .iter()
+            .filter(|attr| attr.path().is_ident("cfg"))
+            .cloned()
+            .collect();
+        let lints = take_lints(&mut function.attrs);
+        let visibility = std::mem::replace(&mut function.vis, Visibility::Inherited);
+        Self {
+            docs,
+            cfgs,
+            lints,
+            visibility,
+        }
+    }
+
+    /// The declaration of the test's struct, `name`.
+    fn test_struct(&self, name: &Ident) -> TokenStream {
+        let Self {
+            docs,
+            cfgs,
+            lints,
+            visibility,
+        } = self;
+        // Spanned at the function's name, which the struct's name keeps, so that going to the
+        // struct's definition leads to the function.
+        let declaration = quote_spanned! {name.span()=>
+            #[derive(
+                ::std::fmt::Debug,
+                ::std::clone::Clone,
+                ::std::marker::Copy,
+                ::std::default::Default,
+            )]
+            #visibility struct #name;
+        };
+        quote! {
+            #(#docs)*
+            #(#cfgs)*
+            #(#lints)*
+            #declaration
+        }
+    }
+}
+
+/// Takes the struct's lint attributes from `attrs`: copies of the `#[allow]`s, which are harmless
+/// where nothing triggers them, and the `missing_docs` and `dead_code` lints of the `#[expect]`s,
+/// which only the struct can fulfill: it is public unlike the function, and the one never used.
+fn take_lints(attrs: &mut Vec<Attribute>) -> Vec<Attribute> {
+    let mut lints = Vec::new();
+    attrs.retain_mut(|attr| {
+        if attr.path().is_ident("allow") {
+            lints.push(attr.clone());
+            return true;
+        }
+        if !attr.path().is_ident("expect") {
+            return true;
+        }
+        let Meta::List(list) = &attr.meta else {
+            return true;
+        };
+        let Ok(entries) = list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+        else {
+            return true;
+        };
+        let (reason, entries): (Vec<_>, Vec<_>) = entries.into_iter().partition(
+            |entry| matches!(entry, Meta::NameValue(entry) if entry.path.is_ident("reason")),
+        );
+        let (struct_lints, others): (Vec<_>, Vec<_>) = entries.into_iter().partition(|entry| {
+            matches!(entry, Meta::Path(path)
+                    if path.is_ident("missing_docs") || path.is_ident("dead_code"))
+        });
+        if struct_lints.is_empty() {
+            return true;
+        }
+        // The attribute, with the lints `entries` and its reason.
+        let relisted = |entries: &[Meta]| {
+            let mut attr = attr.clone();
+            if let Meta::List(list) = &mut attr.meta {
+                list.tokens = quote!(#(#entries,)* #(#reason)*);
+            }
+            attr
+        };
+        lints.push(relisted(&struct_lints));
+        if others.is_empty() {
+            return false;
+        }
+        *attr = relisted(&others);
+        true
+    });
+    lints
+}
+
+/// `tokens`, spanned at `span`.
+fn respan(tokens: TokenStream, span: Span) -> TokenStream {
+    tokens
+        .into_iter()
+        .map(|mut token| {
+            if let TokenTree::Group(group) = &token {
+                let mut respanned = Group::new(group.delimiter(), respan(group.stream(), span));
+                respanned.set_span(span);
+                token = TokenTree::Group(respanned);
+            } else {
+                token.set_span(span);
+            }
+            token
+        })
+        .collect()
 }
 
 /// The path to `browser-test`, under the name the caller's `Cargo.toml` gives it.
@@ -201,24 +403,58 @@ fn crate_path() -> manyhow::Result<TokenStream> {
     }
 }
 
-/// The `PascalCase` name of the test's struct, spanned at the function's name.
-fn struct_name(function: &Ident, function_name: &str) -> manyhow::Result<Ident> {
-    let struct_name = function_name.to_upper_camel_case();
+/// The names of the test's struct and function: `function`, which must be named in `PascalCase`,
+/// and its `snake_case` form, spanned at it.
+fn test_names(function: &Ident) -> manyhow::Result<(Ident, Ident)> {
+    let name = function.unraw().to_string();
+    if !name.starts_with(char::is_uppercase) {
+        let message = "browser tests are named in PascalCase, like the struct they define";
+        match pascal_case(function) {
+            Some(suggestion) => bail!(
+                function,
+                "{message}";
+                help = "rename the function to `{suggestion}`",
+            ),
+            None => bail!(function, "{message}"),
+        }
+    }
     ensure!(
-        !RESERVED_NAMES.contains(&struct_name.as_str()),
+        !RESERVED_NAMES.contains(&name.as_str()),
         function,
-        "a browser test named `{function_name}` would define `struct {struct_name};`, shadowing \
-         the prelude's `{struct_name}`";
+        "a browser test named `{name}` would define `struct {name};`, shadowing the prelude's \
+         `{name}`";
         help = "rename the function, and keep the test's name with `#[browser_test(name = \"...\")]`",
     );
-    let mut name = syn::parse_str::<Ident>(&struct_name).map_err(|_| {
-        error_message!(
-            function,
-            "function name must produce a valid PascalCase struct name"
-        )
-    })?;
+    let function_name = name.to_snake_case();
+    // Keywords are raw identifiers, except for those that can't be.
+    if syn::parse_str::<Ident>(&function_name).is_ok() {
+        return Ok((
+            function.clone(),
+            Ident::new(&function_name, function.span()),
+        ));
+    }
+    ensure!(
+        !["crate", "self", "super"].contains(&function_name.as_str()),
+        function,
+        "a browser test named `{name}` would define `fn {function_name}`, a keyword";
+        help = "rename the function, and keep the test's name with `#[browser_test(name = \"...\")]`",
+    );
+    Ok((
+        function.clone(),
+        Ident::new_raw(&function_name, function.span()),
+    ))
+}
+
+/// `function`'s name in `PascalCase`, spanned at it, unless that is no valid name for a test's
+/// struct.
+fn pascal_case(function: &Ident) -> Option<Ident> {
+    let name = function.unraw().to_string().to_upper_camel_case();
+    if RESERVED_NAMES.contains(&name.as_str()) {
+        return None;
+    }
+    let mut name = syn::parse_str::<Ident>(&name).ok()?;
     name.set_span(function.span());
-    Ok(name)
+    Some(name)
 }
 
 #[cfg(test)]
@@ -226,74 +462,140 @@ mod tests {
     use assertr::prelude::*;
     use manyhow::ToTokensError;
 
-    use super::{Arguments, expand};
+    use quote::ToTokens as _;
+    use syn::{Attribute, parse_quote};
+
+    use super::{Arguments, crate_path, expand_test, take_lints, test_names};
 
     #[test]
     fn invalid_signatures_explain_the_unsupported_part() {
         for (source, message) in [
             (
-                "fn test(_: &()) -> Result<(), Report> { Ok(()) }",
+                "fn Test(_: &()) -> Result<(), Report> { Ok(()) }",
                 "browser tests must be async functions",
             ),
             (
-                "async unsafe fn test() -> Result<(), Report> { Ok(()) }",
+                "async unsafe fn Test() -> Result<(), Report> { Ok(()) }",
                 "browser tests must be safe Rust functions",
             ),
             (
-                "async fn test<T>(_: &T) -> Result<(), Report> { Ok(()) }",
+                "async fn Test<T>(_: &T) -> Result<(), Report> { Ok(()) }",
                 "browser tests cannot have type or const parameters",
             ),
             (
-                "async fn test(_: &(), _: &(), _: &()) -> Result<(), Report> { Ok(()) }",
+                "async fn Test(_: &(), _: &(), _: &()) -> Result<(), Report> { Ok(()) }",
                 "expected no arguments, &Context, or &WebDriver and &Context",
             ),
             (
-                "async fn test(_: &mut ()) -> Result<(), Report> { Ok(()) }",
+                "async fn Test(_: &mut ()) -> Result<(), Report> { Ok(()) }",
                 "browser test arguments must be shared references",
             ),
             (
-                "async fn test(_: ()) -> Result<(), Report> { Ok(()) }",
+                "async fn Test(_: ()) -> Result<(), Report> { Ok(()) }",
                 "browser test arguments must be shared references",
             ),
             (
-                "async fn test(&self) -> Result<(), Report> { Ok(()) }",
+                "async fn Test(&self) -> Result<(), Report> { Ok(()) }",
                 "browser tests must be free functions",
             ),
             (
-                "async fn test(driver: &thirtyfour::WebDriver) -> Result<(), Report> { Ok(()) }",
+                "async fn Test(driver: &thirtyfour::WebDriver) -> Result<(), Report> { Ok(()) }",
                 "a single argument is the run's context, not the session's driver",
             ),
             (
-                "async fn test() {}",
+                "async fn Test(context: &str, driver: &WebDriver) -> Result<(), Report> { Ok(()) }",
+                "the second argument is the run's context, not the session's driver",
+            ),
+            (
+                "async fn Test() {}",
                 "browser tests must return Result<(), Report>",
             ),
             (
-                "async fn none() -> Result<(), Report> { Ok(()) }",
+                "async fn None() -> Result<(), Report> { Ok(()) }",
                 "shadowing the prelude's `None`",
             ),
             (
-                "async fn r#ok() -> Result<(), Report> { Ok(()) }",
+                "async fn r#Ok() -> Result<(), Report> { Ok(()) }",
                 "shadowing the prelude's `Ok`",
             ),
             (
-                "async fn result() -> Result<(), Report> { Ok(()) }",
+                "async fn Result() -> Result<(), Report> { Ok(()) }",
                 "shadowing the prelude's `Result`",
             ),
             (
-                "async fn copy() -> Result<(), Report> { Ok(()) }",
-                "shadowing the prelude's `Copy`",
+                "async fn page_title() -> Result<(), Report> { Ok(()) }",
+                "browser tests are named in PascalCase, like the struct they define",
+            ),
+            (
+                "async fn page_title() -> Result<(), Report> { Ok(()) }",
+                "rename the function to `PageTitle`",
+            ),
+            (
+                "async fn result() -> Result<(), Report> { Ok(()) }",
+                "browser tests are named in PascalCase",
             ),
             (
                 "async fn __() -> Result<(), Report> { Ok(()) }",
-                "function name must produce a valid PascalCase struct name",
+                "browser tests are named in PascalCase",
+            ),
+            (
+                "async fn Crate() -> Result<(), Report> { Ok(()) }",
+                "would define `fn crate`, a keyword",
             ),
         ] {
             let function = syn::parse_str(source).unwrap();
-            let error = expand(Arguments::default(), function)
+            let error = expand_test(Arguments::default(), &crate_path().unwrap(), function)
                 .unwrap_err()
                 .into_token_stream();
             assert_that!(error.to_string()).contains(message);
         }
+    }
+
+    #[test]
+    fn tests_are_structs_of_the_functions_name_running_its_snake_case_form() {
+        for (source, struct_name, function_name) in [
+            ("PageTitle", "PageTitle", "page_title"),
+            ("r#Type", "r#Type", "r#type"),
+            ("Loop", "Loop", "r#loop"),
+            ("HTTPServer2", "HTTPServer2", "http_server2"),
+        ] {
+            let function = syn::parse_str(source).unwrap();
+            let (name, function) = test_names(&function).unwrap();
+            assert_that!(name.to_string()).is_equal_to(struct_name);
+            assert_that!(function.to_string()).is_equal_to(function_name);
+        }
+    }
+
+    #[test]
+    fn struct_lints_are_allows_and_expected_missing_docs_and_dead_code() {
+        let mut attrs: Vec<Attribute> = vec![
+            parse_quote!(#[allow(dead_code)]),
+            parse_quote!(#[expect(missing_docs, unused_variables, reason = "generated")]),
+            parse_quote!(#[expect(missing_docs)]),
+            parse_quote!(#[expect(dead_code, unused_mut)]),
+            parse_quote!(#[expect(unused_mut)]),
+            parse_quote!(#[inline]),
+        ];
+        let lints = take_lints(&mut attrs);
+        let tokens = |attrs: &[Attribute]| {
+            attrs
+                .iter()
+                .map(|attr| attr.to_token_stream().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_that!(tokens(&lints)).contains_exactly([
+            "# [allow (dead_code)]",
+            "# [expect (missing_docs , reason = \"generated\")]",
+            "# [expect (missing_docs ,)]",
+            "# [expect (dead_code ,)]",
+        ]);
+        assert_that!(tokens(&attrs)).contains_exactly([
+            "# [allow (dead_code)]",
+            "# [expect (unused_variables , reason = \"generated\")]",
+            "# [expect (unused_mut ,)]",
+            "# [expect (unused_mut)]",
+            "# [inline]",
+        ]);
     }
 
     #[test]

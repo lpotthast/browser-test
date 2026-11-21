@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use browser_test::thirtyfour::ChromiumLikeCapabilities;
 use browser_test::{
-    BrowserTestRunReport, BrowserTestRunner, CachedData, Cancellation, Channel, ChromeBinary,
-    DriverOutput, ElementQueryWait, FailurePolicy, Parallelism, Pause, ProgressWarnings,
-    SessionReset, SessionReuse, StderrSummary, TestFilter, TestSuite, Timeouts, Visibility,
+    BrowserTestRunner, CachedData, Cancellation, Channel, ChromeBinary, DriverOutput,
+    ElementQueryWait, FailurePolicy, Parallelism, Pause, ProgressWarnings, RunReport, SessionReset,
+    SessionReuse, StderrSummary, TestFilter, TestSuite, Timeouts, Visibility,
 };
 use rootcause::Report;
 use rootcause::hooks::Hooks;
@@ -64,8 +64,7 @@ async fn main() -> Result<(), Report> {
     )
     .with(TitleContainsWikipedia)
     .with(SearchInputIsVisible)
-    .with(EditionIsLinked { language: "en" })
-    .with(EditionIsLinked { language: "de" });
+    .with_all(["en", "de"].map(|language| EditionIsLinked { language }));
 
     // Set `BROWSER_TEST_VISIBLE=0` to run headless, in Chrome Headless Shell.
     let visibility = Visibility::from_env()
@@ -109,7 +108,7 @@ async fn main() -> Result<(), Report> {
         .with_driver_output(
             DriverOutput::from_env()
                 .context("Reading the driver output setting")?
-                .unwrap_or(DriverOutput::tail_lines(100)),
+                .unwrap_or(DriverOutput::enabled().with_tail_lines(100)),
         )
         .with_session_reuse(
             SessionReuse::from_env()
@@ -127,12 +126,12 @@ async fn main() -> Result<(), Report> {
         })
         .with_progress_warnings(
             ProgressWarnings::default()
-                .with_test_running(Some(Duration::from_secs(20)))
-                .with_session(Some(Duration::from_secs(10)))
-                .with_slow_step(Some(Duration::from_secs(3))),
+                .with_test_running(Duration::from_secs(20))
+                .with_session(Duration::from_secs(10))
+                .with_slow_step(Duration::from_secs(3)),
         )
         .with_report_consumer(StderrSummary)
-        .with_report_consumer(|report: &BrowserTestRunReport| {
+        .with_report_consumer(|report: &RunReport| {
             tracing::info!(
                 sessions_created = report.sessions_created(),
                 session_resets = report.session_resets(),

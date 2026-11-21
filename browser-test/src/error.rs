@@ -3,6 +3,14 @@ use std::time::Duration;
 use crate::report::FormatDuration;
 
 /// Error contexts reported by browser-test runner operations.
+///
+/// The error of a failed test is one of [`Self::RunTest`], [`Self::PrepareSession`],
+/// [`Self::Panic`] and [`Self::TimedOut`]. These appear only as child reports of
+/// [`Self::RunTests`], never as the error a run returns. A cancelled run returns
+/// [`Self::Cancelled`], with the run's other error, if any, as its child.
+///
+/// The enum and its variants with fields are `#[non_exhaustive]`, so that they can gain variants
+/// and fields: match the fields with `..`, e.g. `BrowserTestError::RunTests { failed_tests, .. }`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum BrowserTestError {
@@ -10,8 +18,10 @@ pub enum BrowserTestError {
     #[error("Failed to launch Chrome for Testing.")]
     LaunchChromeForTesting,
 
-    /// A browser test failed while running in its `WebDriver` session.
+    /// A browser test failed while running in its `WebDriver` session. A child of
+    /// [`Self::RunTests`].
     #[error("Browser test '{test_name}' failed.")]
+    #[non_exhaustive]
     RunTest {
         /// The test name reported by [`crate::BrowserTest::name`].
         test_name: String,
@@ -19,14 +29,18 @@ pub enum BrowserTestError {
 
     /// The `WebDriver` session of a browser test could not be prepared: it could not be created,
     /// ended before the test started, or did not accept the test's timeouts. The test did not run.
+    /// A child of [`Self::RunTests`].
     #[error("The browser session of browser test '{test_name}' could not be prepared.")]
+    #[non_exhaustive]
     PrepareSession {
         /// The test name reported by [`crate::BrowserTest::name`].
         test_name: String,
     },
 
-    /// A browser test panicked while running in its `WebDriver` session.
+    /// A browser test panicked while running in its `WebDriver` session. A child of
+    /// [`Self::RunTests`].
     #[error("Browser test '{test_name}' panicked: {message}")]
+    #[non_exhaustive]
     Panic {
         /// The test name reported by [`crate::BrowserTest::name`].
         test_name: String,
@@ -36,8 +50,10 @@ pub enum BrowserTestError {
 
     /// A browser test ran longer than its time limit (see
     /// [`BrowserTestRunner::with_time_limit`](crate::BrowserTestRunner::with_time_limit) and
-    /// [`TestSettings::with_time_limit`](crate::TestSettings::with_time_limit)).
+    /// [`TestSettings::with_time_limit`](crate::TestSettings::with_time_limit)). A child of
+    /// [`Self::RunTests`].
     #[error("Browser test '{test_name}' exceeded its time limit of {}.", FormatDuration(*limit))]
+    #[non_exhaustive]
     TimedOut {
         /// The test name reported by [`crate::BrowserTest::name`].
         test_name: String,
@@ -48,6 +64,7 @@ pub enum BrowserTestError {
     /// One or more browser tests failed, panicked, or timed out. Each failure is a child report, in
     /// test order. Returned for every run in which a test failed.
     #[error("One or more browser tests failed, panicked or timed out ({failed_tests} failed).")]
+    #[non_exhaustive]
     RunTests {
         /// Number of failed, panicked, or timed out tests collected as child reports.
         failed_tests: usize,
@@ -61,6 +78,7 @@ pub enum BrowserTestError {
         "The test filter selected no test (name patterns: {name_patterns:?}, tag patterns: \
          {tag_patterns:?})."
     )]
+    #[non_exhaustive]
     NoTestSelected {
         /// The filter's name patterns, as written.
         name_patterns: Vec<String>,

@@ -1,0 +1,11 @@
+error[E0433]: cannot find module or crate `not_browser_test` in this scope
+ --> tests/ui/crate_path.rs:4:24
+  |
+4 | #[browser_test(crate = not_browser_test)]
+  |                        ^^^^^^^^^^^^^^^^ use of unresolved module or unlinked crate `not_browser_test`
+  |
+help: there is a crate or module with a similar name
+  |
+4 - #[browser_test(crate = not_browser_test)]
+4 + #[browser_test(crate = browser_test)]
+  |

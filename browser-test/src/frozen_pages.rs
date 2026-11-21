@@ -7,7 +7,9 @@
 //! module talks to its `DevTools` endpoint directly, over one `WebSocket` to the browser in flat
 //! mode (found through the session's `goog:chromeOptions.debuggerAddress`): it lists the pages and
 //! frames of the session, attaches to each, and one that doesn't answer a `Runtime.evaluate` in
-//! time is frozen. Closing it ends the commands waiting for it.
+//! time is frozen, unless it waits for a dialog, which the browser tells once the page's events
+//! are enabled. Closing it ends the commands waiting for it. One that the browser still lists
+//! shortly after has its renderer crashed.
 //!
 //! thirtyfour's `CdpSession` finds the same endpoint, but attaches to one page only, and can
 //! neither address other pages nor the browser itself.
@@ -34,6 +36,12 @@ const ENDPOINT_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long checking the pages of a session may take overall.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// How long a closed page may still be listed before its renderer is crashed.
+const CLOSE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// How often the pages are listed meanwhile.
+const CLOSE_CONFIRM_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Chrome's error for a target that closed meanwhile.
 const NO_TARGET: &str = "No target with given id found";
 
@@ -59,6 +67,8 @@ pub(crate) struct FrozenPage {
     frame: bool,
     /// Why closing it failed.
     close_error: Option<String>,
+    /// Whether it only closed once its renderer was crashed.
+    crashed: bool,
 }
 
 impl fmt::Display for PageCheck {
@@ -76,19 +86,19 @@ impl fmt::Display for PageCheck {
                 let (pages, threads, closed) = match frozen.as_slice() {
                     [_] => (
                         "its page".to_owned(),
-                        "its main thread never yields",
+                        "its main thread may never yield",
                         "it was",
                     ),
                     _ => (
                         format!("{} of its pages", frozen.len()),
-                        "their main threads never yield",
+                        "their main threads may never yield",
                         "they were",
                     ),
                 };
                 write!(
                     f,
-                    "Frozen: {pages} didn't respond within {}s ({threads}, e.g. to an endless \
-                     chain of microtasks)",
+                    "Frozen: {pages} didn't respond within {}s to a script ({threads}, e.g. to \
+                     an endless chain of microtasks)",
                     RESPONSE_TIMEOUT.as_secs(),
                 )?;
                 if frozen.iter().all(|page| page.close_error.is_none()) {
@@ -100,6 +110,9 @@ impl fmt::Display for PageCheck {
                     write!(f, "\n  {}", page.url)?;
                     if page.frame {
                         f.write_str(" (a frame)")?;
+                    }
+                    if page.crashed {
+                        f.write_str(" (by crashing its renderer)")?;
                     }
                     if let Some(error) = &page.close_error {
                         write!(f, " (could not be closed: {error})")?;
@@ -124,54 +137,102 @@ fn write_unchecked(f: &mut fmt::Formatter<'_>, unchecked: &[String]) -> fmt::Res
     Ok(())
 }
 
-// Reports are printed with `Debug` too (a `main` or test returning `Err`): attachments read the same.
-impl fmt::Debug for PageCheck {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, f)
-    }
-}
+crate::failure_report::debug_as_display!(PageCheck);
 
 /// Check every page of `session` and close the frozen ones, unless a dialog is open.
 pub(crate) async fn close_frozen_pages(session: &WebDriver) -> PageCheck {
-    tokio::time::timeout(CHECK_TIMEOUT, try_close_frozen_pages(session))
-        .await
-        .unwrap_or_else(|_| {
-            Err(format!(
-                "checking them took longer than {}s",
-                CHECK_TIMEOUT.as_secs()
-            ))
-        })
-        .unwrap_or_else(PageCheck::Unknown)
+    let mut findings = Findings::default();
+    let checked = tokio::time::timeout(
+        CHECK_TIMEOUT,
+        try_close_frozen_pages(session, &mut findings),
+    )
+    .await;
+    let reason = match checked {
+        Ok(Ok(check)) => return check,
+        Ok(Err(reason)) => reason,
+        Err(_) => format!(
+            "checking them took longer than {}s",
+            CHECK_TIMEOUT.as_secs()
+        ),
+    };
+    // The frozen pages found before the check ended are named all the same.
+    if findings.frozen.is_empty() {
+        return PageCheck::Unknown(reason);
+    }
+    findings
+        .unchecked
+        .push(format!("the check ended early, as {reason}"));
+    PageCheck::Checked {
+        frozen: findings.frozen,
+        unchecked: findings.unchecked,
+    }
 }
 
-async fn try_close_frozen_pages(session: &WebDriver) -> Result<PageCheck, String> {
+/// What a check of the pages found so far.
+#[derive(Default)]
+struct Findings {
+    frozen: Vec<FrozenPage>,
+    unchecked: Vec<String>,
+}
+
+async fn try_close_frozen_pages(
+    session: &WebDriver,
+    findings: &mut Findings,
+) -> Result<PageCheck, String> {
     let mut browser = Browser::connect(session).await?;
-    let targets = browser.call("Target.getTargets", json!({})).await?;
-    let targets: Vec<Target> = targets
-        .get("targetInfos")
-        .and_then(Value::as_array)
-        .ok_or("the list of pages has no `targetInfos`")?
-        .iter()
-        .filter_map(Target::from_info)
-        .collect();
-    let mut unchecked = Vec::new();
-    let unanswered = browser.unanswered(&targets, &mut unchecked);
+    let targets = browser.targets().await?;
+    let unanswered = browser.unanswered(&targets, &mut findings.unchecked);
     // A dialog blocks its page as well, but not the session: `ChromeDriver` answers.
     let (unanswered, dialog) = tokio::join!(unanswered, open_dialog(session));
     let unanswered = unanswered?;
     if let Some(text) = dialog {
         return Ok(PageCheck::Dialog(text));
     }
-    let frozen = browser.close(&unanswered).await?;
-    Ok(PageCheck::Checked { frozen, unchecked })
+    findings.frozen = unanswered
+        .iter()
+        .map(|unanswered| FrozenPage {
+            url: unanswered.target.url.clone(),
+            frame: unanswered.target.frame,
+            close_error: Some("the check ended before it was closed".to_owned()),
+            crashed: false,
+        })
+        .collect();
+    browser.close(&unanswered, &mut findings.frozen).await?;
+    Ok(PageCheck::Checked {
+        frozen: std::mem::take(&mut findings.frozen),
+        unchecked: std::mem::take(&mut findings.unchecked),
+    })
 }
 
-/// The text of the session's open dialog, if `ChromeDriver` answers within [`RESPONSE_TIMEOUT`].
+/// The text of a dialog open in one of the session's windows, if `ChromeDriver` answers within
+/// [`RESPONSE_TIMEOUT`]. It only tells the dialog of the current window, so this switches to the
+/// others in turn, and back.
 async fn open_dialog(session: &WebDriver) -> Option<String> {
-    tokio::time::timeout(RESPONSE_TIMEOUT, session.get_alert_text())
+    let find = async {
+        if let Ok(text) = session.get_alert_text().await {
+            return Some(text);
+        }
+        let current = session.window().await.ok();
+        let mut dialog = None;
+        for window in session.windows().await.ok()? {
+            if Some(&window) == current.as_ref() || session.switch_to_window(window).await.is_err()
+            {
+                continue;
+            }
+            dialog = session.get_alert_text().await.ok();
+            if dialog.is_some() {
+                break;
+            }
+        }
+        if let Some(current) = current {
+            let _ = session.switch_to_window(current).await;
+        }
+        dialog
+    };
+    tokio::time::timeout(RESPONSE_TIMEOUT, find)
         .await
-        .ok()?
         .ok()
+        .flatten()
 }
 
 /// A page or out-of-process frame of the browser.
@@ -309,6 +370,18 @@ impl Browser {
             .map_err(|error| format!("`{method}` failed: {error}"))
     }
 
+    /// The pages and frames of the browser.
+    async fn targets(&mut self) -> Result<Vec<Target>, String> {
+        let targets = self.call("Target.getTargets", json!({})).await?;
+        Ok(targets
+            .get("targetInfos")
+            .and_then(Value::as_array)
+            .ok_or("the list of pages has no `targetInfos`")?
+            .iter()
+            .filter_map(Target::from_info)
+            .collect())
+    }
+
     /// The targets of `targets` that don't evaluate a script within [`RESPONSE_TIMEOUT`]. Why one
     /// could not be checked is added to `unchecked`. A target that closed meanwhile doesn't block
     /// the session and is left out.
@@ -316,7 +389,7 @@ impl Browser {
         &mut self,
         targets: &'t [Target],
         unchecked: &mut Vec<String>,
-    ) -> Result<Vec<&'t Target>, String> {
+    ) -> Result<Vec<Unanswered<'t>>, String> {
         let mut attach_ids = Vec::new();
         for target in targets {
             let params = json!({ "targetId": target.id, "flatten": true });
@@ -345,7 +418,7 @@ impl Browser {
             let probe = self
                 .send("Runtime.evaluate", params, Some(&session))
                 .await?;
-            probes.push((target, probe));
+            probes.push((Unanswered { target, session }, probe));
         }
         let ids: Vec<u64> = probes.iter().map(|(_, id)| *id).collect();
         // Any reply counts, an error as well: something answered.
@@ -353,39 +426,97 @@ impl Browser {
         Ok(probes
             .into_iter()
             .filter(|(_, id)| !answered.contains_key(id))
-            .map(|(target, _)| target)
+            .map(|(unanswered, _)| unanswered)
             .collect())
     }
 
-    /// Close `targets`, all at once.
-    async fn close(&mut self, targets: &[&Target]) -> Result<Vec<FrozenPage>, String> {
+    /// Close `unanswered`, all at once, recording the outcome in `frozen`, their pages. Closing
+    /// a page asks its renderer first, so one that still lists after
+    /// [`CLOSE_CONFIRM_TIMEOUT`] has its renderer crashed.
+    async fn close(
+        &mut self,
+        unanswered: &[Unanswered<'_>],
+        frozen: &mut [FrozenPage],
+    ) -> Result<(), String> {
         let mut ids = Vec::new();
-        for target in targets {
-            let params = json!({ "targetId": target.id });
+        for unanswered in unanswered {
+            let params = json!({ "targetId": unanswered.target.id });
             ids.push(self.send("Target.closeTarget", params, None).await?);
         }
         let mut replies = self.replies(&ids, ENDPOINT_TIMEOUT).await?;
-        Ok(targets
-            .iter()
-            .zip(ids)
-            .map(|(target, id)| {
-                let close_error = match replies.remove(&id) {
-                    Some(Ok(reply)) if reply.get("success") == Some(&Value::Bool(false)) => {
-                        Some("the browser refused".to_owned())
-                    }
-                    Some(Ok(_)) => None,
-                    Some(Err(error)) if error == NO_TARGET => None,
-                    Some(Err(error)) => Some(error),
-                    None => Some(format!("no answer within {}s", ENDPOINT_TIMEOUT.as_secs())),
-                };
-                FrozenPage {
-                    url: target.url.clone(),
-                    frame: target.frame,
-                    close_error,
+        for (page, id) in frozen.iter_mut().zip(ids) {
+            page.close_error = match replies.remove(&id) {
+                Some(Ok(reply)) if reply.get("success") == Some(&Value::Bool(false)) => {
+                    Some("the browser refused".to_owned())
                 }
-            })
-            .collect())
+                Some(Ok(_)) => None,
+                Some(Err(error)) if error == NO_TARGET => None,
+                Some(Err(error)) => Some(error),
+                None => Some(format!("no answer within {}s", ENDPOINT_TIMEOUT.as_secs())),
+            };
+        }
+
+        let closed: Vec<&Unanswered<'_>> = unanswered
+            .iter()
+            .zip(frozen.iter())
+            .filter(|(_, page)| page.close_error.is_none())
+            .map(|(unanswered, _)| unanswered)
+            .collect();
+        let lingering = self.lingering(&closed).await?;
+        if lingering.is_empty() {
+            return Ok(());
+        }
+        let mut crash_ids = Vec::new();
+        for unanswered in &lingering {
+            let session = Some(unanswered.session.as_str());
+            crash_ids.push(self.send("Page.crash", json!({}), session).await?);
+        }
+        // A crashing renderer may not answer.
+        self.replies(&crash_ids, RESPONSE_TIMEOUT).await?;
+        let still_lingering = self.lingering(&lingering).await?;
+        for (unanswered, page) in unanswered.iter().zip(frozen.iter_mut()) {
+            let id = &unanswered.target.id;
+            if still_lingering
+                .iter()
+                .any(|lingering| &lingering.target.id == id)
+            {
+                page.close_error =
+                    Some("it stayed open, even after crashing its renderer".to_owned());
+            } else if lingering.iter().any(|lingering| &lingering.target.id == id) {
+                page.crashed = true;
+            }
+        }
+        Ok(())
     }
+
+    /// The targets of `closed` that the browser still lists after [`CLOSE_CONFIRM_TIMEOUT`].
+    async fn lingering<'u, 't>(
+        &mut self,
+        closed: &[&'u Unanswered<'t>],
+    ) -> Result<Vec<&'u Unanswered<'t>>, String> {
+        let deadline = Instant::now() + CLOSE_CONFIRM_TIMEOUT;
+        loop {
+            if closed.is_empty() {
+                return Ok(Vec::new());
+            }
+            let targets = self.targets().await?;
+            let lingering: Vec<_> = closed
+                .iter()
+                .copied()
+                .filter(|closed| targets.iter().any(|target| target.id == closed.target.id))
+                .collect();
+            if lingering.is_empty() || Instant::now() >= deadline {
+                return Ok(lingering);
+            }
+            tokio::time::sleep(CLOSE_CONFIRM_INTERVAL).await;
+        }
+    }
+}
+
+/// A target that didn't answer in time, and the session attached to it.
+struct Unanswered<'t> {
+    target: &'t Target,
+    session: String,
 }
 
 /// The `WebSocket` URL of the browser listening on `address`.
@@ -424,6 +555,7 @@ mod tests {
             url: url.to_owned(),
             frame,
             close_error: close_error.map(str::to_owned),
+            crashed: false,
         }
     }
 
@@ -434,8 +566,8 @@ mod tests {
             unchecked: Vec::new(),
         };
         assert_that!(check.to_string()).is_equal_to(
-            "Frozen: its page didn't respond within 2s (its main thread never yields, e.g. to an \
-             endless chain of microtasks), so it was closed:\n  http://a/"
+            "Frozen: its page didn't respond within 2s to a script (its main thread may never \
+             yield, e.g. to an endless chain of microtasks), so it was closed:\n  http://a/"
                 .to_owned(),
         );
     }
@@ -446,14 +578,18 @@ mod tests {
             frozen: vec![
                 frozen("http://a/", false, None),
                 frozen("http://b/", true, Some("the browser refused")),
+                FrozenPage {
+                    crashed: true,
+                    ..frozen("http://c/", false, None)
+                },
             ],
-            unchecked: vec!["http://c/ could not be attached to in time".to_owned()],
+            unchecked: vec!["http://d/ could not be attached to in time".to_owned()],
         };
         assert_that!(check.to_string()).is_equal_to(
-            "Frozen: 2 of its pages didn't respond within 2s (their main threads never yield, \
-             e.g. to an endless chain of microtasks):\n  http://a/\n  http://b/ (a frame) (could \
-             not be closed: the browser refused)\nSome could not be checked:\n  http://c/ could \
-             not be attached to in time"
+            "Frozen: 3 of its pages didn't respond within 2s to a script (their main threads may \
+             never yield, e.g. to an endless chain of microtasks):\n  http://a/\n  http://b/ (a \
+             frame) (could not be closed: the browser refused)\n  http://c/ (by crashing its \
+             renderer)\nSome could not be checked:\n  http://d/ could not be attached to in time"
                 .to_owned(),
         );
     }

@@ -1,13 +1,8 @@
 error[E0277]: browser tests must return `Result<(), rootcause::Report>` or `Result<(), rootcause::Report<E>>`, not `Result<(), String>`
- --> tests/ui/wrong_result.rs:4:37
+ --> tests/ui/wrong_result.rs:4:35
   |
-4 | async fn returns_string_errors() -> Result<(), String> {
-  |                                     ^^^^^^^^^^^^^^^^^^ this browser test returns `Result<(), String>`
+4 | async fn ReturnsStringErrors() -> Result<(), String> {
+  |                                   ^^^^^^^^^^^^^^^^^^ this browser test returns `Result<(), String>`
   |
   = help: the trait `browser_test::__private::TestResult` is not implemented for `Result<(), String>`
   = note: any error converts into a `rootcause::Report` with `?`
-help: the trait `browser_test::__private::TestResult` is implemented for `Result<(), rootcause::report::owned::limit_field_access::Report<E>>`
- --> $WORKSPACE/browser-test/src/lib.rs
-  |
-  |     impl<E: ?Sized + 'static> TestResult for Result<(), Report<E>> {
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

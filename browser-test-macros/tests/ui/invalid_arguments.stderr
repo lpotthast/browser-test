@@ -1,0 +1,35 @@
+error: expected `name = "..."`, `tags = ["..."]`, `time_limit = <Duration>` or `crate = <path>`
+ --> tests/ui/invalid_arguments.rs:4:16
+  |
+4 | #[browser_test(path = "/checkout")]
+  |                ^^^^
+
+error: duplicate `name` argument
+ --> tests/ui/invalid_arguments.rs:9:30
+  |
+9 | #[browser_test(name = "one", name = "two")]
+  |                              ^^^^
+
+error: test names must not be empty
+  --> tests/ui/invalid_arguments.rs:14:23
+   |
+14 | #[browser_test(name = "")]
+   |                       ^^
+
+error: expected square brackets
+  --> tests/ui/invalid_arguments.rs:19:23
+   |
+19 | #[browser_test(tags = "smoke")]
+   |                       ^^^^^^^
+
+error: tags must not be empty
+  --> tests/ui/invalid_arguments.rs:24:33
+   |
+24 | #[browser_test(tags = ["smoke", ""])]
+   |                                 ^^
+
+error: duplicate tag
+  --> tests/ui/invalid_arguments.rs:29:45
+   |
+29 | #[browser_test(tags = ["smoke", "keyboard", "smoke"])]
+   |                                             ^^^^^^^
